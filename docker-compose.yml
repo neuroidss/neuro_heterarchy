@@ -1,0 +1,56 @@
+services:
+  # 1. Сервер диффузии (LCM / SD-Turbo)
+  brain-server:
+    build: .
+    container_name: neuro_brain_server
+    command: python3 brain_server.py --mode lcm
+    network_mode: host
+    ipc: host
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # 2. Единый Веб-Шлюз: Web UI, MJPEG видео (8080) и приемник BLE в LSL
+  web-gateway:
+    build: .
+    container_name: neuro_web_gateway
+    command: python3 web_cloud_gateway.py 8080
+    network_mode: host
+    ipc: host
+    depends_on:
+      - brain-server
+    restart: unless-stopped
+
+  # 3. Основной генеративный движок (Headless BCI ядро)
+  neuro-canvas:
+    build: .
+    container_name: neuro_canvas_engine
+    command: >
+      python3 neuro_open_latent_genesis_live.py
+      --headless
+      --lore world_lore.txt
+      --steps 2
+      --strength-low 0.65
+      --burst-strength 0.85
+    network_mode: host
+    ipc: host
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - brain-server
+      - web-gateway
+    restart: unless-stopped
