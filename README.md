@@ -33,9 +33,10 @@
    - 5.1 [Structural Decoupling (`neuro_genesis_engine` vs `neuro_hud` vs runner)](#51-structural-decoupling-neuro_genesis_engine-vs-neuro_hud-vs-runner)
    - 5.2 [Dynamic Hot-Switching of Device Roles at Runtime (Zero Restarts)](#52-dynamic-hot-switching-of-device-roles-at-runtime-zero-restarts)
    - 5.3 [Headless Mode & Server Isolation](#53-headless-mode--server-isolation)
-6. [Interactive Keybindings & HUD Instrumentation](#6-interactive-keybindings--hud-instrumentation)
-7. [CLI Configuration Reference](#7-cli-configuration-reference)
-8. [Comprehensive Scientific Bibliography & DOIs](#8-comprehensive-scientific-bibliography--dois)
+6. [Docker Compose Production Deployment](#6-docker-compose-production-deployment)
+7. [Interactive Keybindings & HUD Instrumentation](#6-interactive-keybindings--hud-instrumentation)
+8. [CLI Configuration Reference](#7-cli-configuration-reference)
+9. [Comprehensive Scientific Bibliography & DOIs](#8-comprehensive-scientific-bibliography--dois)
 
 ---
 
@@ -257,7 +258,87 @@ When executed with `--headless`:
 
 ---
 
-## 6. Interactive Keybindings & HUD Instrumentation
+## 6. Docker Compose Production Deployment
+
+The entire system is orchestrated via Docker Compose with full NVIDIA GPU passthrough, host networking (mandatory for LSL multicast resolution), and **Hugging Face model volume caching** so models are downloaded once and never redownloaded on container restarts.
+
+### 1. `docker-compose.yml`
+
+```yaml
+services:
+  # 1. Diffusion U-Net Worker (Port 6000)
+  brain-server:
+    build: .
+    container_name: neuro_brain_server
+    command: python3 brain_server.py --mode lcm
+    network_mode: host
+    ipc: host
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # 2. Web UI, Web Bluetooth & Stream Gateway (Port 8080 & IPC 6002)
+  web-gateway:
+    build: .
+    container_name: neuro_web_gateway
+    command: python3 web_cloud_gateway.py 8080
+    network_mode: host
+    ipc: host
+    depends_on:
+      - brain-server
+    restart: unless-stopped
+
+  # 3. Headless BCI Genesis Core
+  neuro-canvas:
+    build: .
+    container_name: neuro_canvas_engine
+    command: >
+      python3 neuro_open_latent_genesis_live.py
+      --headless
+      --lore world_lore.txt
+      --steps 2
+      --strength-low 0.65
+      --burst-strength 0.85
+    network_mode: host
+    ipc: host
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - brain-server
+      - web-gateway
+    restart: unless-stopped
+```
+
+### 2. Launching with Docker Compose
+
+```bash
+# Build and launch all three microservices in detached mode
+docker compose up --build -d
+
+# Follow generation logs and LSL routing
+docker compose logs -f neuro-canvas
+
+# Open the Web UI in your browser:
+# http://localhost:8080/
+```
+
+---
+
+## 7. Interactive Keybindings & HUD Instrumentation
 
 ```
   KEY               ACTION                                NEUROCOMPUTATIONAL FUNCTION
@@ -287,7 +368,7 @@ When executed with `--headless`:
 
 ---
 
-## 7. CLI Configuration Reference
+## 8. CLI Configuration Reference
 
 ```bash
 # Minimal single-sensor test (F3 isolated, 100 Hz Gamma, no faking)
@@ -342,7 +423,7 @@ python3 neuro_open_latent_genesis_live.py \
 
 ---
 
-## 8. Comprehensive Scientific Bibliography & DOIs
+## 9. Comprehensive Scientific Bibliography & DOIs
 
 1. **Fan, Y., Wang, M., Ding, N., & Luo, H. (2024).** Two-dimensional neural geometry underpins hierarchical organization of sequence in human working memory. *Nature Human Behaviour*, 8, 2150–2163. [DOI: 10.1038/s41562-024-02047-8](https://doi.org/10.1038/s41562-024-02047-8)
 2. **Chen, J., Zhang, C., Hu, P., Min, B., & Wang, L. (2024).** Flexible control of sequence working memory in the macaque frontal cortex. *Neuron*, 112(20), 3502–3514. [DOI: 10.1016/j.neuron.2024.07.024](https://doi.org/10.1016/j.neuron.2024.07.024)
