@@ -20,7 +20,7 @@
    - 2.2 [The Zero-Power Principle: Why Scalar FFT Power is Obsolete](#22-the-zero-power-principle-why-scalar-fft-power-is-obsolete)
    - 2.3 [Universal Column Engine vs. Regional Generative Modality](#23-universal-column-engine-vs-regional-generative-modality)
 3. [Multi-Scale Oscillatory Hierarchy & 2D Neural Geometry](#3-multi-scale-oscillatory-hierarchy--2d-neural-geometry)
-   - 3.1 [Continuous PAC Chronometer ($K_\theta = f_\theta / f_\delta$)](#31-continuous-pac-chronometer-k_\theta--f_\theta--f_\delta)
+   - 3.1 [Continuous PAC Chronometer (K_θ = f_θ / f_δ)](#31-continuous-pac-chronometer-k_θ--f_θ--f_δ)
    - 3.2 [Two-Phase Theta Chronology & Past–Future Vector ($r_y$)](#32-two-phase-theta-chronology--pastfuture-vector-r_y)
    - 3.3 [2D Orthogonal SWM Rank Manifold (Fan 2024 / Chen 2024)](#33-2d-orthogonal-swm-rank-manifold-fan-2024--chen-2024)
    - 3.4 [89.5 Hz Cortical Ripple Causal DAG & Gram-Schmidt Tree (Dickey 2022)](#34-895-hz-cortical-ripple-causal-dag--gram-schmidt-tree-dickey-2022)
@@ -117,7 +117,7 @@ Maps the universal tree into the specific generative degrees of freedom of diffu
   Maximum Gamma Limit   up to 100.0 Hz  Tunable (--gamma-max)    Full High-Frequency Tracking
 ```
 
-### 3.1 Continuous PAC Chronometer ($K_\theta = f_\theta / f_\delta$)
+### 3.1 Continuous PAC Chronometer (K_θ = f_θ / f_δ)
 Working memory capacity is dynamic (*Lisman & Jensen, 2013; Axmacher et al., 2010*):
 $$K_\theta(t) = \text{clamp}\left( \text{round}\left( \frac{f_\theta(t)}{f_\delta(t)} \right), 2, 8 \right), \quad S(t) = 2 \times K_\theta(t) \in [4, 16] \text{ active phase sectors}$$
 The engine resamples the continuous 120-dipole state into exactly $S(t)$ temporal sectors via GPU 1D adaptive average pooling (`torch.nn.functional.adaptive_avg_pool1d`) without host–device synchronization stalls.
