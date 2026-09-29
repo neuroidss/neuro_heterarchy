@@ -179,7 +179,9 @@ $$\text{Attention}(Q, K) = \text{Softmax}\left(\frac{Q \cdot K^T}{\sqrt{d}}\righ
 This flattens attention distributions across the canvas, destroying fine details and turning landscapes into flat watercolor mud.
 
 **The Fix:**
+
 $$\mathbf{T}_{\text{calibrated}} = \frac{\mathbf{T}}{\|\mathbf{T}\|_2 + \epsilon} \odot \|\mathbf{T}_{\text{clean CLIP}}\|_2$$
+
 Furthermore, 120-dipole neural injections target **only semantic tokens ($1 \dots S$)**, preserving structural anchor tokens ($0$: `<|startoftext|>` and trailing padding), keeping Cross-Attention razor-sharp.
 
 ### 4.2 Elimination of the Recursive Pixel-Blur Loop (`cv2.addWeighted`)
