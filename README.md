@@ -144,9 +144,7 @@ The coordinate $(x_L, y_G)$ glides smoothly across the 2D working memory manifol
 ### 3.4 89.5 Hz Cortical Ripple Causal DAG & Gram-Schmidt Tree (Dickey 2022)
 Volume-conduction-free directed phase locking across all 120 electrode pairs is computed at 89.5 Hz (*Dickey et al., PNAS 2022; Bruña et al., J Neural Eng 2018*):
 
-```math
-ci\(\mathrm{PLV}_{i, j} = \frac\){\(\frac{1}{T} \sum_{t=1}^T \Im \left\)( z_i(t) z_j^*(t) \(\right\))}\({\sqrt{1 - \left( \frac{1}{T} \sum_{t=1}^T \Re \left( z_i(t) z_j^*(t) \right) \right)^2}} \%\%\)MAGIT_PARSER_PROTECT%%
-```
+$$ci\operatorname{PLV}_{i, j} = \frac{\frac{1}{T} \sum_{t=1}^T \Im \left( z_i(t) z_j^*(t) \right)}{\sqrt{1 - \left( \frac{1}{T} \sum_{t=1}^T \Re \left( z_i(t) z_j^*(t) \right) \right)^2}}$$
 
 The pairwise causal lead matrix between temporal slots is calculated on GPU:
 
@@ -162,13 +160,9 @@ $$\mathbf{T}{B}^{\perp} = \mathbf{T}B - \frac{\langle \mathbf{T}B, \mathbf{T}_{\
 ### 3.5 Genuine Cosine Delta Stability & World Seal Unlocking
 World Seals do not rely on dummy counters. Stability is evaluated by comparing the 768-D slot vector between cycle $t$ and cycle $t-1$:
 
-```math
-\(\mathrm{drift\_cos}_s = \frac{\langle \mathbf{z}_{\text{slot}}(s, t), \mathbf{z}_{\text{slot}}(s, t-1) \rangle}\){\(\vert{}\mathbf{z}_{\text{slot}}(s, t)\vert{} \vert{}\mathbf{z}_{\text{slot}}\)(s, t-1)|}
-```
+$$\operatorname{drift\_cos}_s = \frac{\langle \mathbf{z}_{\text{slot}}(s, t), \mathbf{z}_{\text{slot}}(s, t-1) \rangle}{|\mathbf{z}_{\text{slot}}(s, t)| |\mathbf{z}_{\text{slot}}(s, t-1)|}$$
 
-```math
-\(\mathrm{stability}_s = (0.5 \cdot \mathrm{drift\_cos}_s + 0.5) \times (0.2 + 0.8 \cdot R_{\mathrm{kuramoto}}) \%\%\)MAGIT_PARSER_PROTECT%%
-```
+$$\operatorname{stability}_s = (0.5 \cdot \operatorname{drift\_cos}_s + 0.5) \times (0.2 + 0.8 \cdot R_{\text{kuramoto}})$$
 
 * **Locking:** When $\text{stability}_s \ge \text{--seal-thresh}$ for `--seal-cycles` consecutive delta periods, the slot crystallizes into an immutable World Seal.
 * **Unlocking:** When mental focus shifts and $\text{stability}_s < \text{--seal-thresh}$, the charge decays at the rate of `--decay-cycles`. When charge drops below 20%, **the seal dissolves and unlocks automatically**. Setting `--seal-thresh 1.0` disables sealing completely.
