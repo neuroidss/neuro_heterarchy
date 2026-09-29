@@ -127,7 +127,9 @@ Following *Colgin et al. (Nature, 2009)* and *Bieri et al. (Neuron, 2014)*:
 * **Slot 0 (Early Descending Theta Phase, $\sim 257^\circ$, Slow Gamma):** Encodes the **Past / Memory Anchor ($\mathbf{z}_{\text{past}}$)**.
 * **Slot 31 (Theta Trough, $\sim 329^\circ$, Fast Gamma):** Encodes the **Future / Lookahead Intention ($\mathbf{z}_{\text{future}}$)**.
 * **Temporal Bias ($r_y$):** Evaluates the directional momentum of thought:
+
   $$r_y = \frac{\|\mathbf{z}_{\text{future}}\| - \|\mathbf{z}_{\text{past}}\|}{\|\mathbf{z}_{\text{future}}\| + \|\mathbf{z}_{\text{past}}\| + \epsilon} \in [-1.0, +1.0]$$
+  
   Modulates transformation velocity without spatial dislocation.
 
 ### 3.3 2D Orthogonal SWM Rank Manifold (Fan 2024 / Chen 2024)
@@ -141,19 +143,27 @@ The coordinate $(x_L, y_G)$ glides smoothly across the 2D working memory manifol
 
 ### 3.4 89.5 Hz Cortical Ripple Causal DAG & Gram-Schmidt Tree (Dickey 2022)
 Volume-conduction-free directed phase locking across all 120 electrode pairs is computed at 89.5 Hz (*Dickey et al., PNAS 2022; Bruña et al., J Neural Eng 2018*):
+
 $$ci\text{PLV}_{i, j} = \frac{\frac{1}{T} \sum_{t=1}^T \Im \left( z_i(t) z_j^*(t) \right)}{\sqrt{1 - \left( \frac{1}{T} \sum_{t=1}^T \Re \left( z_i(t) z_j^*(t) \right) \right)^2}}$$
 
 The pairwise causal lead matrix between temporal slots is calculated on GPU:
+
 $$\mathbf{D}_{i, j} = \frac{1}{120} \sum_{d=1}^{120} \left( \mathbf{Rip}_i(d) - \mathbf{Rip}_j(d) \right)$$
+
 * $\mathbf{D}_{A, B} \ge +0.03 \implies A \supset B$ ($A$ is parent/container of $B$). Project into orthogonal complement via Gram-Schmidt:
+
   $$\mathbf{T}_{B}^{\perp} = \mathbf{T}_B - \frac{\langle \mathbf{T}_B, \mathbf{T}_{\text{accum}} \rangle}{\|\mathbf{T}_{\text{accum}}\|^2 + \epsilon} \mathbf{T}_{\text{accum}}$$
+  
 * $\mathbf{D}_{A, B} < 0.03 \implies A \parallel B$ ($A$ and $B$ are co-equal peers). Integrated via hemispheric latent partitioning.
 * **Collinearity Rejection Guard:** If $\|\mathbf{T}^{\perp}\| \le 0.05 \|\mathbf{T}\|$, machine-precision noise is rejected, preventing single-frame visual glitches.
 
 ### 3.5 Genuine Cosine Delta Stability & World Seal Unlocking
 World Seals do not rely on dummy counters. Stability is evaluated by comparing the 768-D slot vector between cycle $t$ and cycle $t-1$:
+
 $$\text{drift\_cos}_s = \frac{\langle \mathbf{z}_{\text{slot}}(s, t), \mathbf{z}_{\text{slot}}(s, t-1) \rangle}{\|\mathbf{z}_{\text{slot}}(s, t)\| \|\mathbf{z}_{\text{slot}}(s, t-1)\|}$$
+
 $$\text{stability}_s = (0.5 \cdot \text{drift\_cos}_s + 0.5) \times (0.2 + 0.8 \cdot R_{\text{kuramoto}})$$
+
 * **Locking:** When $\text{stability}_s \ge \text{--seal-thresh}$ for `--seal-cycles` consecutive delta periods, the slot crystallizes into an immutable World Seal.
 * **Unlocking:** When mental focus shifts and $\text{stability}_s < \text{--seal-thresh}$, the charge decays at the rate of `--decay-cycles`. When charge drops below 20%, **the seal dissolves and unlocks automatically**. Setting `--seal-thresh 1.0` disables sealing completely.
 
@@ -163,7 +173,9 @@ $$\text{stability}_s = (0.5 \cdot \text{drift\_cos}_s + 0.5) \times (0.2 + 0.8 \
 
 ### 4.1 Token-Wise Norm Calibration (Cross-Attention Sharpening)
 In Stable Diffusion / LCM, text token vectors in `last_hidden_state` exhibit authentic norms of **$28.0$ to $36.0$**. Forcing an arbitrary fixed norm (e.g. $15.0$) halves the logits in Cross-Attention, which is mathematically equivalent to doubling the softmax temperature:
+
 $$\text{Attention}(Q, K) = \text{Softmax}\left(\frac{Q \cdot K^T}{\sqrt{d}}\right)$$
+
 This flattens attention distributions across the canvas, destroying fine details and turning landscapes into flat watercolor mud.
 
 **The Fix:**
@@ -177,10 +189,14 @@ In recurrent img2img, applying $20\%$ pixel-space blending (`cv2.addWeighted(old
 
 ### 4.3 SVD Tangent Bundle Affordance Operator (No 2D Pixel Warping)
 `FCz` does not execute `cv2.warpAffine` camera panning. For the active concept, the engine computes the local SVD covariance over its $K$-nearest semantic neighbors in the 50,000-word CLIP manifold:
+
 $$\mathbf{\Sigma} = \sum_{k=1}^K (\mathbf{w}_k - \mathbf{z}_{\text{root}})(\mathbf{w}_k - \mathbf{z}_{\text{root}})^T = \mathbf{U} \mathbf{S} \mathbf{V}^T$$
+
 The top-16 right-singular vectors $\mathbf{V}_{:16} \in \mathbb{R}^{16 \times 768}$ span the **natural tangent space of physical affordances** (e.g. for water: flow, wave, freeze; for stone: crack, erode, crumble). 
 The 120 dipoles of `FCz` project onto this tangent basis:
+
 $$\Delta \mathbf{z} = \left( \mathbf{z}_{\text{FCz}} \cdot \mathbf{V}_{:16}^T \right) \mathbf{V}_{:16} \in \mathbb{R}^{768}$$
+
 The object transforms according to its own natural physical degrees of freedom.
 
 ---
