@@ -128,7 +128,7 @@ Following *Colgin et al. (Nature, 2009)* and *Bieri et al. (Neuron, 2014)*:
 * **Slot 31 (Theta Trough, $\sim 329^\circ$, Fast Gamma):** Encodes the **Future / Lookahead Intention ($\mathbf{z}_{\text{future}}$)**.
 * **Temporal Bias ($r_y$):** Evaluates the directional momentum of thought:
 
-  $$r_y = \frac{\|\mathbf{z}_{\text{future}}\| - \|\mathbf{z}_{\text{past}}\|}{\|\mathbf{z}_{\text{future}}\| + \|\mathbf{z}_{\text{past}}\| + \epsilon} \in [-1.0, +1.0]$$
+$$r_y = \frac{|\mathbf{z}_{\text{future}}| - |\mathbf{z}_{\text{past}}|}{|\mathbf{z}_{\text{future}}| + |\mathbf{z}_{\text{past}}| + \epsilon} \in [-1.0, +1.0]$$
   
   Modulates transformation velocity without spatial dislocation.
 
@@ -152,7 +152,7 @@ $$\mathbf{D}_{i, j} = \frac{1}{120} \sum_{d=1}^{120} \left( \mathbf{Rip}_i(d) - 
 
 * $\mathbf{D}_{A, B} \ge +0.03 \implies A \supset B$ ($A$ is parent/container of $B$). Project into orthogonal complement via Gram-Schmidt:
 
-  $$\mathbf{T}_{B}^{\perp} = \mathbf{T}_B - \frac{\langle \mathbf{T}_B, \mathbf{T}_{\text{accum}} \rangle}{\|\mathbf{T}_{\text{accum}}\|^2 + \epsilon} \mathbf{T}_{\text{accum}}$$
+$$\mathbf{T}{B}^{\perp} = \mathbf{T}B - \frac{\langle \mathbf{T}B, \mathbf{T}_{\text{accum}} \rangle}{|\mathbf{T}_{\text{accum}}|^2 + \epsilon} \mathbf{T}_{\text{accum}}$$
   
 * $\mathbf{D}_{A, B} < 0.03 \implies A \parallel B$ ($A$ and $B$ are co-equal peers). Integrated via hemispheric latent partitioning.
 * **Collinearity Rejection Guard:** If $\|\mathbf{T}^{\perp}\| \le 0.05 \|\mathbf{T}\|$, machine-precision noise is rejected, preventing single-frame visual glitches.
@@ -160,7 +160,7 @@ $$\mathbf{D}_{i, j} = \frac{1}{120} \sum_{d=1}^{120} \left( \mathbf{Rip}_i(d) - 
 ### 3.5 Genuine Cosine Delta Stability & World Seal Unlocking
 World Seals do not rely on dummy counters. Stability is evaluated by comparing the 768-D slot vector between cycle $t$ and cycle $t-1$:
 
-$$\text{drift\_cos}_s = \frac{\langle \mathbf{z}_{\text{slot}}(s, t), \mathbf{z}_{\text{slot}}(s, t-1) \rangle}{\|\mathbf{z}_{\text{slot}}(s, t)\| \|\mathbf{z}_{\text{slot}}(s, t-1)\|}$$
+$$\text{drift\_cos}_s = \frac{\langle \mathbf{z}_{\text{slot}}(s, t), \mathbf{z}_{\text{slot}}(s, t-1) \rangle}{|\mathbf{z}_{\text{slot}}(s, t)| |\mathbf{z}_{\text{slot}}(s, t-1)|}$$
 
 $$\text{stability}_s = (0.5 \cdot \text{drift\_cos}_s + 0.5) \times (0.2 + 0.8 \cdot R_{\text{kuramoto}})$$
 
