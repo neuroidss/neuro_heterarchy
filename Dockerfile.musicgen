@@ -1,0 +1,51 @@
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV SDL_VIDEODRIVER=dummy
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    curl \
+    build-essential \
+    pkg-config \
+    libavformat-dev \
+    libavcodec-dev \
+    libavdevice-dev \
+    libavutil-dev \
+    libavfilter-dev \
+    libswscale-dev \
+    libswresample-dev \
+    ffmpeg \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.9 \
+    python3.9-dev \
+    python3.9-distutils \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    libasound2 \
+    libx11-6 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -sS https://bootstrap.pypa.io/pip/3.9/get-pip.py -o /tmp/get-pip.py \
+    && python3.9 /tmp/get-pip.py \
+    && rm /tmp/get-pip.py
+
+RUN ln -sf /usr/bin/python3.9 /usr/local/bin/python3 \
+ && ln -sf /usr/bin/python3.9 /usr/local/bin/python \
+ && ln -sf /usr/local/bin/pip3.9 /usr/local/bin/pip3
+
+WORKDIR /app
+
+RUN pip3 install --no-cache-dir --upgrade "pip<24" setuptools wheel
+
+COPY requirements_musicgen.txt .
+RUN pip3 install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu121 \
+        -r requirements_musicgen.txt
+
+COPY . .
+
+EXPOSE 6005

@@ -1,0 +1,16 @@
+thinc>=8.2.0,<8.3.0
+spacy>=3.7.0,<3.8.0
+fastapi
+uvicorn
+torch==2.1.0
+torchaudio
+scipy
+transformers==4.35.2
+audiocraft==1.3.0
+accelerate
+xformers
+numpy<2.0
+sounddevice
+sentence-transformers==2.3.1
+pylsl
+pygame

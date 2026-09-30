@@ -1,56 +1,146 @@
+# docker-compose.yml
+version: "3.9"
+
+x-gpu-reservation: &gpu-reservation
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
 services:
-  # 1. Сервер диффузии (LCM / SD-Turbo)
+
+  # ──────────────────────────────────────────────────────────────
+  # 1. DIFFUSION U-NET WORKER (Python 3.10, порт 6000)
+  # ──────────────────────────────────────────────────────────────
   brain-server:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.diffusion
+    image: neuroidss/neuro_heterarchy_diffusion:latest
     container_name: neuro_brain_server
     command: python3 brain_server.py --mode lcm
+    network_mode: host          # LSL multicast требует host network
+    ipc: host
+    shm_size: "2gb"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    <<: *gpu-reservation
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────
+  # 2. MUSICGEN SERVER (Python 3.9, порт 6005)
+  # ──────────────────────────────────────────────────────────────
+  musicgen-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.musicgen
+    image: neuroidss/neuro_heterarchy_musicgen:latest
+    container_name: neuro_musicgen_server
+    command: >
+      python3 musicgen_server.py
+      --port 6005
+      --model facebook/musicgen-small
+    network_mode: host
+    ipc: host
+    shm_size: "2gb"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    <<: *gpu-reservation
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────
+  # 3. WEB GATEWAY (Python 3.10, порт 8080 + IPC 6002/6003)
+  # ──────────────────────────────────────────────────────────────
+  web-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.diffusion
+    image: neuroidss/neuro_heterarchy_diffusion:latest
+    container_name: neuro_web_gateway
+    command: python3 web_cloud_gateway.py
     network_mode: host
     ipc: host
     volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    restart: unless-stopped
-
-  # 2. Единый Веб-Шлюз: Web UI, MJPEG видео (8080) и приемник BLE в LSL
-  web-gateway:
-    build: .
-    container_name: neuro_web_gateway
-    command: python3 web_cloud_gateway.py 8080
-    network_mode: host
-    ipc: host
+      # Общий том лора — gateway редактирует файлы, движки читают
+      - ./lore:/app/lore
+      # Для Web Bluetooth (HTTPS):
+      # - ./cert.pem:/app/cert.pem:ro
+      # - ./key.pem:/app/key.pem:ro
     depends_on:
       - brain-server
+      - musicgen-server
     restart: unless-stopped
 
-  # 3. Основной генеративный движок (Headless BCI ядро)
+  # ──────────────────────────────────────────────────────────────
+  # 4. VISION BCI ENGINE — HEADLESS (Python 3.10)
+  # ──────────────────────────────────────────────────────────────
   neuro-canvas:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.diffusion
+    image: neuroidss/neuro_heterarchy_diffusion:latest
     container_name: neuro_canvas_engine
     command: >
-      python3 neuro_open_latent_genesis_live.py
+      python3 neuro_heterarchy_diffusion.py
       --headless
-      --lore world_lore.txt
+      --lore /app/lore/world_lore.txt
+      --mode lcm
       --steps 2
       --strength-low 0.65
+      --strength-high 0.85
       --burst-strength 0.85
+      --gamma-max 100.0
+      --seal-thresh 0.68
     network_mode: host
     ipc: host
+    shm_size: "1gb"
     volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+      - hf_cache:/root/.cache/huggingface
+      - ./lore:/app/lore
+    <<: *gpu-reservation
     depends_on:
       - brain-server
       - web-gateway
     restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────
+  # 5. MUSIC BCI ENGINE — HEADLESS (Python 3.9)
+  # ──────────────────────────────────────────────────────────────
+  neuro-musicgen:
+    build:
+      context: .
+      dockerfile: Dockerfile.musicgen
+    image: neuroidss/neuro_heterarchy_musicgen:latest
+    container_name: neuro_musicgen_engine
+    command: >
+      python3 neuro_heterarchy_musicgen.py
+      --headless
+      --lore /app/lore/music_lore.txt
+      --mode semantic
+      --gamma-max 100.0
+      --seal-thresh 0.68
+      --target-block 2.4
+      --target-context 0.4
+      --temp 1.0
+      --top-k 250
+      --gateway-port 6003
+    network_mode: host
+    ipc: host
+    shm_size: "1gb"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - ./lore:/app/lore
+    depends_on:
+      - musicgen-server
+      - web-gateway
+    restart: unless-stopped
+
+# ──────────────────────────────────────────────────────────────
+# Named volumes
+# ──────────────────────────────────────────────────────────────
+volumes:
+  hf_cache:
+    driver: local
