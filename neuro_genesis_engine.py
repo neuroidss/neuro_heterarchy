@@ -17,6 +17,8 @@ NEUROCANVAS: COMPUTATIONAL GENESIS ENGINE (GPU TENSOR PIPELINE)
 ===================================================================================
 """
 
+from __future__ import annotations
+from typing import Optional, Union
 import os
 import sys
 import math
@@ -178,7 +180,7 @@ class SelfSufficientHeterarchyRouter:
                             r, d = pair.split("=")
                             if d.strip().isdigit(): self.static_map[int(d.strip())] = r.strip()
 
-    def set_role(self, dev_idx: int, role: str | None):
+    def set_role(self, dev_idx: int, role: Optional[str] = None):
         self.overrides[dev_idx] = role
         print(f"🔄 [HOT-SWITCH] Dev {dev_idx} ➔ {role or 'ОТКЛЮЧЕН'}")
 
