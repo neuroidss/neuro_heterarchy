@@ -67,8 +67,8 @@ services:
       # Общий том лора — gateway редактирует файлы, движки читают
       - ./lore:/app/lore
       # Для Web Bluetooth (HTTPS):
-      # - ./cert.pem:/app/cert.pem:ro
-      # - ./key.pem:/app/key.pem:ro
+      - ./cert.pem:/app/cert.pem:ro
+      - ./key.pem:/app/key.pem:ro
     depends_on:
       - brain-server
       - musicgen-server
@@ -93,7 +93,7 @@ services:
       --strength-high 0.85
       --burst-strength 0.85
       --gamma-max 100.0
-      --seal-thresh 0.68
+      --seal-thresh 1.0
     network_mode: host
     ipc: host
     shm_size: "1gb"
@@ -121,7 +121,7 @@ services:
       --lore /app/lore/music_lore.txt
       --mode semantic
       --gamma-max 100.0
-      --seal-thresh 0.68
+      --seal-thresh 1.0
       --target-block 2.4
       --target-context 0.4
       --temp 1.0
