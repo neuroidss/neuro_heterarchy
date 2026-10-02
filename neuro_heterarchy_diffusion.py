@@ -235,7 +235,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        diff_worker.running = False
+        worker.running = False
         engine.stop()
         if hud: hud.close()
 
