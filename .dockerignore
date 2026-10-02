@@ -1,0 +1,20 @@
+# .dockerignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+.venv/
+venv/
+venv_musicgen/
+*.log
+.DS_Store
+data/
+lore/*.tmp
+cert.pem
+key.pem
+notebooks/
+*.ipynb
+.idea/
+.vscode/
