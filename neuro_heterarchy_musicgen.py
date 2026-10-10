@@ -3,6 +3,9 @@
 ===================================================================================
 NEUROCANVAS: REAL-TIME MUSICGEN GENERATIVE RUNNER (SAFE DECOUPLED ORCHESTRATOR)
 ===================================================================================
+- Управление музыкальными концептами и параметрами реакции через IPC 6003 от шлюза.
+- Полная динамическая смена словаря тем без перезагрузки процесса.
+===================================================================================
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import numpy as np
 import sounddevice as sd
 from pathlib import Path
 from multiprocessing.connection import Client
+import torch
 
 try:
     os.setpriority(os.PRIO_PROCESS, 0, -20)
@@ -53,10 +57,11 @@ def audio_playback_worker(target_buf=2):
         print(f"⚠️ [Audio Player Note]: {e}", flush=True)
 
 class AsyncMusicWorker(threading.Thread):
-    def __init__(self, conn, runtime_cfg, gateway_port=6003):
+    def __init__(self, conn, runtime_cfg, semantic, gateway_port=6003):
         super().__init__(daemon=True)
         self.conn = conn
         self.cfg = runtime_cfg
+        self.semantic = semantic
         self.running = True
         self.lock = threading.Lock()
         self.latest_embeds = None
@@ -122,10 +127,25 @@ class AsyncMusicWorker(threading.Thread):
                             self.gateway_conn.send(pcm.tobytes())
                             if self.gateway_conn.poll(0.0):
                                 inc = self.gateway_conn.recv()
-                                if isinstance(inc, dict) and inc.get('cmd') == 'update_config':
-                                    with self.lock:
-                                        self.cfg.update(inc.get('config', {}))
-                                        print(f"🎛️ [WEB НАСТРОЙКИ ПРИНЯТЫ]: {self.cfg}")
+                                if isinstance(inc, dict):
+                                    cmd = inc.get('cmd')
+                                    if cmd == 'update_config':
+                                        with self.lock:
+                                            self.cfg.update(inc.get('config', {}))
+                                            print(f"🎛️ [MUSIC CFG]: {self.cfg}")
+                                    elif cmd == 'update_concepts':
+                                        new_concepts = inc.get('concepts', [])
+                                        if new_concepts:
+                                            self.conn.send({'cmd': 'init_lore', 'prompts': new_concepts})
+                                            enc_resp = self.conn.recv()
+                                            self.semantic.c_bases = [torch.tensor(b, dtype=torch.float32, device=DEVICE) for b in enc_resp['c_bases']]
+                                            self.semantic.words = list(new_concepts)
+                                            raw = torch.stack([b.mean(dim=0) for b in self.semantic.c_bases], dim=0)
+                                            mu = torch.mean(raw, dim=0, keepdim=True)
+                                            std = torch.std(raw - mu, dim=0, keepdim=True) + 1e-6
+                                            self.semantic.norm_vocab = torch.nn.functional.normalize((raw - mu) / std, p=2, dim=-1)
+                                            self.semantic.affordance_cache.clear()
+                                            print(f"🎵 [MUSIC LORE ОБНОВЛЕН]: {self.semantic.words}")
                         except Exception:
                             self.gateway_conn = None
 
@@ -162,8 +182,7 @@ def main():
     }
 
     print("=" * 70)
-    print(f"🧠 NEUROCANVAS RUNNER (MODE: {args.mode.upper()})")
-    print(f"🎛️ Config: {runtime_config}")
+    print(f"🧠 NEUROCANVAS MUSIC RUNNER (MODE: {args.mode.upper()})")
     print("=" * 70)
 
     print("⏳ Подключение к musicgen_server (порт 6005)...", flush=True)
@@ -172,15 +191,14 @@ def main():
         try:
             conn = Client(('localhost', 6005), authkey=b'music')
             print("✅ MusicGen сервер готов к работе!", flush=True)
-        except Exception:
-            time.sleep(0.5)
+        except Exception: time.sleep(0.5)
 
     def load_lore_from_server(lore_path):
         words = []
         if os.path.exists(lore_path):
             with open(lore_path, 'r', encoding='utf-8') as f:
                 words = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-        if not words: words = ["psytrance rolling bass", "ambient ethereal pads", "cyberpunk techno"]
+        if not words: words = ["ambient meditation pads", "deep space drone"]
         print(f"📤 Запрос предрассчета {len(words)} тем лора у сервера...", flush=True)
         conn.send({'cmd': 'init_lore', 'prompts': words})
         resp = conn.recv()
@@ -201,7 +219,7 @@ def main():
     engine = HeterarchicalBrainEngine(gamma_max=args.gamma_max)
     engine.start()
 
-    worker = AsyncMusicWorker(conn, runtime_config, gateway_port=args.gateway_port)
+    worker = AsyncMusicWorker(conn, runtime_config, semantic=semantic, gateway_port=args.gateway_port)
     worker.start()
 
     try:
@@ -215,15 +233,6 @@ def main():
                         for eng in processor.engines.values():
                             eng.seals.charge.fill(0)
                             eng.seals.mask = [False] * MAX_SLOTS_CAPACITY
-                        print("🔥 [СБРОС ПЕЧАТЕЙ] Все печати растворены.", flush=True)
-                    elif cmd == "adj_param":
-                        p_name, p_delta = payload
-                        if p_name in runtime_config:
-                            if isinstance(runtime_config[p_name], int):
-                                runtime_config[p_name] = max(1, runtime_config[p_name] + int(p_delta))
-                            else:
-                                runtime_config[p_name] = max(0.05, round(runtime_config[p_name] + p_delta, 3))
-                            print(f"🎛️ [HUD НАСТРОЙКА] {p_name} ➔ {runtime_config[p_name]}")
 
             frame = engine.get_frame()
             if frame.num_live == 0:
@@ -248,10 +257,7 @@ def main():
                 hud.render(telem, rtf=worker.rtf, dt=dt, runtime_cfg=runtime_config)
 
     except KeyboardInterrupt:
-        print("\n[NeuroGen] Остановка пользователем (Ctrl+C)...", flush=True)
-    except Exception as e:
-        print(f"\n❌ [ОШИБКА РАННЕРА]: {e}")
-        traceback.print_exc()
+        pass
     finally:
         stop_playback.set()
         worker.running = False

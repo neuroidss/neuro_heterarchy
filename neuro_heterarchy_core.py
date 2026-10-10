@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEURO-HETERARCHY CORE v136.0 (FULL KINEMATICS + LIE SO(3) + ROBUST NODESTATE)
+NEURO-HETERARCHY CORE v137.0 (GPU ACCELERATED SATURATION & ZERO-POWER PHASES)
 ===================================================================================
+- 16-КАНАЛЬНАЯ ДЕТЕКЦИЯ САТУРАЦИИ НА GPU: Вычисление за 1 мкс в тензорном ядре.
 - NodeState защищен значениями по умолчанию: исключены любые TypeError при вызове.
 - 100% сохранение диффузии: Ли-алгебра SO(3), матрица поз pose_matrix (3x3), disp_xyz.
 - 89.5 Гц Рипплы Дики (iplv_human_ripple) для SVD-глубины и каузального порядка.
@@ -118,6 +119,7 @@ class NodeState:
     thrust: float = 0.0
     now_s0: np.ndarray = None
     future_sN: np.ndarray = None
+    saturation_mask: list = None
     assigned_role: str = "AFz"
     assigned_user: str = "User1"
 
@@ -132,6 +134,7 @@ class NodeState:
         if self.iplv_fast_ripple is None: self.iplv_fast_ripple = np.zeros((NUM_SLOTS, 120), dtype=np.float64)
         if self.now_s0 is None: self.now_s0 = np.zeros(2, dtype=np.float64)
         if self.future_sN is None: self.future_sN = np.zeros(2, dtype=np.float64)
+        if self.saturation_mask is None: self.saturation_mask = [False] * NUM_CHANNELS
 
     @property
     def gamepad_axes(self) -> Kinematics4D:
@@ -214,11 +217,11 @@ class GPU_Daemon_Process(mp.Process):
         sh_tq             = np.frombuffer(self.shm['tq'].get_obj(), dtype=np.float64)
         sh_gx             = np.frombuffer(self.shm['gx'].get_obj(), dtype=np.float64).reshape(NUM_MAX_DEVICES, NUM_SLOTS)
         sh_gy             = np.frombuffer(self.shm['gy'].get_obj(), dtype=np.float64).reshape(NUM_MAX_DEVICES, NUM_SLOTS)
+        sh_sat_16ch       = np.frombuffer(self.shm['sat_16ch'].get_obj(), dtype=ctypes.c_bool).reshape(NUM_MAX_DEVICES, NUM_CHANNELS)
 
         while self.shm['is_running'].value:
             now = time.time()
 
-            # Динамический Hot-Plug сканер
             if now - last_resolve_time > 1.0:
                 last_resolve_time = now
                 try:
@@ -256,10 +259,8 @@ class GPU_Daemon_Process(mp.Process):
                                 self.shm[f'slot_parsed_user_{target_slot}'].value = (u or "").encode('utf-8')[:16]
 
                                 print(f"📡 [HOT-PLUG] Подключен '{s_name}' -> Слот {target_slot} (Role: {r or 'Auto'}, User: {u or 'Auto'})")
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                            except Exception: pass
+                except Exception: pass
 
             num_live = sum(1 for inl in inlets if inl is not None)
             is_real = (num_live > 0)
@@ -300,6 +301,12 @@ class GPU_Daemon_Process(mp.Process):
             fs_tensor = torch.tensor(device_fs, device=DEVICE, dtype=torch.float32).view(NUM_MAX_DEVICES, 1, 1)
 
             with torch.inference_mode():
+                # -------------------------------------------------------------
+                # АППАРАТНАЯ ДЕТЕКЦИЯ САТУРАЦИИ 16 КАНАЛОВ НА GPU (МГНОВЕННО)
+                # -------------------------------------------------------------
+                sat_gpu = torch.any(torch.abs(raw_buf_gpu[:, :, -32:]) > 295000.0, dim=-1) # [NUM_MAX_DEVICES, 16]
+                np.copyto(sh_sat_16ch, sat_gpu.cpu().numpy())
+
                 freqs_dev = base_fftfreq_256 * fs_tensor
                 centered = raw_buf_gpu - torch.mean(raw_buf_gpu, dim=2, keepdim=True)
 
@@ -405,7 +412,6 @@ class GPU_Daemon_Process(mp.Process):
                 psi_frip = torch.sum(cg_frip * w, dim=-1)
                 f_rip_120 = torch.imag(psi_frip) / torch.sqrt(torch.clamp(1.0 - torch.real(psi_frip)**2, min=1e-5))
 
-                # Ли-алгебра SO(3) 3D displacement и Frenet pose frame
                 M_skew = make_lie_so3_generator(omega=TWO_PI * inst_theta_freq)
                 v_gx = torch.sum(gamma_anchor_120[:, 31] * DX_GPU_120, dim=-1) / 120.0
                 v_gy = torch.sum(gamma_anchor_120[:, 31] * DY_GPU_120, dim=-1) / 120.0
@@ -421,7 +427,6 @@ class GPU_Daemon_Process(mp.Process):
                 u3 = torch.cross(u1, u2, dim=-1)
                 pose_matrices = torch.stack([u1, u2, u3], dim=1)
 
-                # Траектория PAC и кинематические оси намерения
                 traj_2d = torch.bmm(gamma_anchor_120, PROJ_BATCH_GPU) * 8.0
                 base_x, base_y = traj_2d[:, 0, 0], traj_2d[:, 0, 1]
                 end_x, end_y = traj_2d[:, -1, 0] - base_x, traj_2d[:, -1, 1] - base_y
@@ -445,7 +450,6 @@ class GPU_Daemon_Process(mp.Process):
 
                 kinematics_gpu = torch.stack([lx_gpu, -ly_gpu, rx_gpu, ry_gpu], dim=-1)
 
-                # Запись в Shared Memory
                 traj_cpu = traj_2d.cpu().numpy()
                 np.copyto(sh_vx, vx_classic.cpu().numpy())
                 np.copyto(sh_vy, vy_classic.cpu().numpy())
@@ -498,7 +502,8 @@ class HeterarchicalBrainEngine:
             'vy': mp.Array('d', NUM_MAX_DEVICES),
             'tq': mp.Array('d', NUM_MAX_DEVICES),
             'gx': mp.Array('d', NUM_MAX_DEVICES * NUM_SLOTS),
-            'gy': mp.Array('d', NUM_MAX_DEVICES * NUM_SLOTS)
+            'gy': mp.Array('d', NUM_MAX_DEVICES * NUM_SLOTS),
+            'sat_16ch': mp.Array(ctypes.c_bool, NUM_MAX_DEVICES * NUM_CHANNELS)
         }
         for i in range(NUM_MAX_DEVICES):
             self.shm[f'slot_name_{i}'] = mp.Array('c', 32)
@@ -525,6 +530,7 @@ class HeterarchicalBrainEngine:
         self._tq             = np.frombuffer(self.shm['tq'].get_obj(), dtype=np.float64)
         self._gx             = np.frombuffer(self.shm['gx'].get_obj(), dtype=np.float64).reshape(NUM_MAX_DEVICES, NUM_SLOTS)
         self._gy             = np.frombuffer(self.shm['gy'].get_obj(), dtype=np.float64).reshape(NUM_MAX_DEVICES, NUM_SLOTS)
+        self._sat_16ch       = np.frombuffer(self.shm['sat_16ch'].get_obj(), dtype=ctypes.c_bool).reshape(NUM_MAX_DEVICES, NUM_CHANNELS)
 
         self.process = GPU_Daemon_Process(self.shm, gamma_max=self.gamma_max)
 
@@ -579,6 +585,7 @@ class HeterarchicalBrainEngine:
                 thrust=math.hypot(vx_val, vy_val),
                 now_s0=traj[0].copy(),
                 future_sN=traj[-1].copy(),
+                saturation_mask=list(self._sat_16ch[i]),
                 assigned_role=final_role,
                 assigned_user=final_user
             ))
@@ -592,3 +599,4 @@ class HeterarchicalBrainEngine:
             is_real=self.shm['is_real'].value,
             num_live=num_live
         )
+

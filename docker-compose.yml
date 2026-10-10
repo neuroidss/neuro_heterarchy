@@ -1,4 +1,3 @@
-# docker-compose.yml
 version: "3.9"
 
 x-gpu-reservation: &gpu-reservation
@@ -13,7 +12,7 @@ x-gpu-reservation: &gpu-reservation
 services:
 
   # ──────────────────────────────────────────────────────────────
-  # 1. DIFFUSION U-NET WORKER (Python 3.10, порт 6000)
+  # 1. DIFFUSION U-NET SERVER (Порт 6000)
   # ──────────────────────────────────────────────────────────────
   brain-server:
     build:
@@ -22,7 +21,7 @@ services:
     image: neuroidss/neuro_heterarchy_diffusion:latest
     container_name: neuro_brain_server
     command: python3 brain_server.py --mode lcm
-    network_mode: host          # LSL multicast требует host network
+    network_mode: host
     ipc: host
     shm_size: "2gb"
     volumes:
@@ -31,7 +30,7 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────
-  # 2. MUSICGEN SERVER (Python 3.9, порт 6005)
+  # 2. MUSICGEN AUDIO SERVER (Порт 6005)
   # ──────────────────────────────────────────────────────────────
   musicgen-server:
     build:
@@ -52,7 +51,7 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────
-  # 3. WEB GATEWAY (Python 3.10, порт 8080 + IPC 6002/6003)
+  # 3. WEB & LSL GATEWAY (Порт 8080 + IPC 6002/6003/6004)
   # ──────────────────────────────────────────────────────────────
   web-gateway:
     build:
@@ -60,13 +59,18 @@ services:
       dockerfile: Dockerfile.diffusion
     image: neuroidss/neuro_heterarchy_diffusion:latest
     container_name: neuro_web_gateway
-    command: python3 web_cloud_gateway.py
+    command: >
+      python3 web_cloud_gateway.py
+      --port 8080
+      --cert /app/cert.pem
+      --key /app/key.pem
+      --lore /app/lore/world_lore.txt
+      --music-lore /app/lore/music_lore.txt
     network_mode: host
     ipc: host
     volumes:
-      # Общий том лора — gateway редактирует файлы, движки читают
       - ./lore:/app/lore
-      # Для Web Bluetooth (HTTPS):
+      - ./sessions:/app/sessions
       - ./cert.pem:/app/cert.pem:ro
       - ./key.pem:/app/key.pem:ro
     depends_on:
@@ -75,7 +79,7 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────
-  # 4. VISION BCI ENGINE — HEADLESS (Python 3.10)
+  # 4. VISION HETERARCHY ENGINE (HEADLESS)
   # ──────────────────────────────────────────────────────────────
   neuro-canvas:
     build:
@@ -89,7 +93,7 @@ services:
       --lore /app/lore/world_lore.txt
       --mode lcm
       --steps 2
-      --strength-low 0.65
+      --strength-low 0.55
       --strength-high 0.85
       --burst-strength 0.85
       --gamma-max 100.0
@@ -100,6 +104,7 @@ services:
     volumes:
       - hf_cache:/root/.cache/huggingface
       - ./lore:/app/lore
+      - ./sessions:/app/sessions
     <<: *gpu-reservation
     depends_on:
       - brain-server
@@ -107,7 +112,7 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────
-  # 5. MUSIC BCI ENGINE — HEADLESS (Python 3.9)
+  # 5. MUSICGEN HETERARCHY ENGINE (HEADLESS)
   # ──────────────────────────────────────────────────────────────
   neuro-musicgen:
     build:
@@ -126,6 +131,7 @@ services:
       --target-context 0.4
       --temp 1.0
       --top-k 250
+      --cfg-coef 1.0
       --gateway-port 6003
     network_mode: host
     ipc: host
@@ -133,14 +139,12 @@ services:
     volumes:
       - hf_cache:/root/.cache/huggingface
       - ./lore:/app/lore
+    <<: *gpu-reservation
     depends_on:
       - musicgen-server
       - web-gateway
     restart: unless-stopped
 
-# ──────────────────────────────────────────────────────────────
-# Named volumes
-# ──────────────────────────────────────────────────────────────
 volumes:
   hf_cache:
     driver: local
