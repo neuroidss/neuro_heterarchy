@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v6.0 (FOOLPROOF & ZERO-LOSS)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.0 (HARDWARE-VERIFIED GAIN & TELEMETRY)
 ===================================================================================
-- ПРЕСЕТЫ РЕАКЦИИ: 🧘 Медитация, ⚖️ Баланс, ⚡ Динамика с авто-синхронизацией полей.
-- ЗАЩИТА ОТ ДУРОСТИ (Sanity Clamping): Невозможно выставить ломающие диффузию числа.
+- АППАРАТНАЯ ВЕРИФИКАЦИЯ ГЕЙНА: Цикл запись -> чтение -> повтор до совпадения регистров.
+- РЕАЛЬНОЕ ОТОБРАЖЕНИЕ ГЕЙНА: Вывод статуса проверки чипа в UI (✓ Подтверждено / Ошибка).
+- ДЕФОЛТ ПРОШИВКИ: 4x при старте с адаптацией uvScale = (1.2 / Gain / 8388607) * 1e6.
+- РЕАЛЬНЫЙ КЛИППИНГ: Побитовая детекция перегрузки 24-бит кода (|v| >= 8300000).
+- МГНОВЕННЫЙ DOM-РЕНДЕРИНГ: Концепты добавляются/удаляются без перезагрузки (F5).
 - ЧИСТЫЙ ПРОЕКТОР: Кнопка вынесена в тулбар, 0 рамок, 0 надписей на изображении.
-- ЧИСТЫЙ СТАРТ: Без 50k слов. Если лор пуст, список концептов пуст [].
-- МГНОВЕННОЕ ОБНОВЛЕНИЕ DOM: Концепты добавляются/удаляются без нажатия F5.
-- MUSICGEN ТЕМЫ И БУФЕР: Полный монитор отставания, задержки в мс и RTF.
+- ТРАКТ MUSICGEN: Темы, буфер, RTF, задержка в мс и anti-lag сброс.
+- CLI-ПАРАМЕТРЫ: --cert, --key, --port, --lore, --music-lore с автопоиском.
 ===================================================================================
 """
 
@@ -75,8 +77,7 @@ world_state = {
     "ema_smooth": 0.16,
     "is_recording": False,
     "current_puck": [0.0, 0.0],
-    "active_thought": "",
-    "gpu_sat_mask": [False] * 16
+    "active_thought": ""
 }
 world_state_lock = threading.Lock()
 
@@ -176,6 +177,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         .concept-chip button { background: none; border: none; color: #f43f5e; cursor: pointer; font-weight: bold; }
         
         .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; background: #0284c7; color: #fff; }
+        .gain-badge { font-size: 10px; font-weight: bold; margin-left: 6px; }
         .probe-switch { background: #1e293b; border: 1px solid #f59e0b; padding: 8px; border-radius: 6px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; font-size: 11px; }
     </style>
 </head>
@@ -189,7 +191,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
     
     <div class="layout">
-        <!-- Левая колонка: Проекторный экран -->
+        <!-- Левая колонка: Проектор -->
         <div>
             <div class="canvas-toolbar">
                 <span style="font-size: 11px; color: #64748b;">Проекция (Canvas Feed):</span>
@@ -200,7 +202,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- Правая колонка: Панели управления -->
+        <!-- Правая колонка: Консоль управления -->
         <div>
             <!-- Тумблер разгрузки BLE-клиента -->
             <div class="probe-switch">
@@ -324,6 +326,90 @@ HTML_PAGE = r"""<!DOCTYPE html>
             else document.exitFullscreen();
         }
 
+        // --- ЧТЕНИЕ И ВЕРИФИКАЦИЯ РЕГИСТРОВ АЦП ---
+        function readRegister(devObj, reg) {
+            return new Promise((resolve) => {
+                devObj.pendingReadReg = reg;
+                devObj.pendingReadResolve = resolve;
+                devObj.cmdChar.writeValue(new Uint8Array([reg])).catch(() => {
+                    devObj.pendingReadResolve = null;
+                    resolve(-1);
+                });
+                setTimeout(() => {
+                    if (devObj.pendingReadResolve) {
+                        devObj.pendingReadResolve = null;
+                        resolve(-1);
+                    }
+                }, 350);
+            });
+        }
+
+        function decodeGainFromRegister(rawVal) {
+            if (rawVal < 0) return null;
+            const b = rawVal & 0xFF;
+            if (b === 0x22) return 4;
+            if (b === 0x33) return 8;
+            if (b === 0x44) return 16;
+            if (b === 0x55) return 32;
+            if (b === 0x11) return 2;
+            if (b === 0x00) return 1;
+            return null;
+        }
+
+        async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
+            const codeMap = { 4: 0x22, 8: 0x33, 16: 0x44, 32: 0x55 };
+            const hex = codeMap[targetGain] || 0x22;
+            const expected = (hex << 8) | hex;
+            const badgeEl = document.getElementById('gain_badge_' + devObj.id);
+
+            if (badgeEl) {
+                badgeEl.innerText = "⏳ Запись...";
+                badgeEl.style.color = "#f59e0b";
+            }
+
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                // 1. Пишем GAIN1 (0x04) и читаем подтверждение
+                await devObj.cmdChar.writeValue(new Uint8Array([0x04, hex, hex])).catch(()=>{});
+                await new Promise(r => setTimeout(r, 45));
+                const val1 = await readRegister(devObj, 0x04);
+
+                // 2. Пишем GAIN2 (0x05) и читаем подтверждение
+                await devObj.cmdChar.writeValue(new Uint8Array([0x05, hex, hex])).catch(()=>{});
+                await new Promise(r => setTimeout(r, 45));
+                const val2 = await readRegister(devObj, 0x05);
+
+                if (val1 === expected && val2 === expected) {
+                    devObj.gain = targetGain;
+                    devObj.uvScale = calcUvScale(targetGain);
+                    console.log(`✅ [GAIN ПОДТВЕРЖДЕН АЦП] Плата ${devObj.name}: регистры = 0x${expected.toString(16)} (Gain ${targetGain}x)`);
+                    if (badgeEl) {
+                        badgeEl.innerText = `✓ Железо подтвердило (${targetGain}x)`;
+                        badgeEl.style.color = "#10b981";
+                    }
+                    const gSelect = document.getElementById('gain_' + devObj.id);
+                    if (gSelect) gSelect.value = targetGain;
+                    return true;
+                }
+                console.warn(`[GAIN RETRY ${attempt}/${maxRetries}] Ожидали 0x${expected.toString(16)}, прочитано: r1=0x${val1.toString(16)}, r2=0x${val2.toString(16)}`);
+                await new Promise(r => setTimeout(r, 60));
+            }
+
+            // Если не удалось записать — вычитываем ФАКТИЧЕСКИЙ гейн из чипа
+            const actualRaw = await readRegister(devObj, 0x04);
+            const actualGain = decodeGainFromRegister(actualRaw);
+            if (actualGain) {
+                devObj.gain = actualGain;
+                devObj.uvScale = calcUvScale(actualGain);
+                const gSelect = document.getElementById('gain_' + devObj.id);
+                if (gSelect) gSelect.value = actualGain;
+            }
+            if (badgeEl) {
+                badgeEl.innerText = `⚠️ Ошибка! В чипе: ${devObj.gain}x`;
+                badgeEl.style.color = "#ef4444";
+            }
+            return false;
+        }
+
         // Пресеты динамики
         const PRESETS = {
             meditation: { steps: 2, cfg: 1.0, strLow: 0.45, strHigh: 0.70, ema: 0.30 },
@@ -345,7 +431,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
         function onManualParamChange() {
             document.getElementById('diffPreset').value = 'custom';
-            // Безопасное ограничение (Sanity Clamping)
             const steps = Math.max(1, Math.min(6, parseInt(document.getElementById('diffSteps').value) || 2));
             const cfg = Math.max(0.0, Math.min(3.0, parseFloat(document.getElementById('diffCfg').value) || 1.0));
             let sLow = Math.max(0.35, Math.min(0.75, parseFloat(document.getElementById('diffStrLow').value) || 0.55));
@@ -422,14 +507,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             const devObj = activeDevices.find(d => d.id === req.device_id || req.device_id === "all");
             if (devObj && devObj.cmdChar) {
                 if (req.cmd === 'set_gain') {
-                    const codeMap = { 4: 0x22, 8: 0x33, 16: 0x44, 32: 0x55 };
-                    const hex = codeMap[req.val] || 0x22;
-                    await devObj.cmdChar.writeValue(new Uint8Array([0x04, hex, hex])).catch(()=>{});
-                    await devObj.cmdChar.writeValue(new Uint8Array([0x05, hex, hex])).catch(()=>{});
-                    devObj.gain = parseInt(req.val);
-                    devObj.uvScale = calcUvScale(devObj.gain);
-                    const gEl = document.getElementById('gain_' + devObj.id);
-                    if (gEl) gEl.value = req.val;
+                    await writeAndVerifyGain(devObj, parseInt(req.val));
                 }
             }
         });
@@ -466,10 +544,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
                 const dataChar = await service.getCharacteristic(DATA_CHAR_UUID);
                 const cmdChar  = await service.getCharacteristic(CMD_CHAR_UUID);
 
-                // По умолчанию Gain 4x (0x22)
-                await cmdChar.writeValue(new Uint8Array([0x04, 0x22, 0x22])).catch(()=>{});
-                await cmdChar.writeValue(new Uint8Array([0x05, 0x22, 0x22])).catch(()=>{});
-
                 const devObj = {
                     id: "dev_" + Date.now(),
                     name: device.name || "FreeEEG16",
@@ -486,10 +560,29 @@ HTML_PAGE = r"""<!DOCTYPE html>
                     lastCounter: -1,
                     totalReceived: 0,
                     totalLost: 0,
-                    channelPeak: new Array(16).fill(0)
+                    channelPeak: new Array(16).fill(0),
+                    pendingReadReg: -1,
+                    pendingReadResolve: null
                 };
                 activeDevices.push(devObj);
                 renderDeviceCards();
+
+                // Слушатель ответов регистров АЦП
+                await cmdChar.startNotifications();
+                cmdChar.addEventListener('characteristicvaluechanged', (e) => {
+                    const b = new Uint8Array(e.target.value.buffer);
+                    if (b.length >= 3) {
+                        const reg = b[0];
+                        const val = (b[1] << 8) | b[2];
+                        if (devObj.pendingReadResolve && devObj.pendingReadReg === reg) {
+                            devObj.pendingReadResolve(val);
+                            devObj.pendingReadResolve = null;
+                        }
+                    }
+                });
+
+                // Первоначальная проверка и запись Gain 4x с подтверждением от чипа
+                await writeAndVerifyGain(devObj, 4);
 
                 await fetch('/api/device/register', {
                     method: 'POST',
@@ -574,8 +667,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         async function setDeviceGain(devId, gainVal) {
             const devObj = activeDevices.find(d => d.id === devId);
             if (devObj) {
-                devObj.gain = parseInt(gainVal);
-                devObj.uvScale = calcUvScale(devObj.gain);
+                await writeAndVerifyGain(devObj, parseInt(gainVal));
             }
             await fetch('/api/device/command', {
                 method: 'POST',
@@ -622,7 +714,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
                         <option value="FCz" ${dev.role==='FCz'?'selected':''}>FCz — SMA (4D Аффордансы)</option>
                     </select>
 
-                    <label>Усиление PGA (ADS131M08):</label>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:5px;">
+                        <label style="margin:0;">Усиление PGA (ADS131M08):</label>
+                        <span id="gain_badge_${dev.id}" class="gain-badge" style="color:#10b981;">✓ Проверено (${dev.gain}x)</span>
+                    </div>
                     <select id="gain_${dev.id}" onchange="setDeviceGain('${dev.id}', this.value)">
                         <option value="4" ${dev.gain===4?'selected':''}>4x (Дефолт прошивки)</option>
                         <option value="8" ${dev.gain===8?'selected':''}>8x</option>
@@ -693,7 +788,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             if (!box) return;
             box.innerHTML = '';
             if (list.length === 0) {
-                box.innerHTML = '<span style="color:#64748b; font-size:10px;">Пул пуст (Режим свободного потока)</span>';
+                box.innerHTML = '<span style="color:#64748b; font-size:10px;">Пул пуст (Свободный латентный дрейф)</span>';
                 return;
             }
             list.forEach(c => {
@@ -820,7 +915,7 @@ OPENAPI_SPEC = {
     "info": {
         "title": "NeuroCanvas Unified World & MusicGen Agent API",
         "description": "API для внешних LLM-агентов (ChatGPT / LangChain) для управления визуальными и музыкальными концептами, качеством реакции и записью.",
-        "version": "6.0.0"
+        "version": "7.0.0"
     },
     "servers": [{"url": "http://localhost:8080"}],
     "paths": {
@@ -1031,7 +1126,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             broadcast_sse("ble_cmd", {"device_id": dev_id, "cmd": cmd, "val": val})
             self._send_json(200, {"status": "command_broadcasted"})
 
-        # Визуальные концепты (мгновенный возврат нового списка для отрисовки без F5)
         elif clean_path == '/api/world/concepts/add':
             concept = data.get('concept', '').strip()
             if concept:
@@ -1051,7 +1145,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": world_state["concepts"]})
 
-        # Музыкальные концепты (мгновенный возврат нового списка для отрисовки без F5)
         elif clean_path == '/api/music/concepts/add':
             concept = data.get('concept', '').strip()
             if concept:
@@ -1257,4 +1350,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
