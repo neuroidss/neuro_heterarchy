@@ -332,18 +332,64 @@ python3 analyze_session.py sessions/session_YYYYMMDD_HHMMSS
 
 ---
 
-## 10. Scientific References
+## 10. Comprehensive Scientific Bibliography & Anatomical Mapping
 
+### I. Neocortical Heterarchy & Canonical Column Microcircuits (TBT)
 1. **Hawkins, J., Leadholm, N., & Clay, V. (2025/2026).** *The Thousand Brains Theory 2.0: An Extension for the Long-Range Connections of the Neocortical Heterarchy.* arXiv:2507.05888v2 [q-bio.NC].
-2. **Miller, E. K., Lundqvist, M., & Bastos, A. M. (2018).** *Working Memory 2.0.* Neuron, 100(2), 463–475. [DOI: 10.1016/j.neuron.2018.09.023](https://doi.org/10.1016/j.neuron.2018.09.023)
-3. **Bastos, A. M., Loonis, R., Kornblith, S., Lundqvist, M., & Miller, E. K. (2018).** *Laminar recordings in frontal cortex suggest distinct layers for maintenance and control of working memory.* PNAS, 115(5), 1117–1122. [DOI: 10.1073/pnas.1717766115](https://doi.org/10.1073/pnas.1717766115)
-4. **Dickey, C. W., et al. (2022).** *Widespread ripples synchronize human cortical activity during sleep, waking, and memory recall.* PNAS, 119(28), e2107797119. [DOI: 10.1073/pnas.2107797119](https://doi.org/10.1073/pnas.2107797119)
-5. **Fan, Y., Wang, M., Ding, N., & Luo, H. (2024).** *Two-dimensional neural geometry underpins hierarchical organization of sequence in human working memory.* Nature Human Behaviour, 8, 2150–2163. [DOI: 10.1038/s41562-024-02047-8](https://doi.org/10.1038/s41562-024-02047-8)
-6. **Chen, J., Zhang, C., Hu, P., Min, B., & Wang, L. (2024).** *Flexible control of sequence working memory in the macaque frontal cortex.* Neuron, 112(20), 3502–3514. [DOI: 10.1016/j.neuron.2024.07.024](https://doi.org/10.1016/j.neuron.2024.07.024)
-7. **Colgin, L. L., et al. (2009).** *Frequency of gamma oscillations routes flow of information in the hippocampus.* Nature, 462(7271), 353–357. [DOI: 10.1038/nature08573](https://doi.org/10.1038/nature08573)
-8. **Bieri, K. W., Bobbitt, K. N., & Colgin, L. L. (2014).** *Slow and fast gamma rhythms coordinate different spatial coding modes in hippocampal place cells.* Neuron, 82(3), 670–681. [DOI: 10.1016/j.neuron.2014.03.013](https://doi.org/10.1016/j.neuron.2014.03.013)
-9. **Bruña, R., Maestú, F., & Pereda, E. (2018).** *Phase Locking Value revisited: teaching new tricks to an old dog.* Journal of Neural Engineering, 15(5), 056011. [DOI: 10.1088/1741-2552/aacfe4](https://doi.org/10.1088/1741-2552/aacfe4)
-10. **Nolte, G., et al. (2004).** *Identifying true brain interaction from EEG data using the imaginary part of coherency.* Clinical Neurophysiology, 115(10), 2292–2307. [DOI: 10.1016/j.clinph.2004.04.029](https://doi.org/10.1016/j.clinph.2004.04.029)
-11. **Mountcastle, V. B. (1997).** *The columnar organization of the neocortex.* Brain, 120(4), 701–722. [DOI: 10.1093/brain/120.4.701](https://doi.org/10.1093/brain/120.4.701)
-12. **Fries, P. (2015).** *Rhythms for cognition: communication through coherence.* Neuron, 88(1), 220–235. [DOI: 10.1016/j.neuron.2015.09.034](https://doi.org/10.1016/j.neuron.2015.09.034)
+   * *System Role:* Theoretical framework for neocortical heterarchy, compositionality via location-by-location coordinate transforms, and thalamic pose conversion.
+2. **Hawkins, J., Ahmad, S., & Cui, Y. (2017).** *A Theory of How Columns in the Neocortex Enable Learning the Structure of the World.* Frontiers in Neural Circuits, 11:81. [DOI: 10.3389/fncir.2017.00081](https://doi.org/10.3389/fncir.2017.00081)
+   * *System Role:* Microcircuit foundation: Layer 4 sensory-location binding and Layer 2/3 inter-column voting consensus.
+3. **Mountcastle, V. B. (1997).** *The columnar organization of the neocortex.* Brain, 120(4), 701–722. [DOI: 10.1093/brain/120.4.701](https://doi.org/10.1093/brain/120.4.701)
+   * *System Role:* Morphological proof of 300–600 µm macrocolumn modules (~2,000–4,200 under a single 26mm sensor).
 
+### II. Laminar Working Memory & Push-Pull Executive Gating (Miller WM 2.0)
+4. **Miller, E. K., Lundqvist, M., & Bastos, A. M. (2018).** *Working Memory 2.0.* Neuron, 100(2), 463–475. [DOI: 10.1016/j.neuron.2018.09.023](https://doi.org/10.1016/j.neuron.2018.09.023)
+   * *System Role:* Push-pull gating mechanism: Deep-layer beta (15–30 Hz) controls top-down inhibition, superficial gamma (30–100 Hz) drives feedforward content reactivations.
+5. **Bastos, A. M., Loonis, R., Kornblith, S., Lundqvist, M., & Miller, E. K. (2018).** *Laminar recordings in frontal cortex suggest distinct layers for maintenance and control of working memory.* PNAS, 115(5), 1117–1122. [DOI: 10.1073/pnas.1717766115](https://doi.org/10.1073/pnas.1717766115)
+   * *System Role:* Empirical laminar separation: Deep beta phase modulates superficial gamma burst amplitude.
+
+### III. 2D Neural Geometry & Sequence Working Memory (F3 / Left dlPFC)
+6. **Fan, Y., Wang, M., Ding, N., & Luo, H. (2024).** *Two-dimensional neural geometry underpins hierarchical organization of sequence in human working memory.* Nature Human Behaviour, 8, 2150–2163. [DOI: 10.1038/s41562-024-02047-8](https://doi.org/10.1038/s41562-024-02047-8)
+   * *System Role:* 2D orthogonal rank manifold mapping: Factorization of local rank ($L$) and global rank ($G$) in prefrontal state space.
+7. **Chen, J., Zhang, C., Hu, P., Min, B., & Wang, L. (2024).** *Flexible control of sequence working memory in the macaque frontal cortex.* Neuron, 112(20), 3502–3514. [DOI: 10.1016/j.neuron.2024.07.024](https://doi.org/10.1016/j.neuron.2024.07.024)
+   * *System Role:* Disentangled sensory and rank-WM subspaces in primate frontal cortex during forward and backward sequence sorting.
+8. **Ding, N., Melloni, L., Zhang, H., Tian, X., & Poeppel, D. (2016).** *Cortical tracking of hierarchical linguistic structures in connected speech.* Nature Neuroscience, 19(1), 158–164. [DOI: 10.1038/nn.4186](https://doi.org/10.1038/nn.4186)
+   * *System Role:* Multi-scale phase tracking of abstract hierarchical syntax across distinct cortical temporal receptive windows.
+
+### IV. Transcortical Ripples & Causal Phase DAGs (AFz / Dickey Graph)
+9. **Dickey, C. W., et al. (2022).** *Widespread ripples synchronize human cortical activity during sleep, waking, and memory recall.* PNAS, 119(28), e2107797119. [DOI: 10.1073/pnas.2107797119](https://doi.org/10.1073/pnas.2107797119)
+   * *System Role:* ~89.5 Hz human cortical ripples phase-locking over 25 cm; foundation for the causal lead matrix $\mathbf{D}_{i,j}$ and recursive Gram-Schmidt slot trees ($A \supset B$).
+10. **Bruña, R., Maestú, F., & Pereda, E. (2018).** *Phase Locking Value revisited: teaching new tricks to an old dog.* Journal of Neural Engineering, 15(5), 056011. [DOI: 10.1088/1741-2552/aacfe4](https://doi.org/10.1088/1741-2552/aacfe4)
+    * *System Role:* Mathematical foundation of the vector-accelerated Corrected Imaginary Phase Locking Value ($ci\text{PLV}$), zero-lag artifact immunity.
+11. **Nolte, G., et al. (2004).** *Identifying true brain interaction from EEG data using the imaginary part of coherency.* Clinical Neurophysiology, 115(10), 2292–2307. [DOI: 10.1016/j.clinph.2004.04.029](https://doi.org/10.1016/j.clinph.2004.04.029)
+    * *System Role:* Physical proof that imaginary coherence isolates true non-instantaneous axonal propagation from volume conduction.
+
+### V. Phase-Amplitude Coupling & Temporal Chronometry
+12. **Colgin, L. L., et al. (2009).** *Frequency of gamma oscillations routes flow of information in the hippocampus.* Nature, 462(7271), 353–357. [DOI: 10.1038/nature08573](https://doi.org/10.1038/nature08573)
+    * *System Role:* Routing of past/retrieval via slow gamma and future/encoding via fast gamma at distinct theta phases.
+13. **Bieri, K. W., Bobbitt, K. N., & Colgin, L. L. (2014).** *Slow and fast gamma rhythms coordinate different spatial coding modes in hippocampal place cells.* Neuron, 82(3), 670–681. [DOI: 10.1016/j.neuron.2014.03.013](https://doi.org/10.1016/j.neuron.2014.03.013)
+    * *System Role:* Prospective vs retrospective coding modes; derivation of the directional temporal bias vector $r_y$.
+14. **Lisman, J. E., & Jensen, O. (2013).** *The theta-gamma neural code.* Neuron, 77(6), 1002–1016. [DOI: 10.1016/j.neuron.2013.03.007](https://doi.org/10.1016/j.neuron.2013.03.007)
+    * *System Role:* Multi-item working memory buffers structured as nested gamma subcycles within slow theta oscillations.
+15. **Fries, P. (2015).** *Rhythms for cognition: communication through coherence.* Neuron, 88(1), 220–235. [DOI: 10.1016/j.neuron.2015.09.034](https://doi.org/10.1016/j.neuron.2015.09.034)
+    * *System Role:* Communication-through-Coherence (CTC) theory governing selective inter-areal message routing via phase alignment.
+
+### VI. Motor Preparation, Null-Space & Kinematics (FCz / pre-SMA / SMA)
+16. **Churchland, M. M., & Shenoy, K. V. (2024).** *Preparatory activity and the expansive null-space.* Nature Reviews Neuroscience, 25, 213–236. [DOI: 10.1038/s41583-024-00796-z](https://doi.org/10.1038/s41583-024-00796-z)
+    * *System Role:* Motor preparation in output-null subspaces; justifies non-disruptive 4D kinematic tracking during active memory maintenance.
+17. **Zimnik, A. J., & Churchland, M. M. (2021).** *Independent generation of sequence elements by motor cortex.* Nature Neuroscience, 24, 412–424. [DOI: 10.1038/s41593-021-00798-5](https://doi.org/10.1038/s41593-021-00798-5)
+    * *System Role:* Independent population dynamics for successive sequence components in premotor/motor hierarchies.
+
+### VII. Cognitive Interference, Entropy & Orthogonal Subspaces (F4 / Right dlPFC)
+18. **Weber, J., et al. (2023).** *Subspace partitioning in the human prefrontal cortex resolves cognitive interference.* PNAS, 120(31), e2220523120. [DOI: 10.1073/pnas.2220523120](https://doi.org/10.1073/pnas.2220523120)
+    * *System Role:* Prefrontal subspace partitioning; explains how right dlPFC phase entropy modulates denoising strength without corrupting semantic identity.
+19. **Flesch, T., et al. (2022).** *Orthogonal representations for robust context-dependent task performance in brains and neural networks.* Neuron, 110(7), 1258–1270. [DOI: 10.1016/j.neuron.2022.01.005](https://doi.org/10.1016/j.neuron.2022.01.005)
+    * *System Role:* Contextual task representation via geometry: Orthogonal low-dimensional manifolds prevent catastrophic forgetting.
+20. **Panichello, M. F., & Buschman, T. J. (2021).** *Shared mechanisms underlie the control of working memory and attention.* Nature, 592, 601–605. [DOI: 10.1038/s41586-021-03390-w](https://doi.org/10.1038/s41586-021-03390-w)
+    * *System Role:* Rotational dynamics and shared selection mechanisms between attention and working memory.
+
+### VIII. Epistemic Horizon, Veto & Cognitive Branching (Fpz / Frontopolar BA 10)
+21. **Koechlin, E., & Hyafil, A. (2007).** *Anterior prefrontal function and the limits of human decision-making.* Science, 318(5850), 594–598. [DOI: 10.1126/science.1142995](https://doi.org/10.1126/science.1142995)
+    * *System Role:* Architecture of human frontopolar cortex (BA 10) in cognitive branching: Holding secondary behavioral goals while executing primary tasks.
+22. **Boorman, E. D., et al. (2009).** *How green is the grass on the other side? Frontopolar cortex and evidence for alternatives.* Neuron, 62(5), 733–743. [DOI: 10.1016/j.neuron.2009.05.014](https://doi.org/10.1016/j.neuron.2009.05.014)
+    * *System Role:* Tracking evidence for counterfactual options; mathematical basis of the Fpz fatigue accumulator and phase-drift paradigm shift ("The Drop").
