@@ -14,51 +14,54 @@
 ---
 
 ## 📑 Table of Contents
-1. [Executive Summary & Paradigm Shift](#1-executive-summary--paradigm-shift)
-2. [Biophysical Foundations: Pure Phase-Coherence & TBT 2.0](#2-biophysical-foundations-pure-phase-coherence--tbt-20)
-   - 2.1 [Single-Device Scale (26 mm Footprint = 2,000–4,200 Macrocolumns)](#21-single-device-scale-26-mm-footprint--20004200-macrocolumns)
-   - 2.2 [The Zero-Power Principle: Why Scalar FFT Power is Obsolete](#22-the-zero-power-principle-why-scalar-fft-power-is-obsolete)
-   - 2.3 [Universal Column Engine vs. Regional Generative Modality](#23-universal-column-engine-vs-regional-generative-modality)
-3. [Multi-Scale Oscillatory Hierarchy & 2D Neural Geometry](#3-multi-scale-oscillatory-hierarchy--2d-neural-geometry)
-   - 3.1 [Continuous PAC Chronometer ($K_\theta = f_\theta / f_\delta$)](#31-continuous-pac-chronometer-k_\theta--f_\theta--f_\delta)
-   - 3.2 [Two-Phase Theta Chronology & Past–Future Vector ($r_y$)](#32-two-phase-theta-chronology--pastfuture-vector-r_y)
-   - 3.3 [2D Orthogonal SWM Rank Manifold (Fan 2024 / Chen 2024)](#33-2d-orthogonal-swm-rank-manifold-fan-2024--chen-2024)
-   - 3.4 [89.5 Hz Cortical Ripple Causal DAG & Gram-Schmidt Tree (Dickey 2022)](#34-895-hz-cortical-ripple-causal-dag--gram-schmidt-tree-dickey-2022)
-   - 3.5 [Genuine Cosine Delta Stability & World Seal Unlocking](#35-genuine-cosine-delta-stability--world-seal-unlocking)
-4. [Anti-Blur Latent Conditioning & Generative Dynamics](#4-anti-blur-latent-conditioning--generative-dynamics)
-   - 4.1 [Token-Wise Norm Calibration (Cross-Attention Sharpening)](#41-token-wise-norm-calibration-cross-attention-sharpening)
-   - 4.2 [Elimination of the Recursive Pixel-Blur Loop (`cv2.addWeighted`)](#42-elimination-of-the-recursive-pixel-blur-loop-cv2addweighted)
-   - 4.3 [SVD Tangent Bundle Affordance Operator (No 2D Pixel Warping)](#43-svd-tangent-bundle-affordance-operator-no-2d-pixel-warping)
-5. [Decoupled Multi-Service Microarchitecture](#5-decoupled-multi-service-microarchitecture)
-   - 5.1 [Structural Decoupling (`neuro_genesis_engine` vs `neuro_hud` vs runner)](#51-structural-decoupling-neuro_genesis_engine-vs-neuro_hud-vs-runner)
-   - 5.2 [Dynamic Hot-Switching of Device Roles at Runtime (Zero Restarts)](#52-dynamic-hot-switching-of-device-roles-at-runtime-zero-restarts)
-   - 5.3 [Headless Mode & Server Isolation](#53-headless-mode--server-isolation)
-6. [Docker Compose Production Deployment](#6-docker-compose-production-deployment)
-7. [Interactive Keybindings & HUD Instrumentation](#6-interactive-keybindings--hud-instrumentation)
-8. [CLI Configuration Reference](#7-cli-configuration-reference)
-9. [Comprehensive Scientific Bibliography & DOIs](#8-comprehensive-scientific-bibliography--dois)
+1. [System Overview & Scientific Paradigm Shift](#1-system-overview--scientific-paradigm-shift)
+2. [Biophysical Foundations & Circuit Theory](#2-biophysical-foundations--circuit-theory)
+   - 2.1 [Macrocolumnar Scale (26 mm Footprint = 2,000–4,200 Macrocolumns)](#21-macrocolumnar-scale-26-mm-footprint--20004200-macrocolumns)
+   - 2.2 [The Zero-Power Principle: Pure Phase Coherence ($ci\text{PLV}$)](#22-the-zero-power-principle-pure-phase-coherence-ciplv)
+   - 2.3 [Laminar Push-Pull Gating: Deep Beta vs Superficial Gamma](#23-laminar-push-pull-gating-deep-beta-vs-superficial-gamma)
+   - 2.4 [2D Sequence Working Memory Manifold (Fan 2024 / Chen 2024)](#24-2d-sequence-working-memory-manifold-fan-2024--chen-2024)
+   - 2.5 [89.5 Hz Cortical Ripple Causal DAGs (Dickey 2022)](#25-895-hz-cortical-ripple-causal-dags-dickey-2022)
+3. [Closed-Loop Neurofeedback vs. Passive Recording](#3-closed-loop-neurofeedback-vs-passive-recording)
+4. [Hardware Signal Chain & Transport Integrity](#4-hardware-signal-chain--transport-integrity)
+   - 4.1 [ADS131M08 Programmable Gain Amplifier (4x, 8x, 16x, 32x)](#41-ads131m08-programmable-gain-amplifier-4x-8x-16x-32x)
+   - 4.2 [Real-Time 24-bit Hardware Rail Clipping Detection](#42-real-time-24-bit-hardware-rail-clipping-detection)
+   - 4.3 [Zero-Allocation Web Bluetooth & Drop Rate Tracking](#43-zero-allocation-web-bluetooth--drop-rate-tracking)
+5. [Decoupled Architecture & Remote Command Relay](#5-decoupled-architecture--remote-command-relay)
+   - 5.1 [Secure Context TLS / HTTPS Requirements](#51-secure-context-tls--https-requirements)
+   - 5.2 [Remote Command Relay via Server-Sent Events (SSE)](#52-remote-command-relay-via-server-sent-events-sse)
+   - 5.3 [Ultra-Lean BLE Probe Mode for Mobile Hosts](#53-ultra-lean-ble-probe-mode-for-mobile-hosts)
+6. [Dynamic Concept Engine & Generative Synthesis](#6-dynamic-concept-engine--generative-synthesis)
+   - 6.1 [Zero-Hardcode & Unconditioned Latent Browsing](#61-zero-hardcode--unconditioned-latent-browsing)
+   - 6.2 [Thread-Safe Atomic Vocab Swapping](#62-thread-safe-atomic-vocab-swapping)
+   - 6.3 [Dynamics Presets & Safety Watchdog](#63-dynamics-presets--safety-watchdog)
+   - 6.4 [MusicGen 32 kHz Real-Time Lag Monitor & Anti-Lag Buffer](#64-musicgen-32-khz-real-time-lag-monitor--anti-lag-buffer)
+7. [Multimodal 1:1 Synchronized Session Recorder](#7-multimodal-11-synchronized-session-recorder)
+   - 7.1 [Hardware-Locked 1:1 CFR Video Timeline](#71-hardware-locked-11-cfr-video-timeline)
+   - 7.2 [Dataset Structure (`eeg_raw.npz`, `video_timeline.mp4`, `events.csv`)](#72-dataset-structure-eeg_rawnpz-video_timelinemp4-eventscsv)
+8. [AI Agent Integration (ChatGPT / Function Calling)](#8-ai-agent-integration-chatgpt--function-calling)
+9. [Deployment & Operations](#9-deployment--operations)
+10. [Scientific References](#10-scientific-references)
 
 ---
 
-## 1. Executive Summary & Paradigm Shift
+## 1. System Overview & Scientific Paradigm Shift
 
-Traditional Brain-Computer Interfaces (BCIs) reduce neurophysiology to 1D scalar band power or discrete classification states. **NeuroCanvas** treats the cerebral cortex as an **endogenous generative simulation engine**, interfacing continuous mesoscopic electrophysiology directly with latent diffusion models and Thousand Brains neocortical heterarchies (*Hawkins, Leadholm, Clay, 2025/2026*).
+**NeuroCanvas** is an unconstrained, real-time closed-loop Brain-Computer Interface (BCI) based on the **Thousand Brains Theory 2.0** (*Hawkins, Leadholm, Clay, 2025/2026*), **Working Memory 2.0** (*Miller, Lundqvist, Bastos, 2018*), and modern empirical neurogeometry (*Fan et al., 2024; Chen et al., 2024; Dickey et al., 2022*).
 
-### Fundamental Axioms:
-1. **The Human Brain is the World Model:** We do not execute heavy, latency-plagued external AI world models to simulate reality. The 16 billion neurons of the human neocortex compute state transitions in real time. Latent diffusion acts as an **inverted artificial retina**—a high-dimensional projector converting cortical semantic coordinates into photons on screen.
-2. **Zero 2D Pixel Warping:** The brain does not shift the visual field via affine canvas transformations. Action is an **affordance-based generative transition** (*Gibson, 1979; Friston, 2010*). When an action is taken, the object itself undergoes physical/semantic metamorphosis via the tangent bundle of its concept manifold.
-3. **Pure Phase Coherence (Zero Power):** All computation is mediated through volume-conduction-free corrected imaginary Phase Locking Value ($ci\text{PLV}$), directed phase lags, and Kuramoto synchronization order parameters. Scalar FFT power is completely eliminated.
-4. **Complete Decoupling:** The mathematical engine (`neuro_genesis_engine.py`), visual instrumentation (`neuro_hud.py`), and operational runner (`neuro_open_latent_genesis_live.py`) are strictly decoupled through a flat telemetry data contract. Modifying one file never breaks the others.
+Rather than reducing brain activity to discrete classifiers or arbitrary 1D bandpower metrics, NeuroCanvas models the neocortex as a **distributed, self-sufficient sensorimotor simulation engine**:
+* **The Neocortex is a Heterarchy:** Cortical regions operate in parallel and hierarchically at the same time. Primary, secondary, and association areas learn structured models of complete 3D objects and abstract concepts.
+* **The Diffusion Canvas is an Inverted Artificial Retina:** Generative diffusion models (LCM, SD-Turbo, SDXL) project continuous cortical semantic states directly into high-dimensional sensory feedback.
+* **Pure Phase Coherence:** Operates entirely on volume-conduction-free directed phase lags ($ci\text{PLV}$), eliminating classical amplitude/power artifacts.
 
 ---
 
-## 2. Biophysical Foundations: Pure Phase-Coherence & TBT 2.0
+## 2. Biophysical Foundations & Circuit Theory
 
-### 2.1 Single-Device Scale (26 mm Footprint = 2,000–4,200 Macrocolumns)
-A single FreeEEG16 sensor head has a diameter of $26\text{ mm}$ ($\text{Area} = \pi \times 13^2 \approx 531\text{ mm}^2$). 
+### 2.1 Macrocolumnar Scale (26 mm Footprint = 2,000–4,200 Macrocolumns)
+A single **FreeEEG16-alpha2** circular sensor has an outer diameter of $26\text{ mm}$ ($\text{Area} = \pi \times 13^2 \approx 531\text{ mm}^2$).
 * According to Vernon Mountcastle (1957, 1997) and Jeff Hawkins (2017), a cortical macrocolumn has a diameter of $300\text{--}600\ \mu\text{m}$ (area $\sim 0.12\text{--}0.28\text{ mm}^2$).
-* Beneath a single 26 mm sensor lie **between 1,900 and 4,200 macrocolumns**, containing **over 250,000 minicolumns** and **more than 50 million neurons** (at $\sim 100,000\text{ neurons/mm}^2$).
-* 16 concentric electrodes measure **120 unique bipolar dipoles**, capturing the phase-coherence manifold across this cellular population.
+* Underneath a single 26 mm sensor reside **between 1,900 and 4,200 macrocolumns**, containing **over 250,000 minicolumns** and **more than 50 million biological neurons**.
+* 16 concentric electrodes form **120 unique bipolar channel pairs**, measuring the phase-gradient manifold across this population.
 
 ```
                     SINGLE 26mm SENSOR (531 mm²)
@@ -74,392 +77,273 @@ A single FreeEEG16 sensor head has a diameter of $26\text{ mm}$ ($\text{Area} = 
  └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Corollary:** A single sensor anywhere on the cranium is a self-sufficient computational cluster capable of executing the full canonical microcircuit.
+### 2.2 The Zero-Power Principle: Pure Phase Coherence ($ci\text{PLV}$)
+Traditional EEG metrics rely on scalar FFT power ($\mu\text{V}^2/\text{Hz}$), which is corrupted by volume conduction, skull attenuation, and muscle artifacts. NeuroCanvas computes the **Corrected Imaginary Phase Locking Value ($ci\text{PLV}$)** (*Bruña et al., 2018; Nolte et al., 2004*):
 
-### 2.2 The Zero-Power Principle: Why Scalar FFT Power is Obsolete
-Conventional single-channel EEGs rely on scalar band power ($\mu\text{V}^2/\text{Hz}$), which collapses spatial phase relationships, conflates volume conduction with neural communication, and is susceptible to muscular artifacts.
-NeuroCanvas operates entirely on **Phase Geometry**:
-1. **$ci\text{PLV}$ (Corrected Imaginary Phase Locking Value; *Bruña et al., 2018*):** Eliminates zero-lag volume conduction artifacts.
-2. **Kuramoto Order Parameter ($R \in [0, 1]$):** Quantifies phase synchronization across the 120 dipoles without amplitude bias.
-3. **Asymmetric Phase Lags ($\Delta \phi \neq 0$):** Establishes directed causal flow ("who leads whom").
+$$ci\text{PLV}_{i, j} = \frac{\frac{1}{T} \sum_{t=1}^T \Im \left( z_i(t) z_j^*(t) \right)}{\sqrt{1 - \left( \frac{1}{T} \sum_{t=1}^T \Re \left( z_i(t) z_j^*(t) \right) \right)^2}}$$
 
-### 2.3 Universal Column Engine vs. Regional Generative Modality
-Following Mountcastle's principle of cortical uniformity, the neocortex implements an identical computational microcircuit everywhere. We formalize this through a two-layer architecture:
+$ci\text{PLV}$ discards instantaneous zero-lag projections (volume conduction) while preserving true non-zero phase synchronization between cortical generators.
 
-#### Layer A: Universal Column Engine (`UniversalColumnProcessor`)
-Runs identically in **any** connected physical region:
-* Calculates the $\theta/\delta$ PAC chronometer ($K_\theta = f_\theta / f_\delta \implies S(t) \in [4, 16]$ slots).
-* Projects 120 dipoles into the 768-D cortical column basis ($\mathbf{W}_{\text{phys}} \in \mathbb{R}^{768 \times 120}$).
-* Extracts 89.5 Hz Dickey ripple causal DAGs ($ci\text{PLV}$).
-* Builds the recursive Gram-Schmidt tree ($A \supset B$ vs $A \parallel B$) across its own slots.
-* Evaluates cycle-to-cycle cosine stability and charges/discharges World Seals.
+### 2.3 Laminar Push-Pull Gating: Deep Beta vs Superficial Gamma
+Following *Miller, Lundqvist, & Bastos (Neuron, 2018)*:
+* **Deep Layers (5 & 6) — Beta ($15\text{--}30\text{ Hz}$):** Encodes top-down task rules, executive inhibition, and attentional stability.
+* **Superficial Layers (2 & 3) — Gamma ($30\text{--}100\text{ Hz}$):** Encodes feedforward sensory content and bottom-up feature bursts.
+* **Push-Pull Interaction:** Elevated deep-layer beta suppresses superficial gamma, clearing working memory. Relaxation of beta disinhibits layer 2/3 recurrent networks, allowing gamma bursts to refresh synaptic weights.
 
-#### Layer B: Regional Generative Modality (`HeterarchicalWorldSynthesizer`)
-Maps the universal tree into the specific generative degrees of freedom of diffusion:
-* **`AFz` (rmPFC / dACC):** Macro-Scene Habitat & Relational Base ($T_{\text{root}}$) on slow Delta ($0.5\text{--}1.5\text{ Hz}$).
-* **`F3` (Left dlPFC):** Symbolic Syntax, Local Ranks ($L_1\text{--}L_3$), and Token-Level Cross-Attention binding.
-* **`F4` (Right dlPFC):** Atmospheric Context, Global Ranks ($G_1\text{--}G_3$), Channel-Wise Latent Dispersion, and Denoising `strength`.
-* **`FCz` (pre-SMA / SMA):** 16-D SVD Tangent Affordance Operator (active verbs / physical transformations).
-* **`Fpz` (BA 10):** Epistemic Horizon, Continuous Hopfield Energy Landscape, and Paradigm Shifts.
-
----
-
-## 3. Multi-Scale Oscillatory Hierarchy & 2D Neural Geometry
-
-```
-  FREQUENCY SCALE       BAND            REGIONAL SPECIALIZATION  GENERATIVE FUNCTION
- ────────────────────────────────────────────────────────────────────────────────────────────────
-  Slow Delta            0.5 – 1.5 Hz    AFz / rmPFC              Macro-Scene & Relational Canvas
-  Theta Carrier         4.0 – 8.0 Hz    Frontal Cortex           Working Memory Slot Parsing
-  Infragranular Beta    15.0 – 30.0 Hz  F3 / F4 (Deep Layers)    Cross-Attention Token Lock (Gating)
-  Superficial Gamma     30.0 – 65.0 Hz  L2/3 Supragranular       Active Feature Emission / Affordances
-  Dickey Ripples        70.0 – 100 Hz   Transcortical            Causal Directed DAG (A ⊃ B vs A ∥ B)
-  Maximum Gamma Limit   up to 100.0 Hz  Tunable (--gamma-max)    Full High-Frequency Tracking
-```
-
-### 3.1 Continuous PAC Chronometer ($K_\theta = f_\theta / f_\delta$)
-Working memory capacity is dynamic (*Lisman & Jensen, 2013; Axmacher et al., 2010*):
-$$K_\theta(t) = \text{clamp}\left( \text{round}\left( \frac{f_\theta(t)}{f_\delta(t)} \right), 2, 8 \right), \quad S(t) = 2 \times K_\theta(t) \in [4, 16] \text{ active phase sectors}$$
-The engine resamples the continuous 120-dipole state into exactly $S(t)$ temporal sectors via GPU 1D adaptive average pooling (`torch.nn.functional.adaptive_avg_pool1d`) without host–device synchronization stalls.
-
-### 3.2 Two-Phase Theta Chronology & Past–Future Vector ($r_y$)
-Following *Colgin et al. (Nature, 2009)* and *Bieri et al. (Neuron, 2014)*:
-* **Slot 0 (Early Descending Theta Phase, $\sim 257^\circ$, Slow Gamma):** Encodes the **Past / Memory Anchor ($\mathbf{z}_{\text{past}}$)**.
-* **Slot 31 (Theta Trough, $\sim 329^\circ$, Fast Gamma):** Encodes the **Future / Lookahead Intention ($\mathbf{z}_{\text{future}}$)**.
-* **Temporal Bias ($r_y$):** Evaluates the directional momentum of thought:
-
-$$r_y = \frac{|\mathbf{z}_{\text{future}}| - |\mathbf{z}_{\text{past}}|}{|\mathbf{z}_{\text{future}}| + |\mathbf{z}_{\text{past}}| + \epsilon} \in [-1.0, +1.0]$$
-  
-  Modulates transformation velocity without spatial dislocation.
-
-### 3.3 2D Orthogonal SWM Rank Manifold (Fan 2024 / Chen 2024)
-As demonstrated by *Fan et al. (Nature Human Behaviour, 2024)* and *Chen et al. (Neuron, 2024)*, sequence working memory in primate and human prefrontal cortex is organized along two orthogonal geometric axes:
-* **Axis $X$ (Local Rank $L$):** Position of a feature/item within a chunk ($L_1, L_2, L_3$).
+### 2.4 2D Sequence Working Memory Manifold (Fan 2024 / Chen 2024)
+Primate and human working memory organizes sequences into a 2D neural representational geometry (*Fan et al., 2024; Chen et al., 2024*):
+* **Axis $X$ (Local Rank $L$):** Position of an item within a chunk ($L_1, L_2, L_3$).
 * **Axis $Y$ (Global Rank $G$):** Position of a chunk within the macro-sequence ($G_1, G_2, G_3$).
 
-The 120 dipoles project onto this 2D plane:
+The 120 bipolar dipoles project onto this orthogonal plane:
 $$x_{\text{local}} = \text{clamp}\left( \frac{1}{40} \sum_{d=1}^{120} \mathbf{\Psi}(d) \cdot \Delta x_d, -1.0, 1.0 \right), \quad y_{\text{global}} = \text{clamp}\left( \frac{1}{40} \sum_{d=1}^{120} \mathbf{\Psi}(d) \cdot \Delta y_d, -1.0, 1.0 \right)$$
-The coordinate $(x_L, y_G)$ glides smoothly across the 2D working memory manifold, directly balancing token-level attention.
+This $(x_L, y_G)$ coordinate glides across the 2D working memory manifold, balancing token-level cross-attention without discrete state resets.
 
-### 3.4 89.5 Hz Cortical Ripple Causal DAG & Gram-Schmidt Tree (Dickey 2022)
-Volume-conduction-free directed phase locking across all 120 electrode pairs is computed at 89.5 Hz (*Dickey et al., PNAS 2022; Bruña et al., J Neural Eng 2018*):
-
-\$`\mathrm{ciPLV}_{i, j} = \frac{\frac{1}{T} \sum_{t=1}^T \Im \left( z_i(t) z_j^{\_}(t) \right)}{\sqrt{1 - \left( \frac{1}{T} \sum_{t=1}^T \Re \left( z_i(t) z_j^{\_}(t) \right) \right)^2}}`\$
-
-The pairwise causal lead matrix between temporal slots is calculated on GPU:
-
-$$\mathbf{D}_{i, j} = \frac{1}{120} \sum_{d=1}^{120} \left( \mathbf{Rip}_i(d) - \mathbf{Rip}_j(d) \right)$$
-
-* $\mathbf{D}_{A, B} \ge +0.03 \implies A \supset B$ ($A$ is parent/container of $B$). Project into orthogonal complement via Gram-Schmidt:
-
-$$\mathbf{T}{B}^{\perp} = \mathbf{T}B - \frac{\langle \mathbf{T}B, \mathbf{T}_{\text{accum}} \rangle}{|\mathbf{T}_{\text{accum}}|^2 + \epsilon} \mathbf{T}_{\text{accum}}$$
-  
+### 2.5 89.5 Hz Cortical Ripple Causal DAGs (Dickey 2022)
+Volume-conduction-free directed phase locking across all 120 electrode pairs is evaluated at 89.5 Hz (*Dickey et al., PNAS 2022*). The pairwise causal lead matrix between temporal phase slots yields a Directed Acyclic Graph (DAG):
+* $\mathbf{D}_{A, B} \ge +0.03 \implies A \supset B$ ($A$ is container/parent of $B$). $B$ is projected into the orthogonal complement via Gram-Schmidt orthogonalization:
+$$\mathbf{T}_B^{\perp} = \mathbf{T}_B - \frac{\langle \mathbf{T}_B, \mathbf{T}_{\text{accum}} \rangle}{\|\mathbf{T}_{\text{accum}}\|^2 + \epsilon} \mathbf{T}_{\text{accum}}$$
 * $\mathbf{D}_{A, B} < 0.03 \implies A \parallel B$ ($A$ and $B$ are co-equal peers). Integrated via hemispheric latent partitioning.
-* **Collinearity Rejection Guard:** If $\|\mathbf{T}^{\perp}\| \le 0.05 \|\mathbf{T}\|$, machine-precision noise is rejected, preventing single-frame visual glitches.
-
-### 3.5 Genuine Cosine Delta Stability & World Seal Unlocking
-World Seals do not rely on dummy counters. Stability is evaluated by comparing the 768-D slot vector between cycle $t$ and cycle $t-1$:
-
-$$\mathrm{drift\_cos}_s = \frac{\langle \mathbf{z}_{\mathrm{slot}}(s, t), \mathbf{z}_{\mathrm{slot}}(s, t-1) \rangle}{|\mathbf{z}_{\mathrm{slot}}(s, t)| |\mathbf{z}_{\mathrm{slot}}(s, t-1)|}$$
-
-$$\mathrm{stability}_s = (0.5 \cdot \mathrm{drift\_cos}_s + 0.5) \times (0.2 + 0.8 \cdot R_{\mathrm{kuramoto}})$$
-
-* **Locking:** When $\text{stability}_s \ge \text{--seal-thresh}$ for `--seal-cycles` consecutive delta periods, the slot crystallizes into an immutable World Seal.
-* **Unlocking:** When mental focus shifts and $\text{stability}_s < \text{--seal-thresh}$, the charge decays at the rate of `--decay-cycles`. When charge drops below 20%, **the seal dissolves and unlocks automatically**. Setting `--seal-thresh 1.0` disables sealing completely.
 
 ---
 
-## 4. Anti-Blur Latent Conditioning & Generative Dynamics
+## 3. Closed-Loop Neurofeedback vs. Passive Recording
 
-### 4.1 Token-Wise Norm Calibration (Cross-Attention Sharpening)
-In Stable Diffusion / LCM, text token vectors in `last_hidden_state` exhibit authentic norms of **$28.0$ to $36.0$**. Forcing an arbitrary fixed norm (e.g. $15.0$) halves the logits in Cross-Attention, which is mathematically equivalent to doubling the softmax temperature:
-
-$$\text{Attention}(Q, K) = \text{Softmax}\left(\frac{Q \cdot K^T}{\sqrt{d}}\right)$$
-
-This flattens attention distributions across the canvas, destroying fine details and turning landscapes into flat watercolor mud.
-
-**The Fix:**
-
-$$\mathbf{T}_{\text{calibrated}} = \frac{\mathbf{T}}{\|\mathbf{T}\|_2 + \epsilon} \odot \|\mathbf{T}_{\text{clean CLIP}}\|_2$$
-
-Furthermore, 120-dipole neural injections target **only semantic tokens ($1 \dots S$)**, preserving structural anchor tokens ($0$: `<|startoftext|>` and trailing padding), keeping Cross-Attention razor-sharp.
-
-### 4.2 Elimination of the Recursive Pixel-Blur Loop (`cv2.addWeighted`)
-In recurrent img2img, applying $20\%$ pixel-space blending (`cv2.addWeighted(old, 0.2, new, 0.8)`) acts as an infinite-impulse-response (IIR) spatial low-pass filter. Combined with repeated VAE encode/decode cycles, the canvas degrades into total blur within 15 frames.
-
-**The Fix:** The diffusion output `resp` is passed directly to the next iteration without pixel-level temporal low-pass blending. Visual sharpness is preserved across hours of continuous streaming.
-
-### 4.3 SVD Tangent Bundle Affordance Operator (No 2D Pixel Warping)
-`FCz` does not execute `cv2.warpAffine` camera panning. For the active concept, the engine computes the local SVD covariance over its $K$-nearest semantic neighbors in the 50,000-word CLIP manifold:
-
-$$\mathbf{\Sigma} = \sum_{k=1}^K (\mathbf{w}_k - \mathbf{z}_{\text{root}})(\mathbf{w}_k - \mathbf{z}_{\text{root}})^T = \mathbf{U} \mathbf{S} \mathbf{V}^T$$
-
-The top-16 right-singular vectors $\mathbf{V}_{:16} \in \mathbb{R}^{16 \times 768}$ span the **natural tangent space of physical affordances** (e.g. for water: flow, wave, freeze; for stone: crack, erode, crumble). 
-The 120 dipoles of `FCz` project onto this tangent basis:
-
-$$\Delta \mathbf{z} = \left( \mathbf{z}_{\text{FCz}} \cdot \mathbf{V}_{:16}^T \right) \mathbf{V}_{:16} \in \mathbb{R}^{768}$$
-
-The object transforms according to its own natural physical degrees of freedom.
+A central tenet of the NeuroCanvas framework is the **epistemological necessity of closed-loop active inference**:
+1. **Passive / Open-Loop EEG is High-Entropy Noise:** In the absence of an attentive feedback loop, the 2,000–4,200 macrocolumns beneath a 26 mm sensor fire asynchronously. Their microscopic dipoles cancel out, leaving raw recordings dominated by $1/f$ pink noise and muscle artifacts. Recording open-loop EEG with the expectation of decoding "thoughts" is scientifically ungrounded.
+2. **Closed-Loop Neurofeedback Forces Columnar Phase-Locking:** When a human perceives the generative canvas and actively attempts to steer the image, the brain enters a closed-loop cybernetic state. Prediction errors between top-down intention (deep-layer beta) and bottom-up visual feedback (superficial gamma) force local macrocolumns to synchronize their dipole moments into a macroscopic coherent wave, dramatically increasing the signal-to-noise ratio (SNR).
+3. **Ground-Truth Event Alignment:** Every generated image acts as a known attractor in latent space, providing physical ground truth for the accompanying electrophysiological state.
 
 ---
 
-## 5. Decoupled Multi-Service Microarchitecture
+## 4. Hardware Signal Chain & Transport Integrity
 
-```
-                            PRODUCTION RUNTIME TOPOLOGY
-                            
-   ┌─────────────────────────────────────────────────────────────────────────────┐
-   │                           CLIENT WEB BROWSER                                │
-   │   • Live Canvas View: <img src="http://localhost:8080/stream.mjpg">          │
-   │   • Direct Bluetooth: Web Bluetooth API (Service: 4fafc201-1fb5...)         │
-   │   • Ingestion: Batched POST /api/eeg_push (16-channel 24-bit packets)       │
-   └──────────────────────────────────────┬──────────────────────────────────────┘
-                                          │ HTTP / MJPEG (Port 8080)
-                                          ▼
-   ┌─────────────────────────────────────────────────────────────────────────────┐
-   │                     1. web_cloud_gateway.py (Port 8080)                     │
-   │   • Web UI Host & MJPEG Video Streamer                                      │
-   │   • Dynamic LSL Router: creates outlets 'User1_AFz', 'User2_F3' on demand   │
-   │   • IPC Server on Port 6002 (key: canvas): receives rendered BGR frames     │
-   └───────────────────▲───────────────────────────────────────┬─────────────────┘
-                       │                                       │
-     Rendered JPEG     │ Direct Memory IPC (Port 6002)         │ Native LabStreamingLayer
-     Frame Push        │                                       │ (LSL Multicast Streams)
-                       │                                       ▼
-   ┌───────────────────┴─────────────────────────────────────────────────────────┐
-   │                2. neuro_open_latent_genesis_live.py                         │
-   │   • Orchestrator & Runner: pulls LSL frames via HeterarchicalBrainEngine    │
-   │   • Delegates 100% of GPU math to neuro_genesis_engine.py                   │
-   │   • Delegates 100% of UI/HUD to neuro_hud.py (unless --headless)            │
-   │   • Direct IPC Client to Gateway (Port 6002, key: canvas)                   │
-   │   • Direct IPC Client to Brain Server (Port 6000, key: brain)               │
-   └───────────────────┬───────────────────────────────────────┬─────────────────┘
-                       │                                       │
-                       ▼                                       ▼
-   ┌──────────────────────────────────────┐  ┌───────────────────────────────────┐
-   │      neuro_genesis_engine.py         │  │           neuro_hud.py            │
-   │  • UniversalColumnProcessor (All Dev)│  │  • Pure Decoupled HUD            │
-   │  • Hopfield CANN & SVD Affordances   │  │  • Reads flat telemetry: dict    │
-   │  • True Cosine Delta World Seals     │  │  • 4D Gyroscope & 2D SWM Puck    │
-   │  • Returns flat telemetry: dict      │  │  • Interactive Device Role Cycle │
-   └──────────────────────────────────────┘  └───────────────────────────────────┘
-                       │ Latent Tensors & Prompts
-                       │ Direct Memory IPC (Port 6000)
-                       ▼
-   ┌─────────────────────────────────────────────────────────────────────────────┐
-   │                     3. brain_server.py (Port 6000)                          │
-   │   • Dedicated U-Net Diffusion Worker (LCM / SD-Turbo / SDXL)                │
-   │   • Single-pass GPU execution, returns raw rendered RGB arrays              │
-   └─────────────────────────────────────────────────────────────────────────────┘
-```
+### 4.1 ADS131M08 Programmable Gain Amplifier (4x, 8x, 16x, 32x)
+The FreeEEG16-alpha2 board uses two 8-channel 24-bit Texas Instruments ADS131M08 ADCs.
+* **Default Firmware Gain:** **4x** (Register `0x04` = `0x22`, `0x05` = `0x22`).
+* **Dynamic Conversion Factor ($\mu\text{V}/\text{count}$):**
+$$\text{uvScale} = \frac{1.2}{\text{Gain} \times (2^{23} - 1)} \times 10^6 = \frac{1.2}{\text{Gain} \times 8\,388\,607} \times 10^6$$
+  * Gain 4x: $\approx 0.0357628\,\mu\text{V}/\text{count}$ (Full-Scale Range: $\pm 300\text{ mV}$)
+  * Gain 8x: $\approx 0.0178814\,\mu\text{V}/\text{count}$ (Full-Scale Range: $\pm 150\text{ mV}$)
+  * Gain 16x: $\approx 0.0089407\,\mu\text{V}/\text{count}$ (Full-Scale Range: $\pm 75\text{ mV}$)
+  * Gain 32x: $\approx 0.0044703\,\mu\text{V}/\text{count}$ (Full-Scale Range: $\pm 37.5\text{ mV}$)
+When the gain is adjusted via the UI or API, the gateway transmits the appropriate register commands over BLE and updates `uvScale` dynamically, guaranteeing physical microvolt calibration in LSL.
 
-### 5.1 Structural Decoupling
-* **`neuro_genesis_engine.py`:** Contains zero Pygame or GUI code. Outputs a single flat `telemetry: dict`.
-* **`neuro_hud.py`:** Contains zero domain-specific class dependencies. Consumes `telemetry: dict` via safe `.get()` calls. Modifying the engine will never produce a `NameError` or `KeyError` in the HUD.
-* **`neuro_open_latent_genesis_live.py`:** An immutable ~140-line coordinator pipeline.
+### 4.2 Real-Time 24-bit Hardware Rail Clipping Detection
+Hardware saturation occurs when an electrode loses contact or picks up large electrostatic potentials, driving the ADC output code to the positive or negative supply rail ($+8\,388\,607$ or $-8\,388\,608$).
+* **Threshold:** $|v| \ge 8\,300\,000$ counts (99% of 24-bit full-scale range).
+* **Zero CPU Overhead:** The Web Bluetooth packet loop performs a single integer comparison per channel. Peak values are evaluated once per second, lighting up red indicator LEDs on the specific saturated channels.
 
-### 5.2 Dynamic Hot-Switching of Device Roles at Runtime (Zero Restarts)
-No need to restart the Python process to test different electrode placements:
-* Press **`TAB`** in the HUD window to cycle active hardware devices (`Dev 0`, `Dev 1`, etc.).
-* Press **`1`** $\to$ Instantly assign device to **`AFz`** (Macro-Scene & Delta Tree).
-* Press **`2`** $\to$ Instantly assign device to **`F3`** (2D SWM Ranks & Syntax Locking).
-* Press **`3`** $\to$ Instantly assign device to **`F4`** (Atmospheric Context & Entropy).
-* Press **`4`** $\to$ Instantly assign device to **`FCz`** (4D Affordance Operator).
-* Press **`5`** $\to$ Instantly assign device to **`Fpz`** (Epistemic Horizon & Paradigm Shift).
-* Press **`0`** $\to$ Instantly **disable** the device (its regional widget dims to `[OFFLINE]`).
-
-### 5.3 Headless Mode & Server Isolation
-When executed with `--headless`:
-* `neuro_hud.py` and `pygame` are **never imported or loaded into memory**.
-* Runs in pure headless Docker containers or remote GPU servers with zero X11/Wayland dependencies.
-* Rendered frames stream directly via IPC (Port 6002) to `web_cloud_gateway.py` for browser viewing at `http://localhost:8080/stream.mjpg`.
+### 4.3 Zero-Allocation Web Bluetooth & Drop Rate Tracking
+Packet format: `[0xA0, Counter (0..255), 48 Bytes ADC Data (16 ch x 24 bit), 0xC0]`.
+* **Packet Loss Tracking:** Byte `b[1]` is checked on every arrival:
+$$\text{Lost} = (\text{Counter} - (\text{LastCounter} + 1)) \pmod{256}$$
+$$\text{Loss Rate (\%)} = \frac{\text{Total Lost}}{\text{Total Received} + \text{Total Lost}} \times 100\%$$
+* **Throttled Ingestion:** Employs a non-overlapping request queue (`sending: false` latch, max buffer 400 samples) to prevent socket exhaustion (`ERR_INSUFFICIENT_RESOURCES`) in Chrome.
 
 ---
 
-## 6. Docker Compose Production Deployment
+## 5. Decoupled Architecture & Remote Command Relay
 
-The entire system is orchestrated via Docker Compose with full NVIDIA GPU passthrough, host networking (mandatory for LSL multicast resolution), and **Hugging Face model volume caching** so models are downloaded once and never redownloaded on container restarts.
-
-### 1. `docker-compose.yml`
-
-```yaml
-services:
-  # 1. Diffusion U-Net Worker (Port 6000)
-  brain-server:
-    build: .
-    container_name: neuro_brain_server
-    command: python3 brain_server.py --mode lcm
-    network_mode: host
-    ipc: host
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    restart: unless-stopped
-
-  # 2. Web UI, Web Bluetooth & Stream Gateway (Port 8080 & IPC 6002)
-  web-gateway:
-    build: .
-    container_name: neuro_web_gateway
-    command: python3 web_cloud_gateway.py 8080
-    network_mode: host
-    ipc: host
-    depends_on:
-      - brain-server
-    restart: unless-stopped
-
-  # 3. Headless BCI Genesis Core
-  neuro-canvas:
-    build: .
-    container_name: neuro_canvas_engine
-    command: >
-      python3 neuro_open_latent_genesis_live.py
-      --headless
-      --lore world_lore.txt
-      --steps 2
-      --strength-low 0.65
-      --burst-strength 0.85
-    network_mode: host
-    ipc: host
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    depends_on:
-      - brain-server
-      - web-gateway
-    restart: unless-stopped
+```
+                           SYSTEM NETWORK TOPOLOGY
+                           
+     [Projector in Darkness]      [Operator Smartphone]       [ChatGPT / External AI]
+       (Fullscreen Canvas)         (BLE Relay & Controls)        (REST Action Caller)
+                │                            │                            │
+                │ GET /stream.mjpg           │ POST /api/eeg_push         │ POST /api/world/concepts/add
+                │ GET /api/state_stream      │ GET /api/control_stream    │ GET /api/world/telemetry
+                ▼                            ▼                            ▼
+   ┌─────────────────────────────────────────────────────────────────────────────┐
+   │                    web_cloud_gateway.py (Port 8080)                         │
+   │  • TLS / HTTPS Secure Context Host (Cert: --cert, Key: --key)               │
+   │  • Central Device & Command Registry (Remote Command Relay)                 │
+   │  • Server-Sent Events (SSE) Broadcast Hub                                   │
+   │  • OpenAPI 3.0 Server (/openapi.json)                                       │
+   │  • Dynamic LSL Stream Router (pylsl)                                        │
+   └─────────────▲───────────────────────────▲─────────────────────────────┬─────┘
+                 │ IPC (Port 6002)           │ IPC (Port 6003)             │ IPC (Port 6004)
+                 │ JPEG Stream               │ PCM Audio Stream            │ Control Bus
+                 │                           │                             ▼
+   ┌─────────────┴─────────────┐ ┌───────────┴─────────────┐ ┌───────────────────┴───┐
+   │ neuro_heterarchy_diff...  │ │ neuro_heterarchy_mus... │ │  neuro_recorder.py     │
+   │ • Diffusion Runner        │ │ • MusicGen 32kHz Runner │ │  • 1:1 Video Timeline  │
+   │ • TBT 2.0 Genesis Engine  │ │ • Real-Time Lag Monitor │ │  • 16-ch EEG NPZ Dump  │
+   │ • Watchdog Parameter Guard│ │ • Anti-Lag Auto-Drop    │ │  • BIDS events.csv     │
+   └───────────────────────────┘ └─────────────────────────┘ └────────────────────────┘
 ```
 
-### 2. Launching with Docker Compose
+### 5.1 Secure Context TLS / HTTPS Requirements
+The Web Bluetooth API (`navigator.bluetooth`) is strictly prohibited by browser security specifications on insecure origins (`http://`). It functions **exclusively** on `https://` (or `localhost`).
+* The gateway provides CLI parameters `--cert` and `--key`, with cascaded fallback:
+  1. CLI arguments `--cert` / `--key`.
+  2. Environment variables `CERT_PATH` / `KEY_PATH`.
+  3. Local directory: `./cert.pem`, `./key.pem`.
+  4. Docker container directory: `/app/cert.pem`, `/app/key.pem`.
+* Self-signed certificates can be generated with a single command:
+  ```bash
+  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+  ```
 
+### 5.2 Remote Command Relay via Server-Sent Events (SSE)
+To decouple the device from the operator display:
+* A phone connects to the FreeEEG16 board via Web Bluetooth and registers with the gateway (`POST /api/device/register`).
+* An operator on a separate laptop (with no Bluetooth enabled) accesses the web console and adjusts the PGA Gain to 32x.
+* The gateway dispatches an SSE event (`ble_cmd`) to the phone.
+* The phone executes the GATT write to `cmdCharacteristic` and acknowledges completion.
+
+### 5.3 Ultra-Lean BLE Probe Mode for Mobile Hosts
+When running Web Bluetooth on lower-powered devices (such as smartphones or tablets):
+* Enable the `⚡ Легковесный BLE-зонд` toggle in the web console.
+* This shuts down local MJPEG video decoding and audio playback.
+* CPU usage drops below $1\%$, eliminating thermal throttling, garbage collection pauses, and packet drops.
+
+---
+
+## 6. Dynamic Concept Engine & Generative Synthesis
+
+### 6.1 Zero-Hardcode & Unconditioned Latent Browsing
+* **No Hardcoded Concepts:** If no lore file is passed (`--lore`), the system initializes with an empty list (`[]`).
+* **Unconditioned Baseline:** In the absence of concepts, the engine does not pass an all-zero tensor (which causes UNet `NaN` crashes and black screens). Instead, it loads the clean empty-string prompt embedding `get_77_embedding_gpu("")` and allows the canvas to evolve purely via phase-gradient drift.
+* **Subtractive Mechanics:** When concepts are removed, the engine smoothly transitions from the latent coordinates of the most recent concept without abrupt black-frame resets.
+
+### 6.2 Thread-Safe Atomic Vocab Swapping
+Dynamically adding or removing concepts from an external agent runs asynchronously against the primary GPU inference loop.
+* `UniversalSemanticSpace` uses an internal re-entrant lock (`threading.RLock()`).
+* New embeddings are precomputed and normalized before swapping `self.words` and `self.norm_vocab` atomically.
+* Slot index lookups are protected via modulo boundary clamping (`idx % len(self.words)`), preventing `IndexError: list index out of range`.
+
+### 6.3 Dynamics Presets & Safety Watchdog
+To prevent out-of-range parameters from freezing or breaking diffusion, the console provides three tuned presets alongside manual overrides:
+* **🧘 Глубокая медитация:** Steps: 2, CFG: 1.0, Strength: 0.45–0.70, EMA: 0.30 (slow, viscous, continuous morphing).
+* **⚖️ Баланс / Стандарт:** Steps: 2, CFG: 1.0, Strength: 0.55–0.85, EMA: 0.16 (stable concept tracking).
+* **⚡ Экспрессия / Высокая динамика:** Steps: 3, CFG: 1.2, Strength: 0.65–0.92, EMA: 0.08 (rapid response to phase transitions).
+* **Watchdog Auto-Reversion:** Parameters are clamped server-side. If the U-Net fails to produce a valid image, the worker automatically rolls back to the last known safe configuration.
+
+### 6.4 MusicGen 32 kHz Real-Time Lag Monitor & Anti-Lag Buffer
+Because MusicGen generates audio in discrete blocks, faster-than-real-time generation (RTF > 1.0) can lead to buffer bloat:
+* **Live Telemetry:** The UI displays queue depth in seconds, chunk count, RTF, and latency in milliseconds.
+* **Anti-Lag Auto-Drop:** If the queue exceeds `target_buffer_count` (e.g., 2 chunks), the gateway drops the oldest audio blocks, keeping auditory feedback locked to the current cortical state.
+
+---
+
+## 7. Multimodal 1:1 Synchronized Session Recorder
+
+### 7.1 Hardware-Locked 1:1 CFR Video Timeline
+Diffusion generation produces frames at variable intervals (VFR). Storing frames sequentially in a fixed-framerate container causes temporal distortion.
+* `NeuroSessionRecorder` creates a **30 FPS Constant Frame Rate (CFR)** container with **zero cumulative drift**.
+* Each frame is held in the video for the exact number of ticks it was displayed on screen:
+$$\text{Ticks to Write} = \text{round}\left((T_{\text{next}} - T_{\text{start}}) \times 30.0\right) - \text{Total Ticks Written}$$
+* The final video duration matches the continuous raw EEG duration down to the millisecond.
+
+### 7.2 Dataset Structure
+When recording is terminated, a timestamped session directory is finalized:
+```
+sessions/session_20261010_131400/
+├── eeg_raw.npz          # Raw 16-channel EEG data and LSL hardware timestamps
+├── video_timeline.mp4   # 1:1 real-time video timeline (30 FPS)
+├── events.csv           # Millisecond-accurate log of frame indices, concepts, and 2D SWM coordinates
+├── manifest.json        # Session metadata, durations, and sample counts
+└── frames/              # Directory containing individual full-resolution JPEG frames
+    ├── frame_000000.jpg
+    ├── frame_000001.jpg
+    └── ...
+```
+
+#### Structure of `events.csv`:
+| Column | Description |
+| :--- | :--- |
+| `unique_frame_id` | Monotonically increasing unique image identifier. |
+| `lsl_timestamp` | Hardware LSL timestamp (`local_clock()`) when frame was displayed. |
+| `wall_time` | POSIX system timestamp. |
+| `duration_ms` | Exact duration the frame was visible on screen. |
+| `video_tick_start` | Starting index of frame in `video_timeline.mp4` (at 30 FPS). |
+| `video_tick_end` | Ending index of frame in `video_timeline.mp4`. |
+| `event_type` | Event descriptor (`FRAME_DISPLAYED`, `SESSION_START`, etc.). |
+| `root_concept` | Dominant concept container ($A$ in $A \supset B$). |
+| `child_concept` | Nested concept ($B$ in $A \supset B$). |
+| `dag_relation` | Topological relation ($⊃$ parent, $\parallel$ co-equal peer). |
+| `x_local` | 2D SWM Local Rank coordinate ($L_1\text{--}L_3$) from F3. |
+| `y_global` | 2D SWM Global Rank coordinate ($G_1\text{--}G_3$) from F3. |
+| `dyn_strength` | Diffusion denoising strength applied for this frame. |
+| `active_pool` | Pipe-delimited list of active concepts in memory. |
+
+---
+
+## 8. AI Agent Integration (ChatGPT / Function Calling)
+
+External agents interface with the world via OpenAPI 3.0 endpoints (`http://localhost:8080/openapi.json`):
+
+### Available API Endpoints:
+* `GET  /api/world/concepts` — Retrieve active visual concepts.
+* `POST /api/world/concepts/add` — Add a visual concept on the fly (`{"concept": "Wave"}`).
+* `POST /api/world/concepts/remove` — Remove a visual concept on the fly (`{"concept": "Wave"}`).
+* `GET  /api/music/concepts` — Retrieve active musical themes.
+* `POST /api/music/concepts/add` — Add a music theme (`{"concept": "crackling fire ambient"}`).
+* `POST /api/music/concepts/remove` — Remove a music theme.
+* `GET  /api/world/telemetry` — Query dominant concept, 2D SWM coordinates, and user focus.
+* `POST /api/recording/start` — Start synchronized multimodal recording.
+* `POST /api/recording/stop` — Stop recording and finalize session dataset.
+* `POST /api/diffusion/config` — Adjust U-Net generation parameters.
+* `POST /api/device/command` — Relay hardware commands (gain, role) to active devices.
+
+### Automated Agent Simulation:
+Run the provided simulation script to test dynamic two-by-two concept replacement:
 ```bash
-# Build and launch all three microservices in detached mode
+python3 demo_agent_quest_simulation.py
+```
+
+---
+
+## 9. Deployment & Operations
+
+### 9.1 Docker Compose Startup
+```bash
+# Build and launch all 5 containers
 docker compose up --build -d
 
-# Follow generation logs and LSL routing
-docker compose logs -f neuro-canvas
-
-# Open the Web UI in your browser:
-# http://localhost:8080/
+# Monitor gateway logs
+docker compose logs -f web-gateway
 ```
 
----
-
-## 7. Interactive Keybindings & HUD Instrumentation
-
-```
-  KEY               ACTION                                NEUROCOMPUTATIONAL FUNCTION
- ──────────────────────────────────────────────────────────────────────────────────────────────────
-  TAB               Cycle Device Selection                Selects Dev 0, Dev 1, etc., for role assignment
-  1                 Assign to AFz                         Instantiates Macro-Scene & Delta Tree
-  2                 Assign to F3                          Instantiates 2D SWM Rank Matrix & Syntax Lock
-  3                 Assign to F4                          Instantiates Contextual Entropy & Denoising Modulation
-  4                 Assign to FCz                         Instantiates 4D Affordance Gyroscope
-  5                 Assign to Fpz                         Instantiates Epistemic Horizon & Hopfield Basin
-  0                 Disable Device                        Sets device to Offline (stops faking data)
-  H                 Toggle Minimal UI                     Switches between Full Diagnostic HUD and Clean Canvas
-  R                 Reset World Seals                     Dissolves all active seals and clears chrono-tunnel
-  C                 Flush Canvas                          Flushes img2img recurrent buffer
-  ESC               Safe Shutdown                         Terminates threads and releases IPC sockets cleanly
-```
-
-### Visual Panel Layout:
-1. **Top Bar (Fpz):** Displays active paradigm status, 50k Hopfield attractor name, and continuous epistemic tension meter.
-2. **Left Panel (Primary Active Slots):** Displays the $S(t)$ delta-theta sectors of whichever physical region is active, with individual stability bars.
-3. **Right-Top Panel (89.5 Hz Causal Ripple Graph):** Displays the live force-directed DAG of directed phase leads ($\Lambda$).
-4. **Bottom Panel (Multi-Regional Diagnostic Suite):**
-   * **`AFz` Tunnel (x=30):** Multi-ring Delta spiral chrono-tunnel.
-   * **`F3/F4` 2D SWM Manifold (x=350):** 2D rank pad showing continuous $(x_L, y_G)$ puck motion + F4 entropy iris.
-   * **`FCz` Gyroscope (x=750):** 4D radar showing translation $[l_x, l_y]$, torsion $r_x$, and lookahead $r_y$.
-   * **Active Lore Palette (x=1050):** Clean concept cards with zero text collisions.
-
----
-
-## 8. CLI Configuration Reference
-
+### 9.2 Local Development Startup (Without Docker)
 ```bash
-# Minimal single-sensor test (F3 isolated, 100 Hz Gamma, no faking)
-python3 neuro_open_latent_genesis_live.py \
-  --users "User1:F3=0" \
-  --concepts "mountains,rivers" \
-  --gamma-max 100.0 \
-  --seal-thresh 0.68 \
-  --steps 2
+# 1. Start the diffusion model worker
+python3 brain_server.py --mode lcm
 
-# Full 5-region heterarchical suite
-python3 neuro_open_latent_genesis_live.py \
-  --users "User1:AFz=0,F3=1,F4=2,FCz=3,Fpz=4" \
-  --lore world_lore.txt \
-  --gamma-max 100.0 \
-  --seal-thresh 0.72 \
-  --decay-cycles 2 \
-  --steps 2
+# 2. Start the MusicGen audio worker
+python3 musicgen_server.py --port 6005
 
-# Production headless server (Docker / Cloud GPU)
-python3 neuro_open_latent_genesis_live.py \
-  --headless \
-  --lore world_lore.txt \
-  --gamma-max 100.0 \
-  --steps 2
+# 3. Start the Web & LSL Gateway
+python3 web_cloud_gateway.py --port 8080 --cert ./cert.pem --key ./key.pem
+
+# 4. Start the Vision Heterarchy Engine
+python3 neuro_heterarchy_diffusion.py --mode lcm --gamma-max 100.0
+
+# 5. Start the Music Heterarchy Engine
+python3 neuro_heterarchy_musicgen.py --mode semantic --gamma-max 100.0
 ```
 
-### Complete Parameter Index:
-
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--gamma-max` | `float` | `100.0` | Maximum frequency cutoff for the cortical gamma band in Hz. |
-| `--seal-thresh` | `float` | `0.68` | Cosine stability threshold required to charge a World Seal (`1.0` disables sealing). |
-| `--seal-cycles` | `int` | `4` | Number of consecutive stable delta cycles required to lock a seal. |
-| `--decay-cycles`| `int` | `2` | Number of unstable delta cycles required to dissolve/unlock a seal. |
-| `--refresh-cycles`| `int` | `2` | Buffer length for cycle-to-cycle cosine stability comparison. |
-| `--lore`, `--concepts-file` | `str` | `None` | Path to `.txt` or `.json` world lore file. |
-| `--concepts` | `str` | `None` | Comma-separated list of concept strings. |
-| `--users` | `str` | `None` | Montage mapping string (e.g. `'User1:F3=0'` or `'User1:AFz=0,FCz=1'`). |
-| `--mode` | `str` | `lcm` | Pipeline mode (`lcm`, `turbo`, `sdxl-turbo`, `sdxl`). |
-| `--speed` | `str` | `fast` | Speed profile (`fast` = $448 \times 336$, `quality` = $512 \times 384$). |
-| `--steps` | `int` | `2` | Denoising inference steps per frame. |
-| `--strength-low` | `float` | `0.55` | Baseline img2img mutation strength. |
-| `--strength-high`| `float` | `0.75` | Ceiling of img2img mutation strength under high F4 entropy. |
-| `--burst-strength`| `float`| `0.75` | Mutation strength during concept switches or Fpz paradigm shifts. |
-| `--burst-duration`| `float`| `0.0` | Duration of concept switch burst in seconds. |
-| `--headless` | `flag` | `False` | Disables Pygame window for headless server / Docker environments. |
-| `--minimal-ui` | `flag` | `False` | Starts in full-canvas mode without diagnostic HUD widgets. |
-| `--sps` | `int` | `250` | EEG sampling rate (`250` or `500` Hz). |
-| `--no-taesd` | `flag` | `False` | Disables Tiny Autoencoder (TAESD) and uses standard SD 1.5 VAE. |
-| `--no-color` | `flag` | `False` | Bypasses color constancy post-processing surgery. |
+### 9.3 Dataset Verification & Analysis
+To verify synchronization and view EEG traces aligned with specific video frames:
+```bash
+python3 analyze_session.py sessions/session_YYYYMMDD_HHMMSS
+```
 
 ---
 
-## 9. Comprehensive Scientific Bibliography & DOIs
+## 10. Scientific References
 
-1. **Fan, Y., Wang, M., Ding, N., & Luo, H. (2024).** Two-dimensional neural geometry underpins hierarchical organization of sequence in human working memory. *Nature Human Behaviour*, 8, 2150–2163. [DOI: 10.1038/s41562-024-02047-8](https://doi.org/10.1038/s41562-024-02047-8)
-2. **Chen, J., Zhang, C., Hu, P., Min, B., & Wang, L. (2024).** Flexible control of sequence working memory in the macaque frontal cortex. *Neuron*, 112(20), 3502–3514. [DOI: 10.1016/j.neuron.2024.07.024](https://doi.org/10.1016/j.neuron.2024.07.024)
-3. **Dickey, C. W., et al. (2022).** Widespread ripples synchronize human cortical activity during sleep, waking, and memory recall. *PNAS*, 119(28), e2107797119. [DOI: 10.1073/pnas.2107797119](https://doi.org/10.1073/pnas.2107797119)
-4. **Hawkins, J., Leadholm, N., & Clay, V. (2025/2026).** The Thousand Brains Theory 2.0: An Extension for the Long-Range Connections of the Neocortical Heterarchy. *arXiv:2507.05888v2 [q-bio.NC]*.
-5. **Miller, E. K., Lundqvist, M., & Bastos, A. M. (2018).** Working Memory 2.0. *Neuron*, 100(2), 463–475. [DOI: 10.1016/j.neuron.2018.09.023](https://doi.org/10.1016/j.neuron.2018.09.023)
-6. **Bastos, A. M., Loonis, R., Kornblith, S., Lundqvist, M., & Miller, E. K. (2018).** Laminar recordings in frontal cortex suggest distinct layers for maintenance and control of working memory. *PNAS*, 115(5), 1117–1122. [DOI: 10.1073/pnas.1717766115](https://doi.org/10.1073/pnas.1717766115)
-7. **Colgin, L. L., et al. (2009).** Frequency of gamma oscillations routes flow of information in the hippocampus. *Nature*, 462(7271), 353–357. [DOI: 10.1038/nature08573](https://doi.org/10.1038/nature08573)
-8. **Bieri, K. W., Bobbitt, K. N., & Colgin, L. L. (2014).** Slow and fast gamma rhythms coordinate different spatial coding modes in hippocampal place cells. *Neuron*, 82(3), 670–681. [DOI: 10.1016/j.neuron.2014.03.013](https://doi.org/10.1016/j.neuron.2014.03.013)
-9. **Ding, N., Melloni, L., Zhang, H., Tian, X., & Poeppel, D. (2016).** Cortical tracking of hierarchical linguistic structures in connected speech. *Nature Neuroscience*, 19(1), 158–164. [DOI: 10.1038/nn.4186](https://doi.org/10.1038/nn.4186)
-10. **Bruña, R., Maestú, F., & Pereda, E. (2018).** Phase Locking Value revisited: teaching new tricks to an old dog. *Journal of Neural Engineering*, 15(5), 056011. [DOI: 10.1088/1741-2552/aacfe4](https://doi.org/10.1088/1741-2552/aacfe4)
-11. **Churchland, M. M., & Shenoy, K. V. (2024).** Preparatory activity and the expansive null-space. *Nature Reviews Neuroscience*, 25, 213–236. [DOI: 10.1038/s41583-024-00796-z](https://doi.org/10.1038/s41583-024-00796-z)
-12. **Zimnik, A. J., & Churchland, M. M. (2021).** Independent generation of sequence elements by motor cortex. *Nature Neuroscience*, 24, 412–424. [DOI: 10.1038/s41593-021-00798-5](https://doi.org/10.1038/s41593-021-00798-5)
-13. **Weber, J., et al. (2023).** Subspace partitioning in the human prefrontal cortex resolves cognitive interference. *PNAS*, 120(31), e2220523120. [DOI: 10.1073/pnas.2220523120](https://doi.org/10.1073/pnas.2220523120)
-14. **Flesch, T., et al. (2022).** Orthogonal representations for robust context-dependent task performance in brains and neural networks. *Neuron*, 110(7), 1258–1270. [DOI: 10.1016/j.neuron.2022.01.005](https://doi.org/10.1016/j.neuron.2022.01.005)
-15. **Panichello, M. F., & Buschman, T. J. (2021).** Shared mechanisms underlie the control of working memory and attention. *Nature*, 592, 601–605. [DOI: 10.1038/s41586-021-03390-w](https://doi.org/10.1038/s41586-021-03390-w)
-16. **Badre, D., et al. (2021).** The dimensionality of neural representations for control. *Current Opinion in Behavioral Sciences*, 38, 20–28. [DOI: 10.1016/j.cobeha.2020.07.002](https://doi.org/10.1016/j.cobeha.2020.07.002)
-17. **Koechlin, E., & Hyafil, A. (2007).** Anterior prefrontal function and the limits of human decision-making. *Science*, 318(5850), 594–598. [DOI: 10.1126/science.1142995](https://doi.org/10.1126/science.1142995)
-18. **Boorman, E. D., et al. (2009).** How green is the grass on the other side? Frontopolar cortex and evidence for alternatives. *Neuron*, 62(5), 733–743. [DOI: 10.1016/j.neuron.2009.05.014](https://doi.org/10.1016/j.neuron.2009.05.014)
-19. **Fries, P. (2015).** Rhythms for cognition: communication through coherence. *Neuron*, 88(1), 220–235. [DOI: 10.1016/j.neuron.2015.09.034](https://doi.org/10.1016/j.neuron.2015.09.034)
-20. **Lisman, J. E., & Jensen, O. (2013).** The theta-gamma neural code. *Neuron*, 77(6), 1002–1016. [DOI: 10.1016/j.neuron.2013.03.007](https://doi.org/10.1016/j.neuron.2013.03.007)
+1. **Hawkins, J., Leadholm, N., & Clay, V. (2025/2026).** *The Thousand Brains Theory 2.0: An Extension for the Long-Range Connections of the Neocortical Heterarchy.* arXiv:2507.05888v2 [q-bio.NC].
+2. **Miller, E. K., Lundqvist, M., & Bastos, A. M. (2018).** *Working Memory 2.0.* Neuron, 100(2), 463–475. [DOI: 10.1016/j.neuron.2018.09.023](https://doi.org/10.1016/j.neuron.2018.09.023)
+3. **Bastos, A. M., Loonis, R., Kornblith, S., Lundqvist, M., & Miller, E. K. (2018).** *Laminar recordings in frontal cortex suggest distinct layers for maintenance and control of working memory.* PNAS, 115(5), 1117–1122. [DOI: 10.1073/pnas.1717766115](https://doi.org/10.1073/pnas.1717766115)
+4. **Dickey, C. W., et al. (2022).** *Widespread ripples synchronize human cortical activity during sleep, waking, and memory recall.* PNAS, 119(28), e2107797119. [DOI: 10.1073/pnas.2107797119](https://doi.org/10.1073/pnas.2107797119)
+5. **Fan, Y., Wang, M., Ding, N., & Luo, H. (2024).** *Two-dimensional neural geometry underpins hierarchical organization of sequence in human working memory.* Nature Human Behaviour, 8, 2150–2163. [DOI: 10.1038/s41562-024-02047-8](https://doi.org/10.1038/s41562-024-02047-8)
+6. **Chen, J., Zhang, C., Hu, P., Min, B., & Wang, L. (2024).** *Flexible control of sequence working memory in the macaque frontal cortex.* Neuron, 112(20), 3502–3514. [DOI: 10.1016/j.neuron.2024.07.024](https://doi.org/10.1016/j.neuron.2024.07.024)
+7. **Colgin, L. L., et al. (2009).** *Frequency of gamma oscillations routes flow of information in the hippocampus.* Nature, 462(7271), 353–357. [DOI: 10.1038/nature08573](https://doi.org/10.1038/nature08573)
+8. **Bieri, K. W., Bobbitt, K. N., & Colgin, L. L. (2014).** *Slow and fast gamma rhythms coordinate different spatial coding modes in hippocampal place cells.* Neuron, 82(3), 670–681. [DOI: 10.1016/j.neuron.2014.03.013](https://doi.org/10.1016/j.neuron.2014.03.013)
+9. **Bruña, R., Maestú, F., & Pereda, E. (2018).** *Phase Locking Value revisited: teaching new tricks to an old dog.* Journal of Neural Engineering, 15(5), 056011. [DOI: 10.1088/1741-2552/aacfe4](https://doi.org/10.1088/1741-2552/aacfe4)
+10. **Nolte, G., et al. (2004).** *Identifying true brain interaction from EEG data using the imaginary part of coherency.* Clinical Neurophysiology, 115(10), 2292–2307. [DOI: 10.1016/j.clinph.2004.04.029](https://doi.org/10.1016/j.clinph.2004.04.029)
+11. **Mountcastle, V. B. (1997).** *The columnar organization of the neocortex.* Brain, 120(4), 701–722. [DOI: 10.1093/brain/120.4.701](https://doi.org/10.1093/brain/120.4.701)
+12. **Fries, P. (2015).** *Rhythms for cognition: communication through coherence.* Neuron, 88(1), 220–235. [DOI: 10.1016/j.neuron.2015.09.034](https://doi.org/10.1016/j.neuron.2015.09.034)
+
