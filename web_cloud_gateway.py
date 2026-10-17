@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.6 (FULL RELIABLE STREAMING)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.7 (RELIABLE STREAMING & DISCOVERY)
 ===================================================================================
 """
 
@@ -97,10 +97,13 @@ def broadcast_sse(event_name: str, payload: dict):
     with sse_lock:
         dead = []
         for q in sse_clients:
-            try: q.put_nowait(msg)
-            except Exception: dead.append(q)
+            try:
+                q.put_nowait(msg)
+            except Exception:
+                dead.append(q)
         for d in dead:
-            if d in sse_clients: sse_clients.remove(d)
+            if d in sse_clients:
+                sse_clients.remove(d)
 
 class DynamicLSLRouter:
     def __init__(self):
@@ -128,7 +131,8 @@ class DynamicLSLRouter:
     def push(self, user, role, samples, sps=DEFAULT_SPS):
         outlet = self.get_or_create_outlet(user, role, sps)
         for s in samples:
-            if len(s) == NUM_CHANNELS: outlet.push_sample(s)
+            if len(s) == NUM_CHANNELS:
+                outlet.push_sample(s)
 
 lsl_router = DynamicLSLRouter()
 
@@ -148,7 +152,7 @@ OPENAPI_SPEC = {
     "info": {
         "title": "NeuroCanvas Unified World & MusicGen Agent API",
         "description": "API для внешних LLM-агентов для управления генерацией.",
-        "version": "7.6.0"
+        "version": "7.7.0"
     },
     "servers": [{"url": "http://localhost:8080"}],
     "paths": {
@@ -203,7 +207,8 @@ OPENAPI_SPEC = {
 }
 
 class UnifiedCloudHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+    # ПРИНУДИТЕЛЬНО HTTP/1.0: отключает застревание буферов Keep-Alive между стримами!
+    protocol_version = "HTTP/1.0"
 
     def _serve_index_html(self):
         found_path = find_index_file()
@@ -219,12 +224,12 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(file_size))
+            self.send_header('Connection', 'close')
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
             self.send_header('Pragma', 'no-cache')
             self.send_header('Expires', '0')
             self.end_headers()
 
-            # Отправка потоком блоками по 64 КБ с гарантированным flush()
             with open(found_path, 'rb') as f:
                 shutil.copyfileobj(f, self.wfile, length=64 * 1024)
             self.wfile.flush()
@@ -238,10 +243,12 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(payload)))
+        self.send_header('Connection', 'close')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Headers', '*')
         self.end_headers()
         self.wfile.write(payload)
+        self.wfile.flush()
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -266,13 +273,15 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             self.send_header('Pragma', 'no-cache')
             self.end_headers()
             while True:
-                with jpeg_lock: frame = latest_jpeg_frame
+                with jpeg_lock:
+                    frame = latest_jpeg_frame
                 if frame is not None:
                     try:
                         self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\n')
                         self.wfile.write(f'Content-Length: {len(frame)}\r\n\r\n'.encode() + frame + b'\r\n')
                         self.wfile.flush()
-                    except Exception: break
+                    except Exception:
+                        break
                 time.sleep(0.016)
 
         elif clean_path in ['/audio.wav', '/stream.wav']:
@@ -283,32 +292,36 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             try:
                 self.wfile.write(make_wav_header())
                 self.wfile.flush()
-            except Exception: return
+            except Exception:
+                return
 
             while True:
                 chunk = None
                 with audio_pcm_lock:
-                    if len(audio_pcm_queue) > 0: chunk = audio_pcm_queue.pop(0)
+                    if len(audio_pcm_queue) > 0:
+                        chunk = audio_pcm_queue.pop(0)
                 if chunk is not None:
                     try:
                         floats = np.frombuffer(chunk, dtype=np.float32)
                         int16s = (np.clip(floats, -1.0, 1.0) * 32767).astype(np.int16)
                         self.wfile.write(int16s.tobytes())
                         self.wfile.flush()
-                    except Exception: break
-                else: time.sleep(0.02)
+                    except Exception:
+                        break
+                else:
+                    time.sleep(0.02)
 
         elif clean_path == '/api/state_stream':
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-cache')
-            self.send_header('Connection', 'keep-alive')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
 
             import queue
             client_q = queue.Queue(maxsize=30)
-            with sse_lock: sse_clients.append(client_q)
+            with sse_lock:
+                sse_clients.append(client_q)
             
             with world_state_lock, music_state_lock:
                 combo = {"world": world_state, "music": music_state}
@@ -323,7 +336,8 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
             except Exception:
                 with sse_lock:
-                    if client_q in sse_clients: sse_clients.remove(client_q)
+                    if client_q in sse_clients:
+                        sse_clients.remove(client_q)
 
         elif clean_path == '/api/world/concepts':
             with world_state_lock:
@@ -428,7 +442,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                         active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
                     except Exception:
                         pass
-            broadcast_full_state()
+                broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
         elif clean_path == '/api/diffusion/config':
@@ -467,8 +481,10 @@ def send_diff_ipc(payload):
     global active_diff_ctrl_conn
     with diff_ctrl_lock:
         if active_diff_ctrl_conn is not None:
-            try: active_diff_ctrl_conn.send(payload)
-            except Exception: active_diff_ctrl_conn = None
+            try:
+                active_diff_ctrl_conn.send(payload)
+            except Exception:
+                active_diff_ctrl_conn = None
 
 class ThreadedHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -477,25 +493,32 @@ class ThreadedHTTPServer(ThreadingHTTPServer):
 
 def ipc_frame_receiver():
     global latest_jpeg_frame
-    try: listener = Listener(('localhost', IPC_PORT), authkey=IPC_AUTHKEY)
-    except Exception: return
+    try:
+        listener = Listener(('localhost', IPC_PORT), authkey=IPC_AUTHKEY)
+    except Exception:
+        return
     while True:
         try:
             conn = listener.accept()
             while True:
                 data = conn.recv()
                 if isinstance(data, bytes):
-                    with jpeg_lock: latest_jpeg_frame = data
-        except Exception: time.sleep(0.5)
+                    with jpeg_lock:
+                        latest_jpeg_frame = data
+        except Exception:
+            time.sleep(0.5)
 
 def ipc_audio_receiver():
     global active_music_conn
-    try: listener = Listener(('localhost', IPC_AUDIO_PORT), authkey=IPC_AUDIO_AUTHKEY)
-    except Exception: return
+    try:
+        listener = Listener(('localhost', IPC_AUDIO_PORT), authkey=IPC_AUDIO_AUTHKEY)
+    except Exception:
+        return
     while True:
         try:
             conn = listener.accept()
-            with music_conn_lock: active_music_conn = conn
+            with music_conn_lock:
+                active_music_conn = conn
             while True:
                 data = conn.recv()
                 if isinstance(data, bytes):
@@ -510,18 +533,23 @@ def ipc_audio_receiver():
                         with music_state_lock:
                             music_state["buffer_sec"] = b_sec
                             music_state["buffer_chunks"] = len(audio_pcm_queue)
-        except Exception: time.sleep(0.5)
+        except Exception:
+            time.sleep(0.5)
         finally:
-            with music_conn_lock: active_music_conn = None
+            with music_conn_lock:
+                active_music_conn = None
 
 def ipc_control_listener():
     global active_diff_ctrl_conn
-    try: listener = Listener(('localhost', IPC_DIFF_CONTROL_PORT), authkey=IPC_DIFF_AUTHKEY)
-    except Exception: return
+    try:
+        listener = Listener(('localhost', IPC_DIFF_CONTROL_PORT), authkey=IPC_DIFF_AUTHKEY)
+    except Exception:
+        return
     while True:
         try:
             conn = listener.accept()
-            with diff_ctrl_lock: active_diff_ctrl_conn = conn
+            with diff_ctrl_lock:
+                active_diff_ctrl_conn = conn
             print("🔗 [GATEWAY IPC] Канал управления диффузией соединен!")
             while True:
                 msg = conn.recv()
@@ -535,9 +563,11 @@ def ipc_control_listener():
                         with world_state_lock:
                             world_state["current_puck"] = msg.get("puck", [0.0, 0.0])
                             world_state["active_thought"] = msg.get("active_thought", "")
-        except Exception: time.sleep(0.5)
+        except Exception:
+            time.sleep(0.5)
         finally:
-            with diff_ctrl_lock: active_diff_ctrl_conn = None
+            with diff_ctrl_lock:
+                active_diff_ctrl_conn = None
 
 def load_initial_lore(lore_path):
     if lore_path and os.path.exists(lore_path):
@@ -560,17 +590,23 @@ def main():
     initial_world_words = load_initial_lore(args.lore or os.environ.get("LORE_PATH"))
     initial_music_words = load_initial_lore(args.music_lore or os.environ.get("MUSIC_LORE_PATH"))
 
-    with world_state_lock: world_state["concepts"] = initial_world_words
-    with music_state_lock: music_state["concepts"] = initial_music_words
+    with world_state_lock:
+        world_state["concepts"] = initial_world_words
+    with music_state_lock:
+        music_state["concepts"] = initial_music_words
 
     cert_candidates = []
-    if args.cert: cert_candidates.append(args.cert)
-    if os.environ.get("CERT_PATH"): cert_candidates.append(os.environ.get("CERT_PATH"))
+    if args.cert:
+        cert_candidates.append(args.cert)
+    if os.environ.get("CERT_PATH"):
+        cert_candidates.append(os.environ.get("CERT_PATH"))
     cert_candidates.extend(["cert.pem", "./cert.pem", "/app/cert.pem", "../cert.pem"])
 
     key_candidates = []
-    if args.key: key_candidates.append(args.key)
-    if os.environ.get("KEY_PATH"): key_candidates.append(os.environ.get("KEY_PATH"))
+    if args.key:
+        key_candidates.append(args.key)
+    if os.environ.get("KEY_PATH"):
+        key_candidates.append(os.environ.get("KEY_PATH"))
     key_candidates.extend(["key.pem", "./key.pem", "/app/key.pem", "../key.pem"])
 
     found_cert = next((p for p in cert_candidates if os.path.exists(p)), None)
