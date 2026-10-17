@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.5 (CLEAN SYNTAX & STATIC DISCOVERY)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.6 (FULL RELIABLE STREAMING)
 ===================================================================================
 """
 
@@ -11,6 +11,7 @@ import ssl
 import json
 import time
 import struct
+import shutil
 import argparse
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -147,7 +148,7 @@ OPENAPI_SPEC = {
     "info": {
         "title": "NeuroCanvas Unified World & MusicGen Agent API",
         "description": "API для внешних LLM-агентов для управления генерацией.",
-        "version": "7.5.0"
+        "version": "7.6.0"
     },
     "servers": [{"url": "http://localhost:8080"}],
     "paths": {
@@ -214,16 +215,23 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            with open(found_path, 'rb') as f:
-                content = f.read()
+            file_size = os.path.getsize(found_path)
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(content)))
+            self.send_header('Content-Length', str(file_size))
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.end_headers()
-            self.wfile.write(content)
+
+            # Отправка потоком блоками по 64 КБ с гарантированным flush()
+            with open(found_path, 'rb') as f:
+                shutil.copyfileobj(f, self.wfile, length=64 * 1024)
+            self.wfile.flush()
+        except BrokenPipeError:
+            pass
         except Exception as e:
-            self.send_error(500, f"Ошибка чтения index.html: {e}")
+            print(f"⚠️ Ошибка при передаче HTML: {e}")
 
     def _send_json(self, code, obj):
         payload = json.dumps(obj).encode('utf-8')
