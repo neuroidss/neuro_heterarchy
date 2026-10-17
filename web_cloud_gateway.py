@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.7 (RELIABLE STREAMING & DISCOVERY)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.8 (CLEAN STATIC DISCOVERY & STREAMING)
 ===================================================================================
 """
 
@@ -32,18 +32,6 @@ DEFAULT_SPS = 250.0
 SAMPLE_RATE = 32000
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SEARCH_HTML_PATHS = [
-    os.path.join(BASE_DIR, 'static', 'index.html'),
-    os.path.join(BASE_DIR, 'index.html'),
-    os.path.join(os.getcwd(), 'static', 'index.html'),
-    os.path.join(os.getcwd(), 'index.html')
-]
-
-def find_index_file():
-    for p in SEARCH_HTML_PATHS:
-        if os.path.isfile(p):
-            return p
-    return None
 
 latest_jpeg_frame = None
 jpeg_lock = threading.Lock()
@@ -152,7 +140,7 @@ OPENAPI_SPEC = {
     "info": {
         "title": "NeuroCanvas Unified World & MusicGen Agent API",
         "description": "API для внешних LLM-агентов для управления генерацией.",
-        "version": "7.7.0"
+        "version": "7.8.0"
     },
     "servers": [{"url": "http://localhost:8080"}],
     "paths": {
@@ -207,43 +195,35 @@ OPENAPI_SPEC = {
 }
 
 class UnifiedCloudHandler(BaseHTTPRequestHandler):
-    # ПРИНУДИТЕЛЬНО HTTP/1.0: отключает застревание буферов Keep-Alive между стримами!
-    protocol_version = "HTTP/1.0"
+    protocol_version = "HTTP/1.1"
 
-    def _serve_index_html(self):
-        found_path = find_index_file()
-        if not found_path:
-            self.send_error(
-                404, 
-                f"index.html не найден. Положите файл в папку static/index.html. Проверены пути: {SEARCH_HTML_PATHS}"
-            )
+    def _serve_file(self, file_path, content_type):
+        if not os.path.isfile(file_path):
+            self.send_error(404, f"Файл не найден: {file_path}")
             return
-
         try:
-            file_size = os.path.getsize(found_path)
+            file_size = os.path.getsize(file_path)
             self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Type', f'{content_type}; charset=utf-8')
             self.send_header('Content-Length', str(file_size))
-            self.send_header('Connection', 'close')
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
             self.send_header('Pragma', 'no-cache')
             self.send_header('Expires', '0')
             self.end_headers()
 
-            with open(found_path, 'rb') as f:
+            with open(file_path, 'rb') as f:
                 shutil.copyfileobj(f, self.wfile, length=64 * 1024)
             self.wfile.flush()
         except BrokenPipeError:
             pass
         except Exception as e:
-            print(f"⚠️ Ошибка при передаче HTML: {e}")
+            print(f"⚠️ Ошибка передачи файла {file_path}: {e}")
 
     def _send_json(self, code, obj):
         payload = json.dumps(obj).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(payload)))
-        self.send_header('Connection', 'close')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Headers', '*')
         self.end_headers()
@@ -260,8 +240,33 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         clean_path = self.path.split('?')[0].rstrip('/')
 
+        # 1. Отдача index.html
         if clean_path in ['', '/index.html']:
-            self._serve_index_html()
+            candidate_paths = [
+                os.path.join(BASE_DIR, 'static', 'index.html'),
+                os.path.join(BASE_DIR, 'index.html'),
+                os.path.join(os.getcwd(), 'static', 'index.html'),
+                os.path.join(os.getcwd(), 'index.html')
+            ]
+            found = next((p for p in candidate_paths if os.path.isfile(p)), None)
+            if found:
+                self._serve_file(found, 'text/html')
+            else:
+                self.send_error(404, "index.html не найден ни в static/, ни в корне")
+
+        # 2. Отдача app.js
+        elif clean_path in ['/app.js', '/static/app.js']:
+            candidate_js = [
+                os.path.join(BASE_DIR, 'static', 'app.js'),
+                os.path.join(BASE_DIR, 'app.js'),
+                os.path.join(os.getcwd(), 'static', 'app.js'),
+                os.path.join(os.getcwd(), 'app.js')
+            ]
+            found_js = next((p for p in candidate_js if os.path.isfile(p)), None)
+            if found_js:
+                self._serve_file(found_js, 'application/javascript')
+            else:
+                self.send_error(404, "app.js не найден в static/app.js")
 
         elif clean_path == '/openapi.json':
             self._send_json(200, OPENAPI_SPEC)
@@ -612,8 +617,6 @@ def main():
     found_cert = next((p for p in cert_candidates if os.path.exists(p)), None)
     found_key = next((p for p in key_candidates if os.path.exists(p)), None)
 
-    found_html = find_index_file()
-
     threading.Thread(target=ipc_frame_receiver, daemon=True).start()
     threading.Thread(target=ipc_audio_receiver, daemon=True).start()
     threading.Thread(target=ipc_control_listener, daemon=True).start()
@@ -635,10 +638,6 @@ def main():
 
     print("=" * 65)
     print(f"🌐 [GATEWAY] Веб-терминал:     {scheme}://0.0.0.0:{port}/")
-    if found_html:
-        print(f"📄 [GATEWAY] HTML шаблон:     {found_html} (НАЙДЕН ✅)")
-    else:
-        print(f"❌ [GATEWAY] HTML шаблон:     НЕ НАЙДЕН в {SEARCH_HTML_PATHS}")
     print(f"📖 [GATEWAY] OpenAPI для GPT: {scheme}://0.0.0.0:{port}/openapi.json")
     print(f"🎥 [GATEWAY] Видео-стрим:     {scheme}://0.0.0.0:{port}/stream.mjpg")
     print(f"🔊 [GATEWAY] Аудио-стрим:     {scheme}://0.0.0.0:{port}/audio.wav")
