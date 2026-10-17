@@ -1,0 +1,8 @@
+# Берём за основу тяжелый музыкальный образ
+FROM neuroidss/neuro_heterarchy_musicgen:latest
+
+WORKDIR /app
+
+# Точно так же накатываем файлы поверх
+COPY . /app
+
