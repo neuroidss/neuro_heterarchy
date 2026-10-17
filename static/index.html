@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>NeuroCanvas Unified Studio & Controller</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { 
+            background: #06090e; 
+            color: #cbd5e1; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; 
+            margin: 0; 
+            padding: 16px; 
+        }
+        .header { 
+            display: flex; 
+            align-items: center; 
+            justify-content: space-between; 
+            border-bottom: 1px solid #1e293b; 
+            padding-bottom: 8px; 
+            margin-bottom: 14px; 
+        }
+        h1 { font-size: 17px; margin: 0; color: #00ffc8; }
+        .layout { display: grid; grid-template-columns: 1fr 460px; gap: 16px; }
+
+        .canvas-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .toolbar-label { font-size: 11px; color: #64748b; }
+        .fs-action-btn { 
+            background: #1e293b; 
+            border: 1px solid #38bdf8; 
+            color: #00ffc8; 
+            padding: 6px 12px; 
+            border-radius: 4px; 
+            cursor: pointer; 
+            font-size: 11px; 
+            font-weight: bold; 
+            transition: 0.2s; 
+        }
+        .fs-action-btn:hover { background: #00ffc8; color: #000; }
+
+        .canvas-box { 
+            position: relative; 
+            background: #000; 
+            min-height: 520px; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+        }
+        .canvas-box img { width: 100%; height: auto; max-height: 85vh; object-fit: contain; }
+
+        :fullscreen .canvas-box { width: 100vw; height: 100vh; cursor: none; margin: 0; padding: 0; }
+        :fullscreen .canvas-box img { max-height: 100vh; width: 100vw; }
+
+        .panel { 
+            background: #0f172a; 
+            padding: 12px; 
+            border-radius: 8px; 
+            border: 1px solid #1e293b; 
+            margin-bottom: 12px; 
+        }
+        h3 { 
+            color: #38bdf8; 
+            margin-top: 0; 
+            font-size: 12px; 
+            border-bottom: 1px solid #1e293b; 
+            padding-bottom: 4px; 
+        }
+        label { display: block; margin: 5px 0 2px; color: #94a3b8; font-size: 10px; }
+        select, input { 
+            width: 100%; 
+            padding: 6px; 
+            background: #030712; 
+            border: 1px solid #334155; 
+            color: #fff; 
+            border-radius: 4px; 
+            font-family: monospace; 
+            font-size: 11px; 
+        }
+
+        .btn { 
+            width: 100%; 
+            padding: 8px; 
+            cursor: pointer; 
+            font-weight: bold; 
+            border: none; 
+            border-radius: 4px; 
+            font-size: 11px; 
+            transition: 0.2s; 
+        }
+        .btn-green { background: #059669; color: #fff; }
+        .btn-green:hover { background: #10b981; }
+        .btn-audio { background: #e11d48; color: #fff; margin-bottom: 8px; }
+        .btn-audio.playing { background: #059669; }
+        .btn-red { background: #e11d48; color: #fff; }
+        .btn-red:hover { background: #f43f5e; }
+        .btn-gray { background: #334155; color: #fff; }
+        .btn-fixed { width: 90px; }
+
+        .device-card { 
+            background: #131d2e; 
+            border: 1px solid #334155; 
+            border-radius: 6px; 
+            padding: 10px; 
+            margin-bottom: 8px; 
+        }
+        .device-card h4 { 
+            margin: 0 0 4px 0; 
+            color: #00ffc8; 
+            font-size: 12px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+        }
+
+        .sat-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; margin-top: 4px; }
+        .sat-box { 
+            height: 14px; 
+            border-radius: 2px; 
+            background: #10b981; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            font-size: 8px; 
+            color: #000; 
+            font-weight: bold; 
+        }
+        .sat-box.clip { background: #ef4444; color: #fff; animation: blink 0.5s infinite; }
+        @keyframes blink { 50% { opacity: 0.3; } }
+
+        .concept-chip { 
+            display: inline-flex; 
+            align-items: center; 
+            background: #1e293b; 
+            border: 1px solid #475569; 
+            border-radius: 4px; 
+            padding: 2px 6px; 
+            margin: 2px 3px 0 0; 
+            font-size: 11px; 
+        }
+        .concept-chip span { color: #00ffc8; font-weight: bold; margin-right: 5px; }
+        .concept-chip.music span { color: #f43f5e; }
+        .concept-chip button { background: none; border: none; color: #f43f5e; cursor: pointer; font-weight: bold; }
+
+        .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; }
+        .badge-blue { background: #0284c7; color: #fff; }
+        .badge-gray { background: #475569; margin-left: 6px; }
+        .badge-emerald { background: #059669; }
+        .gain-badge { font-size: 10px; font-weight: bold; margin-left: 6px; color: #10b981; }
+
+        .probe-switch { 
+            background: #1e293b; 
+            border: 1px solid #f59e0b; 
+            padding: 8px; 
+            border-radius: 6px; 
+            margin-bottom: 12px; 
+            display: flex; 
+            align-items: center; 
+            justify-content: space-between; 
+            font-size: 11px; 
+        }
+        .probe-switch input { width: 20px; height: 20px; }
+
+        .empty-state { color: #64748b; font-size: 11px; text-align: center; margin-top: 6px; }
+        .empty-concepts { color: #64748b; font-size: 10px; }
+        .concept-container { min-height: 24px; }
+        .input-row { display: flex; gap: 6px; margin: 6px 0; }
+        .flex-row { display: flex; gap: 6px; }
+        .row-between { display: flex; justify-content: space-between; align-items: center; }
+        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+        .lag-status { font-size: 11px; color: #38bdf8; font-weight: bold; margin-bottom: 6px; }
+        .rec-status { font-size: 10px; color: #64748b; margin-top: 4px; }
+        .mt-4 { margin-top: 4px; }
+        .mt-5 { margin-top: 5px; }
+        .mt-6 { margin-top: 6px; }
+        .mt-8 { margin-top: 8px; }
+        .m-0 { margin: 0; }
+        .text-10 { font-size: 10px; }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1>🧠 NeuroCanvas Production Studio (Unified Multimodal)</h1>
+        <div>
+            <span class="badge badge-blue" id="netBadge">HTTPS SECURE</span>
+            <span class="badge badge-gray" id="recBadge">ЗАПИСЬ: ВЫКЛ</span>
+        </div>
+    </header>
+    
+    <main class="layout">
+        <!-- Левая колонка: Проектор -->
+        <section>
+            <div class="canvas-toolbar">
+                <span class="toolbar-label">Проекция (Canvas Feed):</span>
+                <button type="button" class="fs-action-btn" id="fsToggleBtn">⛶ ПОЛНЫЙ ЭКРАН (ПРОЕКТОР)</button>
+            </div>
+            <div class="canvas-box" id="canvasBox">
+                <img id="videoStreamImg" src="/stream.mjpg" alt="Ожидание генерации...">
+            </div>
+        </section>
+
+        <!-- Правая колонка: Консоль управления -->
+        <aside>
+            <!-- Тумблер разгрузки BLE-клиента -->
+            <div class="probe-switch">
+                <span>⚡ <b>Легковесный BLE-зонд (для слабых устройств):</b></span>
+                <input type="checkbox" id="probeModeToggle">
+            </div>
+
+            <!-- Bluetooth & Аппаратный АЦП -->
+            <div class="panel">
+                <h3>📡 Bluetooth Подключение (FreeEEG16)</h3>
+                <button type="button" class="btn btn-green" id="btnConnectBle">+ ПОДКЛЮЧИТЬ ПЛАТУ (BLE)</button>
+                <div id="deviceList"></div>
+                <div id="noDevicesMsg" class="empty-state">
+                    Нет активных Bluetooth плат на этой вкладке.
+                </div>
+            </div>
+
+            <!-- Визуальный мир: Концепты и Плавность/Динамика -->
+            <div class="panel">
+                <h3>🎨 Визуальный мир (Диффузия)</h3>
+                <label>Активный пул образов (Пусто = Свободный дрейф):</label>
+                <div id="visionConceptList" class="concept-container"></div>
+                <div class="input-row">
+                    <input type="text" id="newVisionInput" placeholder="Новый визуальный образ...">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnAddVision">+ ОБРАЗ</button>
+                </div>
+
+                <label class="mt-8">Режим динамики (Пресеты):</label>
+                <select id="diffPreset">
+                    <option value="meditation">🧘 Глубокая медитация (Плавный морфинг: Steps 2, Str 0.45-0.70, EMA 0.30)</option>
+                    <option value="balanced" selected>⚖️ Баланс / Стандарт (Steps 2, Str 0.55-0.85, EMA 0.16)</option>
+                    <option value="dynamic">⚡ Высокая динамика (Быстрый отклик: Steps 3, Str 0.65-0.92, EMA 0.08)</option>
+                    <option value="custom">🛠️ Пользовательский (Ручная настройка)</option>
+                </select>
+
+                <div class="grid-4 mt-6">
+                    <div><label>Steps:</label><input type="number" id="diffSteps" value="2" min="1" max="6"></div>
+                    <div><label>CFG:</label><input type="number" id="diffCfg" value="1.0" min="0.0" max="3.0" step="0.1"></div>
+                    <div><label>Min Str:</label><input type="number" id="diffStrLow" value="0.55" min="0.35" max="0.75" step="0.05"></div>
+                    <div><label>Max Str:</label><input type="number" id="diffStrHigh" value="0.85" min="0.55" max="0.95" step="0.05"></div>
+                </div>
+                <div class="mt-4">
+                    <label>EMA Плавность (0.04 = динамика, 0.40 = медитация):</label>
+                    <input type="number" id="diffEmaSmooth" value="0.16" min="0.04" max="0.50" step="0.02">
+                </div>
+            </div>
+
+            <!-- MusicGen: Темы и Параметры реакции -->
+            <div class="panel">
+                <h3>🔊 Музыкальный генератор (MusicGen 32 kHz)</h3>
+                <button type="button" id="btnAudio" class="btn btn-audio">▶️ ВКЛЮЧИТЬ LIVE ЗВУК</button>
+                <audio id="neuroAudio" preload="none"></audio>
+                
+                <div id="musicLagStatus" class="lag-status">
+                    Буфер: 0.0 с (0 чанков) | RTF: 1.0x | Отставание: 0 мс
+                </div>
+
+                <label>Активные музыкальные темы (Пусто = Свободный звук):</label>
+                <div id="musicConceptList" class="concept-container"></div>
+                <div class="input-row">
+                    <input type="text" id="newMusicInput" placeholder="Новая музыкальная тема...">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnAddMusic">+ ТЕМА</button>
+                </div>
+
+                <div class="grid-3">
+                    <div><label>Блок (сек):</label><input type="number" id="mBlock" value="2.4" step="0.2"></div>
+                    <div><label>Контекст (сек):</label><input type="number" id="mContext" value="0.4" step="0.1"></div>
+                    <div><label>Буфер (чанков):</label><input type="number" id="mBuffer" value="2" min="1" max="5"></div>
+                </div>
+                <div class="grid-3 mt-4">
+                    <div><label>Temp (0.2-2.0):</label><input type="number" id="mTemp" value="1.0" step="0.1"></div>
+                    <div><label>Top-K:</label><input type="number" id="mTopK" value="250" step="10"></div>
+                    <div><label>CFG Coef:</label><input type="number" id="mCfg" value="1.0" step="0.1"></div>
+                </div>
+            </div>
+
+            <!-- Сессионная запись -->
+            <div class="panel">
+                <h3>📼 Сессионная запись (ЭЭГ + Видео + Теги)</h3>
+                <div class="flex-row">
+                    <button type="button" id="btnRecStart" class="btn btn-red">🔴 СТАРТ ЗАПИСИ</button>
+                    <button type="button" id="btnRecStop" class="btn btn-gray">⏹️ СТОП</button>
+                </div>
+                <div id="recStatusText" class="rec-status">Запись не активна</div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- ШАБЛОНЫ HTML5 ДЛЯ БЕЗОПАСНОГО И ЧИСТОГО РЕНДЕРИНГА -->
+    <template id="deviceCardTemplate">
+        <div class="device-card">
+            <h4>
+                <span class="device-title-name">FreeEEG16</span>
+                <span class="badge badge-emerald">ONLINE</span>
+            </h4>
+            
+            <label>Субъект:</label>
+            <input type="text" class="device-user-input">
+            
+            <label>Кортикальная зона (10-20 EEG):</label>
+            <select class="device-role-select">
+                <option value="AFz">AFz — Макросцена / Связи</option>
+                <option value="Fpz">Fpz — BA 10 Вето / Волевой отказ</option>
+                <option value="F3">F3  — Левый dlPFC (2D Ранги SWM)</option>
+                <option value="F4">F4  — Правый dlPFC (Контекст / Энтропия)</option>
+                <option value="FCz">FCz — SMA (4D Аффордансы)</option>
+            </select>
+
+            <div class="row-between mt-5">
+                <label class="m-0">Усиление PGA (ADS131M08):</label>
+                <span class="gain-badge">✓ Проверено (4x)</span>
+            </div>
+            <select class="device-gain-select">
+                <option value="4">4x (Дефолт прошивки)</option>
+                <option value="8">8x</option>
+                <option value="16">16x (Стандарт ЭЭГ)</option>
+                <option value="32">32x (Высокая чувствительность)</option>
+            </select>
+
+            <div class="row-between mt-6 text-10">
+                <span class="device-rate-text">0 Гц</span>
+                <span class="device-loss-text">Потерь: 0 (0.00%)</span>
+            </div>
+
+            <label class="mt-4">Аппаратный клиппинг (24-bit Rail):</label>
+            <div class="sat-grid"></div>
+        </div>
+    </template>
+
+    <template id="conceptChipTemplate">
+        <div class="concept-chip">
+            <span class="concept-text"></span>
+            <button type="button" class="concept-remove-btn" title="Удалить">✕</button>
+        </div>
+    </template>
+
+    <!-- ВЕСЬ ДЖАВАСКРИПТ В ОДНОМ МЕСТЕ -->
+    <script>
+        const SERVICE_UUID   = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+        const DATA_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+        const CMD_CHAR_UUID  = "c0de0001-36e1-4688-b7f5-ea07361b26a8";
+        const BATCH_SIZE     = 40;
+        const RAW_SAT_LIMIT  = 8300000;
+
+        function calcUvScale(gain) {
+            return (1.2 / parseFloat(gain) / 8388607.0) * 1e6;
+        }
+
+        let activeDevices = [];
+        let isAudioPlaying = false;
+        const myClientId = "client_" + Math.random().toString(36).substring(2, 9);
+        let isProbeMode = false;
+
+        // Кеш DOM элементов
+        const dom = {
+            videoStreamImg: document.getElementById('videoStreamImg'),
+            canvasBox: document.getElementById('canvasBox'),
+            fsToggleBtn: document.getElementById('fsToggleBtn'),
+            probeModeToggle: document.getElementById('probeModeToggle'),
+            btnConnectBle: document.getElementById('btnConnectBle'),
+            deviceList: document.getElementById('deviceList'),
+            noDevicesMsg: document.getElementById('noDevicesMsg'),
+            
+            visionConceptList: document.getElementById('visionConceptList'),
+            newVisionInput: document.getElementById('newVisionInput'),
+            btnAddVision: document.getElementById('btnAddVision'),
+            diffPreset: document.getElementById('diffPreset'),
+            diffSteps: document.getElementById('diffSteps'),
+            diffCfg: document.getElementById('diffCfg'),
+            diffStrLow: document.getElementById('diffStrLow'),
+            diffStrHigh: document.getElementById('diffStrHigh'),
+            diffEmaSmooth: document.getElementById('diffEmaSmooth'),
+            
+            btnAudio: document.getElementById('btnAudio'),
+            neuroAudio: document.getElementById('neuroAudio'),
+            musicLagStatus: document.getElementById('musicLagStatus'),
+            musicConceptList: document.getElementById('musicConceptList'),
+            newMusicInput: document.getElementById('newMusicInput'),
+            btnAddMusic: document.getElementById('btnAddMusic'),
+            mBlock: document.getElementById('mBlock'),
+            mContext: document.getElementById('mContext'),
+            mBuffer: document.getElementById('mBuffer'),
+            mTemp: document.getElementById('mTemp'),
+            mTopK: document.getElementById('mTopK'),
+            mCfg: document.getElementById('mCfg'),
+            
+            btnRecStart: document.getElementById('btnRecStart'),
+            btnRecStop: document.getElementById('btnRecStop'),
+            recStatusText: document.getElementById('recStatusText'),
+            recBadge: document.getElementById('recBadge'),
+            
+            deviceCardTemplate: document.getElementById('deviceCardTemplate'),
+            conceptChipTemplate: document.getElementById('conceptChipTemplate')
+        };
+
+        function toggleProbeMode(enabled) {
+            isProbeMode = enabled;
+            if (isProbeMode) {
+                dom.videoStreamImg.src = "";
+                dom.videoStreamImg.style.display = "none";
+                if (isAudioPlaying) toggleAudio();
+            } else {
+                dom.videoStreamImg.style.display = "block";
+                dom.videoStreamImg.src = "/stream.mjpg";
+            }
+        }
+
+        function toggleFullScreen() {
+            if (!document.fullscreenElement) {
+                dom.canvasBox.requestFullscreen().catch(err => alert("Fullscreen error: " + err.message));
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        function readRegister(devObj, reg) {
+            return new Promise((resolve) => {
+                devObj.pendingReadReg = reg;
+                devObj.pendingReadResolve = resolve;
+                devObj.cmdChar.writeValue(new Uint8Array([reg])).catch(() => {
+                    devObj.pendingReadResolve = null;
+                    resolve(-1);
+                });
+                setTimeout(() => {
+                    if (devObj.pendingReadResolve) {
+                        devObj.pendingReadResolve = null;
+                        resolve(-1);
+                    }
+                }, 350);
+            });
+        }
+
+        function decodeGainFromRegister(rawVal) {
+            if (rawVal < 0) return null;
+            const b = rawVal & 0xFF;
+            if (b === 0x22) return 4;
+            if (b === 0x33) return 8;
+            if (b === 0x44) return 16;
+            if (b === 0x55) return 32;
+            if (b === 0x11) return 2;
+            if (b === 0x00) return 1;
+            return null;
+        }
+
+        async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
+            const codeMap = { 4: 0x22, 8: 0x33, 16: 0x44, 32: 0x55 };
+            const hex = codeMap[targetGain] || 0x22;
+            const expected = (hex << 8) | hex;
+
+            if (devObj.domRefs) {
+                devObj.domRefs.gainBadge.textContent = "⏳ Запись...";
+                devObj.domRefs.gainBadge.style.color = "#f59e0b";
+            }
+
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                await devObj.cmdChar.writeValue(new Uint8Array([0x04, hex, hex])).catch(() => {});
+                await new Promise(r => setTimeout(r, 45));
+                const val1 = await readRegister(devObj, 0x04);
+
+                await devObj.cmdChar.writeValue(new Uint8Array([0x05, hex, hex])).catch(() => {});
+                await new Promise(r => setTimeout(r, 45));
+                const val2 = await readRegister(devObj, 0x05);
+
+                if (val1 === expected && val2 === expected) {
+                    devObj.gain = targetGain;
+                    devObj.uvScale = calcUvScale(targetGain);
+                    console.log(`✅ [GAIN ПОДТВЕРЖДЕН АЦП] ${devObj.name}: 0x${expected.toString(16)} (${targetGain}x)`);
+                    if (devObj.domRefs) {
+                        devObj.domRefs.gainBadge.textContent = `✓ Железо подтвердило (${targetGain}x)`;
+                        devObj.domRefs.gainBadge.style.color = "#10b981";
+                        devObj.domRefs.gainSelect.value = targetGain;
+                    }
+                    return true;
+                }
+                await new Promise(r => setTimeout(r, 60));
+            }
+
+            const actualRaw = await readRegister(devObj, 0x04);
+            const actualGain = decodeGainFromRegister(actualRaw);
+            if (actualGain) {
+                devObj.gain = actualGain;
+                devObj.uvScale = calcUvScale(actualGain);
+                if (devObj.domRefs) devObj.domRefs.gainSelect.value = actualGain;
+            }
+            if (devObj.domRefs) {
+                devObj.domRefs.gainBadge.textContent = `⚠️ Ошибка! В чипе: ${devObj.gain}x`;
+                devObj.domRefs.gainBadge.style.color = "#ef4444";
+            }
+            return false;
+        }
+
+        const PRESETS = {
+            meditation: { steps: 2, cfg: 1.0, strLow: 0.45, strHigh: 0.70, ema: 0.30 },
+            balanced:   { steps: 2, cfg: 1.0, strLow: 0.55, strHigh: 0.85, ema: 0.16 },
+            dynamic:    { steps: 3, cfg: 1.2, strLow: 0.65, strHigh: 0.92, ema: 0.08 }
+        };
+
+        function applyPreset(presetKey) {
+            if (presetKey === 'custom') return;
+            const p = PRESETS[presetKey];
+            if (!p) return;
+            dom.diffSteps.value = p.steps;
+            dom.diffCfg.value = p.cfg;
+            dom.diffStrLow.value = p.strLow;
+            dom.diffStrHigh.value = p.strHigh;
+            dom.diffEmaSmooth.value = p.ema;
+            sendDiffConfig(p.steps, p.cfg, p.strLow, p.strHigh, p.ema, presetKey);
+        }
+
+        function onManualParamChange() {
+            dom.diffPreset.value = 'custom';
+            const steps = Math.max(1, Math.min(6, parseInt(dom.diffSteps.value) || 2));
+            const cfg = Math.max(0.0, Math.min(3.0, parseFloat(dom.diffCfg.value) || 1.0));
+            let sLow = Math.max(0.35, Math.min(0.75, parseFloat(dom.diffStrLow.value) || 0.55));
+            let sHigh = Math.max(sLow + 0.05, Math.min(0.95, parseFloat(dom.diffStrHigh.value) || 0.85));
+            const ema = Math.max(0.04, Math.min(0.50, parseFloat(dom.diffEmaSmooth.value) || 0.16));
+
+            dom.diffSteps.value = steps;
+            dom.diffCfg.value = cfg;
+            dom.diffStrLow.value = sLow;
+            dom.diffStrHigh.value = sHigh;
+            dom.diffEmaSmooth.value = ema;
+
+            sendDiffConfig(steps, cfg, sLow, sHigh, ema, 'custom');
+        }
+
+        async function sendDiffConfig(steps, cfg, sLow, sHigh, ema, presetKey) {
+            await fetch('/api/diffusion/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    preset: presetKey,
+                    steps: steps,
+                    guidance_scale: cfg,
+                    strength_low: sLow,
+                    strength_high: sHigh,
+                    ema_smooth: ema
+                })
+            });
+        }
+
+        const sse = new EventSource('/api/state_stream');
+
+        sse.addEventListener('state', (e) => {
+            const st = JSON.parse(e.data);
+            if (st.world) {
+                renderVisionConcepts(st.world.concepts || []);
+                dom.diffSteps.value = st.world.steps || 2;
+                dom.diffCfg.value = st.world.guidance_scale || 1.0;
+                dom.diffStrLow.value = st.world.strength_low || 0.55;
+                dom.diffStrHigh.value = st.world.strength_high || 0.85;
+                dom.diffEmaSmooth.value = st.world.ema_smooth || 0.16;
+                if (st.world.preset) dom.diffPreset.value = st.world.preset;
+
+                if (st.world.is_recording) {
+                    dom.recBadge.style.background = "#e11d48";
+                    dom.recBadge.textContent = "ЗАПИСЬ: АКТИВНА";
+                } else {
+                    dom.recBadge.style.background = "#475569";
+                    dom.recBadge.textContent = "ЗАПИСЬ: ВЫКЛ";
+                }
+            }
+            if (st.music) {
+                renderMusicConcepts(st.music.concepts || []);
+                dom.mBlock.value = st.music.target_block || 2.4;
+                dom.mContext.value = st.music.target_context || 0.4;
+                dom.mBuffer.value = st.music.target_buffer_count || 2;
+                dom.mTemp.value = st.music.temp || 1.0;
+                dom.mTopK.value = st.music.top_k || 250;
+                dom.mCfg.value = st.music.cfg_coef || 1.0;
+
+                const bSec = (st.music.buffer_sec || 0).toFixed(1);
+                const bChunks = st.music.buffer_chunks || 0;
+                const rtf = (st.music.rtf || 1.0).toFixed(2);
+                dom.musicLagStatus.textContent = `Буфер: ${bSec} с (${bChunks} чанков) | RTF: ${rtf}x | Отставание: ${(bSec * 1000).toFixed(0)} мс 🟢`;
+            }
+        });
+
+        sse.addEventListener('ble_cmd', async (e) => {
+            const req = JSON.parse(e.data);
+            const devObj = activeDevices.find(d => d.id === req.device_id || req.device_id === "all");
+            if (devObj && devObj.cmdChar) {
+                if (req.cmd === 'set_gain') {
+                    await writeAndVerifyGain(devObj, parseInt(req.val));
+                }
+            }
+        });
+
+        function toggleAudio() {
+            if (!isAudioPlaying) {
+                try { dom.neuroAudio.pause(); } catch(e) {}
+                dom.neuroAudio.removeAttribute('src');
+                try { dom.neuroAudio.load(); } catch(e) {}
+                dom.neuroAudio.src = '/audio.wav?t=' + Date.now();
+                dom.neuroAudio.play().then(() => {
+                    isAudioPlaying = true;
+                    dom.btnAudio.textContent = '⏸️ ВЫКЛЮЧИТЬ LIVE ЗВУК';
+                    dom.btnAudio.classList.add('playing');
+                }).catch(e => alert("Аудио ошибка: " + e.message));
+            } else {
+                try { dom.neuroAudio.pause(); } catch(e) {}
+                dom.neuroAudio.removeAttribute('src');
+                isAudioPlaying = false;
+                dom.btnAudio.textContent = '▶️ ВКЛЮЧИТЬ LIVE ЗВУК';
+                dom.btnAudio.classList.remove('playing');
+            }
+        }
+
+        function createDeviceCardDOM(devObj) {
+            const clone = dom.deviceCardTemplate.content.cloneNode(true);
+            const cardEl = clone.querySelector('.device-card');
+            
+            const titleName = cardEl.querySelector('.device-title-name');
+            const userInput = cardEl.querySelector('.device-user-input');
+            const roleSelect = cardEl.querySelector('.device-role-select');
+            const gainBadge = cardEl.querySelector('.gain-badge');
+            const gainSelect = cardEl.querySelector('.device-gain-select');
+            const rateText = cardEl.querySelector('.device-rate-text');
+            const lossText = cardEl.querySelector('.device-loss-text');
+            const satGrid = cardEl.querySelector('.sat-grid');
+
+            titleName.textContent = devObj.name;
+            userInput.value = devObj.user;
+            roleSelect.value = devObj.role;
+            gainSelect.value = devObj.gain;
+
+            const satBoxes = [];
+            for (let ch = 0; ch < 16; ch++) {
+                const box = document.createElement('div');
+                box.className = 'sat-box';
+                box.textContent = (ch + 1).toString();
+                satGrid.appendChild(box);
+                satBoxes.push(box);
+            }
+
+            userInput.addEventListener('change', () => {
+                devObj.user = userInput.value;
+                sendDeviceCommand(devObj.id, 'set_user', devObj.user);
+            });
+
+            roleSelect.addEventListener('change', () => {
+                devObj.role = roleSelect.value;
+                sendDeviceCommand(devObj.id, 'set_role', devObj.role);
+            });
+
+            gainSelect.addEventListener('change', async () => {
+                const targetGain = parseInt(gainSelect.value);
+                await writeAndVerifyGain(devObj, targetGain);
+                sendDeviceCommand(devObj.id, 'set_gain', targetGain);
+            });
+
+            devObj.domRefs = {
+                cardEl, userInput, roleSelect, gainBadge,
+                gainSelect, rateText, lossText, satBoxes
+            };
+
+            dom.deviceList.appendChild(cardEl);
+            dom.noDevicesMsg.style.display = 'none';
+        }
+
+        async function sendDeviceCommand(deviceId, cmd, val) {
+            await fetch('/api/device/command', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ device_id: deviceId, cmd: cmd, val: val })
+            });
+        }
+
+        async function connectNewBleDevice() {
+            try {
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [SERVICE_UUID] }]
+                });
+                const server   = await device.gatt.connect();
+                const service  = await server.getPrimaryService(SERVICE_UUID);
+                const dataChar = await service.getCharacteristic(DATA_CHAR_UUID);
+                const cmdChar  = await service.getCharacteristic(CMD_CHAR_UUID);
+
+                const devObj = {
+                    id: "dev_" + Date.now(),
+                    name: device.name || "FreeEEG16",
+                    device: device,
+                    cmdChar: cmdChar,
+                    user: "User" + (activeDevices.length + 1),
+                    role: activeDevices.length === 0 ? "AFz" : "Fpz",
+                    gain: 4,
+                    uvScale: calcUvScale(4),
+                    packetCount: 0,
+                    sampleBuffer: [],
+                    sending: false,
+                    droppedBatches: 0,
+                    lastCounter: -1,
+                    totalReceived: 0,
+                    totalLost: 0,
+                    channelPeak: new Array(16).fill(0),
+                    pendingReadReg: -1,
+                    pendingReadResolve: null,
+                    domRefs: null
+                };
+
+                activeDevices.push(devObj);
+                createDeviceCardDOM(devObj);
+
+                await cmdChar.startNotifications();
+                cmdChar.addEventListener('characteristicvaluechanged', (e) => {
+                    const b = new Uint8Array(e.target.value.buffer);
+                    if (b.length >= 3) {
+                        const reg = b[0];
+                        const val = (b[1] << 8) | b[2];
+                        if (devObj.pendingReadResolve && devObj.pendingReadReg === reg) {
+                            devObj.pendingReadResolve(val);
+                            devObj.pendingReadResolve = null;
+                        }
+                    }
+                });
+
+                await writeAndVerifyGain(devObj, 4);
+
+                await fetch('/api/device/register', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        device_id: devObj.id, name: devObj.name,
+                        client_id: myClientId, gain: devObj.gain,
+                        role: devObj.role, user: devObj.user
+                    })
+                });
+
+                await dataChar.startNotifications();
+                dataChar.addEventListener('characteristicvaluechanged', (e) => {
+                    const b = new Uint8Array(e.target.value.buffer);
+                    if (b[0] !== 0xA0) return;
+
+                    const counter = b[1];
+                    if (devObj.lastCounter !== -1) {
+                        const expected = (devObj.lastCounter + 1) & 0xFF;
+                        if (counter !== expected) {
+                            devObj.totalLost += (counter - expected) & 0xFF;
+                        }
+                    }
+                    devObj.lastCounter = counter;
+                    devObj.totalReceived++;
+                    devObj.packetCount++;
+
+                    const sample = [];
+                    const scale = devObj.uvScale;
+                    for (let i = 0; i < 16; i++) {
+                        let v = (b[2 + i * 3] << 16) | (b[3 + i * 3] << 8) | b[4 + i * 3];
+                        if (v & 0x800000) v -= 0x1000000;
+                        sample.push(v * scale);
+
+                        const absV = Math.abs(v);
+                        if (absV > devObj.channelPeak[i]) devObj.channelPeak[i] = absV;
+                    }
+                    devObj.sampleBuffer.push(sample);
+
+                    if (devObj.sampleBuffer.length > 400) {
+                        devObj.sampleBuffer.splice(0, devObj.sampleBuffer.length - BATCH_SIZE);
+                        devObj.droppedBatches++;
+                    }
+
+                    if (devObj.sampleBuffer.length >= BATCH_SIZE) {
+                        sendBatch(devObj);
+                    }
+                });
+
+                device.addEventListener('gattserverdisconnected', () => {
+                    if (devObj.domRefs && devObj.domRefs.cardEl) {
+                        devObj.domRefs.cardEl.remove();
+                    }
+                    activeDevices = activeDevices.filter(d => d.id !== devObj.id);
+                    if (activeDevices.length === 0) {
+                        dom.noDevicesMsg.style.display = 'block';
+                    }
+                });
+
+            } catch (err) {
+                alert("Ошибка подключения Bluetooth: " + err.message);
+            }
+        }
+
+        async function sendBatch(devObj) {
+            if (devObj.sending || devObj.sampleBuffer.length === 0) return;
+            const batch = devObj.sampleBuffer.splice(0, devObj.sampleBuffer.length);
+            devObj.sending = true;
+            try {
+                await fetch('/api/eeg_push', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user: devObj.user,
+                        role: devObj.role,
+                        sps: 250.0,
+                        samples: batch
+                    })
+                });
+            } catch (e) {
+            } finally {
+                devObj.sending = false;
+                if (devObj.sampleBuffer.length >= BATCH_SIZE) sendBatch(devObj);
+            }
+        }
+
+        setInterval(() => {
+            activeDevices.forEach(dev => {
+                if (!dev.domRefs) return;
+                const total = dev.totalReceived + dev.totalLost;
+                const pct = total > 0 ? ((dev.totalLost / total) * 100).toFixed(2) : "0.00";
+
+                dev.domRefs.rateText.textContent = `${dev.packetCount} Гц | Дропов: ${dev.droppedBatches}`;
+                dev.domRefs.lossText.textContent = `Потерь: ${dev.totalLost} (${pct}%)`;
+                dev.domRefs.lossText.style.color = dev.totalLost === 0 ? "#10b981" : (dev.totalLost < 10 ? "#f59e0b" : "#ef4444");
+
+                for (let ch = 0; ch < 16; ch++) {
+                    const isClipped = dev.channelPeak[ch] >= RAW_SAT_LIMIT;
+                    const b = dev.domRefs.satBoxes[ch];
+                    if (b) {
+                        if (isClipped) b.classList.add('clip');
+                        else b.classList.remove('clip');
+                    }
+                    dev.channelPeak[ch] = 0;
+                }
+                dev.packetCount = 0;
+            });
+        }, 1000);
+
+        function renderConceptList(containerEl, list, isMusic, onRemove) {
+            containerEl.replaceChildren();
+            if (list.length === 0) {
+                const empty = document.createElement('span');
+                empty.className = 'empty-concepts';
+                empty.textContent = isMusic ? 'Пул пуст (Свободный эмбиент)' : 'Пул пуст (Свободный латентный дрейф)';
+                containerEl.appendChild(empty);
+                return;
+            }
+
+            list.forEach(c => {
+                const clone = dom.conceptChipTemplate.content.cloneNode(true);
+                const chip = clone.querySelector('.concept-chip');
+                if (isMusic) chip.classList.add('music');
+                
+                const txt = chip.querySelector('.concept-text');
+                txt.textContent = c;
+
+                const rmBtn = chip.querySelector('.concept-remove-btn');
+                rmBtn.addEventListener('click', () => onRemove(c));
+
+                containerEl.appendChild(chip);
+            });
+        }
+
+        function renderVisionConcepts(list) {
+            renderConceptList(dom.visionConceptList, list, false, removeVisionConcept);
+        }
+
+        function renderMusicConcepts(list) {
+            renderConceptList(dom.musicConceptList, list, true, removeMusicConcept);
+        }
+
+        async function addVisionConcept() {
+            const c = dom.newVisionInput.value.trim();
+            if (!c) return;
+            const res = await fetch('/api/world/concepts/add', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ concept: c })
+            });
+            const data = await res.json();
+            dom.newVisionInput.value = '';
+            renderVisionConcepts(data.concepts || []);
+        }
+
+        async function removeVisionConcept(c) {
+            const res = await fetch('/api/world/concepts/remove', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ concept: c })
+            });
+            const data = await res.json();
+            renderVisionConcepts(data.concepts || []);
+        }
+
+        async function addMusicConcept() {
+            const c = dom.newMusicInput.value.trim();
+            if (!c) return;
+            const res = await fetch('/api/music/concepts/add', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ concept: c })
+            });
+            const data = await res.json();
+            dom.newMusicInput.value = '';
+            renderMusicConcepts(data.concepts || []);
+        }
+
+        async function removeMusicConcept(c) {
+            const res = await fetch('/api/music/concepts/remove', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ concept: c })
+            });
+            const data = await res.json();
+            renderMusicConcepts(data.concepts || []);
+        }
+
+        async function updateMusicConfig() {
+            await fetch('/api/music_config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    target_block: parseFloat(dom.mBlock.value),
+                    target_context: parseFloat(dom.mContext.value),
+                    target_buffer_count: parseInt(dom.mBuffer.value),
+                    temp: parseFloat(dom.mTemp.value),
+                    top_k: parseInt(dom.mTopK.value),
+                    cfg_coef: parseFloat(dom.mCfg.value)
+                })
+            });
+        }
+
+        async function toggleRecording(start) {
+            const endpoint = start ? '/api/recording/start' : '/api/recording/stop';
+            const res = await fetch(endpoint, { method: 'POST' });
+            const data = await res.json();
+            if (start) {
+                dom.recStatusText.textContent = "🔴 Идет запись в: " + (data.session_path || "сессию");
+                dom.recStatusText.style.color = "#f43f5e";
+            } else {
+                dom.recStatusText.textContent = "⏹️ Сохранено: " + (data.saved_path || "готово");
+                dom.recStatusText.style.color = "#10b981";
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            dom.fsToggleBtn.addEventListener('click', toggleFullScreen);
+            dom.probeModeToggle.addEventListener('change', (e) => toggleProbeMode(e.target.checked));
+            dom.btnConnectBle.addEventListener('click', connectNewBleDevice);
+            dom.btnAudio.addEventListener('click', toggleAudio);
+            
+            dom.btnAddVision.addEventListener('click', addVisionConcept);
+            dom.btnAddMusic.addEventListener('click', addMusicConcept);
+
+            dom.diffPreset.addEventListener('change', (e) => applyPreset(e.target.value));
+            [dom.diffSteps, dom.diffCfg, dom.diffStrLow, dom.diffStrHigh, dom.diffEmaSmooth].forEach(inp => {
+                inp.addEventListener('change', onManualParamChange);
+            });
+
+            [dom.mBlock, dom.mContext, dom.mBuffer, dom.mTemp, dom.mTopK, dom.mCfg].forEach(inp => {
+                inp.addEventListener('change', updateMusicConfig);
+            });
+
+            dom.btnRecStart.addEventListener('click', () => toggleRecording(true));
+            dom.btnRecStop.addEventListener('click', () => toggleRecording(false));
+
+            try {
+                const [rV, rM] = await Promise.all([
+                    fetch('/api/world/concepts'),
+                    fetch('/api/music/concepts')
+                ]);
+                const dV = await rV.json();
+                const dM = await rM.json();
+                renderVisionConcepts(dV.concepts || []);
+                renderMusicConcepts(dM.concepts || []);
+            } catch (err) {
+                console.error("Ошибка начальной загрузки:", err);
+            }
+        });
+    </script>
+</body>
+</html>
