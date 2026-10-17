@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.3 (PURE PYTHON BACKEND)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.4 (ROBUST STATIC DISCOVERY & FALLBACK)
 ===================================================================================
 """
 
@@ -30,8 +30,14 @@ NUM_CHANNELS = 16
 DEFAULT_SPS = 250.0
 SAMPLE_RATE = 32000
 
-# Путь к HTML файлу на диске
-HTML_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'index.html')
+# Возможные пути поиска файла index.html
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SEARCH_HTML_PATHS = [
+    os.path.join(SCRIPT_DIR, 'index.html'),
+    os.path.join(os.getcwd(), 'index.html'),
+    os.path.join(SCRIPT_DIR, 'static', 'index.html'),
+    os.path.join(os.getcwd(), 'static', 'index.html')
+]
 
 latest_jpeg_frame = None
 jpeg_lock = threading.Lock()
@@ -136,7 +142,7 @@ OPENAPI_SPEC = {
     "info": {
         "title": "NeuroCanvas Unified World & MusicGen Agent API",
         "description": "API для внешних LLM-агентов для управления генерацией.",
-        "version": "7.3.0"
+        "version": "7.4.0"
     },
     "servers": [{"url": "http://localhost:8080"}],
     "paths": {
@@ -193,18 +199,32 @@ OPENAPI_SPEC = {
 class UnifiedCloudHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def _find_index_file(self):
+        for path in SEARCH_HTML_PATHS:
+            if os.path.isfile(path):
+                return path
+        return None
+
     def _serve_index_html(self):
-        if not os.path.isfile(HTML_FILE_PATH):
-            self.send_error(404, "index.html not found on disk")
+        found_path = self._find_index_file()
+        if not found_path:
+            self.send_error(
+                404, 
+                f"index.html не найден. Поместите его в: {SCRIPT_DIR} или текущую папку {os.getcwd()}"
+            )
             return
-        with open(HTML_FILE_PATH, 'rb') as f:
-            content = f.read()
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(content)))
-        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-        self.end_headers()
-        self.wfile.write(content)
+
+        try:
+            with open(found_path, 'rb') as f:
+                content = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(content)))
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            self.wfile.write(content)
+        except Exception as e:
+            self.send_error(500, f"Ошибка чтения index.html: {e}")
 
     def _send_json(self, code, obj):
         payload = json.dumps(obj).encode('utf-8')
@@ -226,7 +246,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         clean_path = self.path.split('?')[0].rstrip('/')
 
-        # 1. Отдача цельного index.html с диска
+        # 1. Отдача index.html
         if clean_path in ['', '/index.html']:
             self._serve_index_html()
 
@@ -395,8 +415,8 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             with music_conn_lock:
                 if active_music_conn is not None:
                     try: active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
-                    except Exception: pass
-            broadcast_full_state()
+                        except Exception: pass
+                broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
         elif clean_path == '/api/diffusion/config':
@@ -544,6 +564,13 @@ def main():
     found_cert = next((p for p in cert_candidates if os.path.exists(p)), None)
     found_key = next((p for p in key_candidates if os.path.exists(p)), None)
 
+    # Проверка наличия index.html при старте
+    found_html = None
+    for p in SEARCH_HTML_PATHS:
+        if os.path.isfile(p):
+            found_html = p
+            break
+
     threading.Thread(target=ipc_frame_receiver, daemon=True).start()
     threading.Thread(target=ipc_audio_receiver, daemon=True).start()
     threading.Thread(target=ipc_control_listener, daemon=True).start()
@@ -565,11 +592,13 @@ def main():
 
     print("=" * 65)
     print(f"🌐 [GATEWAY] Веб-терминал:     {scheme}://0.0.0.0:{port}/")
+    if found_html:
+        print(f"📄 [GATEWAY] HTML шаблон:     {found_html} (НАЙДЕН ✅)")
+    else:
+        print(f"❌ [GATEWAY] HTML шаблон:     НЕ НАЙДЕН! Положите index.html рядом с web_cloud_gateway.py")
     print(f"📖 [GATEWAY] OpenAPI для GPT: {scheme}://0.0.0.0:{port}/openapi.json")
     print(f"🎥 [GATEWAY] Видео-стрим:     {scheme}://0.0.0.0:{port}/stream.mjpg")
     print(f"🔊 [GATEWAY] Аудио-стрим:     {scheme}://0.0.0.0:{port}/audio.wav")
-    print(f"🎨 [GATEWAY] Визуальный лор:  {len(initial_world_words)} концептов")
-    print(f"🎵 [GATEWAY] Музыкальный лор: {len(initial_music_words)} концептов")
     print("=" * 65)
 
     try:
