@@ -169,6 +169,7 @@
         .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
         .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
         .lag-status { font-size: 11px; color: #38bdf8; font-weight: bold; margin-bottom: 6px; }
+        .monty-bar { background: #131d2e; border: 1px solid #334155; padding: 6px 8px; border-radius: 4px; font-size: 11px; color: #00ffc8; margin: 6px 0; }
         .rec-status { font-size: 10px; color: #64748b; margin-top: 4px; }
         .mt-4 { margin-top: 4px; }
         .mt-5 { margin-top: 5px; }
@@ -205,11 +206,25 @@
             </div>
 
             <div class="panel">
-                <h3>📡 Bluetooth Подключение (FreeEEG16)</h3>
+                <h3>📡 Bluetooth Подключение (FreeEEG16/24)</h3>
                 <button type="button" class="btn btn-green" id="btnConnectBle">+ ПОДКЛЮЧИТЬ ПЛАТУ (BLE)</button>
                 <div id="deviceList"></div>
                 <div id="noDevicesMsg" class="empty-state">
                     Нет активных Bluetooth плат на этой вкладке.
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>🪜 Межрегиональная Гетерархия Монти (FCz ➔ Fpz)</h3>
+                <label>Ступень разморозки регионов (Лестница обучения):</label>
+                <select id="ladderStageSelect">
+                    <option value="1">Ступень 1: FCz Действия (20с тест, верх заморожен)</option>
+                    <option value="2">Ступень 2: +F3/F4 Структурная Форма и Стиль</option>
+                    <option value="3">Ступень 3: +AFz Композиционная Матрёшка (A ⊃ B)</option>
+                    <option value="4" selected>Ступень 4: +Fpz Полная Гетерархия и Колесо Эпох</option>
+                </select>
+                <div id="montyStatusBar" class="monty-bar">
+                    Loss (MSE): 0.0200 | Persistence: 0.00 | Surprise: 0.00
                 </div>
             </div>
 
@@ -225,20 +240,20 @@
                 <label class="mt-8">Режим динамики (Пресеты):</label>
                 <select id="diffPreset">
                     <option value="meditation">🧘 Глубокая медитация (Плавный морфинг: Steps 2, Str 0.45-0.70, EMA 0.30)</option>
-                    <option value="balanced" selected>⚖️ Баланс / Стандарт (Steps 2, Str 0.55-0.85, EMA 0.16)</option>
-                    <option value="dynamic">⚡ Высокая динамика (Быстрый отклик: Steps 3, Str 0.65-0.92, EMA 0.08)</option>
+                    <option value="balanced" selected>⚖️ Баланс / Стандарт (Steps 2, Str 0.50-0.85, EMA 0.14)</option>
+                    <option value="dynamic">⚡ Высокая динамика (Быстрый отклик: Steps 3, Str 0.60-0.92, EMA 0.08)</option>
                     <option value="custom">🛠️ Пользовательский (Ручная настройка)</option>
                 </select>
 
                 <div class="grid-4 mt-6">
                     <div><label>Steps:</label><input type="number" id="diffSteps" value="2" min="1" max="6"></div>
                     <div><label>CFG:</label><input type="number" id="diffCfg" value="1.0" min="0.0" max="3.0" step="0.1"></div>
-                    <div><label>Min Str:</label><input type="number" id="diffStrLow" value="0.55" min="0.35" max="0.75" step="0.05"></div>
+                    <div><label>Min Str:</label><input type="number" id="diffStrLow" value="0.50" min="0.35" max="0.75" step="0.05"></div>
                     <div><label>Max Str:</label><input type="number" id="diffStrHigh" value="0.85" min="0.55" max="0.95" step="0.05"></div>
                 </div>
                 <div class="mt-4">
                     <label>EMA Плавность (0.04 = динамика, 0.40 = медитация):</label>
-                    <input type="number" id="diffEmaSmooth" value="0.16" min="0.04" max="0.50" step="0.02">
+                    <input type="number" id="diffEmaSmooth" value="0.14" min="0.04" max="0.50" step="0.02">
                 </div>
             </div>
 
@@ -293,11 +308,11 @@
             
             <label>Кортикальная зона (10-20 EEG):</label>
             <select class="device-role-select">
-                <option value="AFz">AFz — Макросцена / Связи</option>
-                <option value="Fpz">Fpz — BA 10 Вето / Волевой отказ</option>
-                <option value="F3">F3  — Левый dlPFC (2D Ранги SWM)</option>
-                <option value="F4">F4  — Правый dlPFC (Контекст / Энтропия)</option>
-                <option value="FCz">FCz — SMA (4D Аффордансы)</option>
+                <option value="AFz">AFz — Макросцена / Связи (A ⊃ B)</option>
+                <option value="Fpz">Fpz — BA 10 Колесо Эпох / Смена правил</option>
+                <option value="F3">F3  — Левый dlPFC (ON-Структура формы)</option>
+                <option value="F4">F4  — Правый dlPFC (OFF-Контекст / Сила)</option>
+                <option value="FCz">FCz — SMA (SVD-Действия смысла)</option>
             </select>
 
             <div class="row-between mt-5">
@@ -328,7 +343,6 @@
         </div>
     </template>
 
-    <!-- Скрипт подключается внешним файлом: Хром больше не сможет ничего обрезать! -->
     <script src="/static/app.js"></script>
 </body>
 </html>

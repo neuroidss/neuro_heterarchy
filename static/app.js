@@ -21,6 +21,9 @@ const dom = {
     btnConnectBle: document.getElementById('btnConnectBle'),
     deviceList: document.getElementById('deviceList'),
     noDevicesMsg: document.getElementById('noDevicesMsg'),
+
+    ladderStageSelect: document.getElementById('ladderStageSelect'),
+    montyStatusBar: document.getElementById('montyStatusBar'),
     
     visionConceptList: document.getElementById('visionConceptList'),
     newVisionInput: document.getElementById('newVisionInput'),
@@ -125,7 +128,6 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
         if (val1 === expected && val2 === expected) {
             devObj.gain = targetGain;
             devObj.uvScale = calcUvScale(targetGain);
-            console.log(`✅ [GAIN ПОДТВЕРЖДЕН АЦП] ${devObj.name}: 0x${expected.toString(16)} (${targetGain}x)`);
             if (devObj.domRefs) {
                 devObj.domRefs.gainBadge.textContent = `✓ Железо подтвердило (${targetGain}x)`;
                 devObj.domRefs.gainBadge.style.color = "#10b981";
@@ -152,8 +154,8 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
 
 const PRESETS = {
     meditation: { steps: 2, cfg: 1.0, strLow: 0.45, strHigh: 0.70, ema: 0.30 },
-    balanced:   { steps: 2, cfg: 1.0, strLow: 0.55, strHigh: 0.85, ema: 0.16 },
-    dynamic:    { steps: 3, cfg: 1.2, strLow: 0.65, strHigh: 0.92, ema: 0.08 }
+    balanced:   { steps: 2, cfg: 1.0, strLow: 0.50, strHigh: 0.85, ema: 0.14 },
+    dynamic:    { steps: 3, cfg: 1.2, strLow: 0.60, strHigh: 0.92, ema: 0.08 }
 };
 
 function applyPreset(presetKey) {
@@ -172,9 +174,9 @@ function onManualParamChange() {
     dom.diffPreset.value = 'custom';
     const steps = Math.max(1, Math.min(6, parseInt(dom.diffSteps.value) || 2));
     const cfg = Math.max(0.0, Math.min(3.0, parseFloat(dom.diffCfg.value) || 1.0));
-    let sLow = Math.max(0.35, Math.min(0.75, parseFloat(dom.diffStrLow.value) || 0.55));
+    let sLow = Math.max(0.35, Math.min(0.75, parseFloat(dom.diffStrLow.value) || 0.50));
     let sHigh = Math.max(sLow + 0.05, Math.min(0.95, parseFloat(dom.diffStrHigh.value) || 0.85));
-    const ema = Math.max(0.04, Math.min(0.50, parseFloat(dom.diffEmaSmooth.value) || 0.16));
+    const ema = Math.max(0.04, Math.min(0.50, parseFloat(dom.diffEmaSmooth.value) || 0.14));
 
     dom.diffSteps.value = steps;
     dom.diffCfg.value = cfg;
@@ -200,6 +202,15 @@ async function sendDiffConfig(steps, cfg, sLow, sHigh, ema, presetKey) {
     });
 }
 
+async function onLadderStageChange() {
+    const stg = parseInt(dom.ladderStageSelect.value) || 4;
+    await fetch('/api/preset/ladder', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ stage: stg })
+    });
+}
+
 const sse = new EventSource('/api/state_stream');
 
 sse.addEventListener('state', (e) => {
@@ -208,10 +219,18 @@ sse.addEventListener('state', (e) => {
         renderVisionConcepts(st.world.concepts || []);
         dom.diffSteps.value = st.world.steps || 2;
         dom.diffCfg.value = st.world.guidance_scale || 1.0;
-        dom.diffStrLow.value = st.world.strength_low || 0.55;
+        dom.diffStrLow.value = st.world.strength_low || 0.50;
         dom.diffStrHigh.value = st.world.strength_high || 0.85;
-        dom.diffEmaSmooth.value = st.world.ema_smooth || 0.16;
+        dom.diffEmaSmooth.value = st.world.ema_smooth || 0.14;
         if (st.world.preset) dom.diffPreset.value = st.world.preset;
+        if (st.world.ladder_stage) dom.ladderStageSelect.value = st.world.ladder_stage;
+
+        const mLoss = (st.world.monty_loss || 0.0).toFixed(4);
+        const pers = (st.world.persistence || 0.0).toFixed(2);
+        const surp = (st.world.surprise || 0.0).toFixed(2);
+        if (dom.montyStatusBar) {
+            dom.montyStatusBar.textContent = `Loss (MSE): ${mLoss} | Persistence: ${pers} | Surprise: ${surp}`;
+        }
 
         if (st.world.is_recording) {
             dom.recBadge.style.background = "#e11d48";
@@ -240,10 +259,15 @@ sse.addEventListener('state', (e) => {
 sse.addEventListener('ble_cmd', async (e) => {
     const req = JSON.parse(e.data);
     const devObj = activeDevices.find(d => d.id === req.device_id || req.device_id === "all");
-    if (devObj && devObj.cmdChar) {
-        if (req.cmd === 'set_gain') {
-            await writeAndVerifyGain(devObj, parseInt(req.val));
-        }
+    if (!devObj) return;
+    if (req.cmd === 'set_gain' && devObj.cmdChar) {
+        await writeAndVerifyGain(devObj, parseInt(req.val));
+    } else if (req.cmd === 'set_role') {
+        devObj.role = req.val;
+        if (devObj.domRefs) devObj.domRefs.roleSelect.value = req.val;
+    } else if (req.cmd === 'set_user') {
+        devObj.user = req.val;
+        if (devObj.domRefs) devObj.domRefs.userInput.value = req.val;
     }
 });
 
@@ -343,7 +367,7 @@ async function connectNewBleDevice() {
             device: device,
             cmdChar: cmdChar,
             user: "User" + (activeDevices.length + 1),
-            role: activeDevices.length === 0 ? "AFz" : "Fpz",
+            role: activeDevices.length === 0 ? "AFz" : "FCz",
             gain: 4,
             uvScale: calcUvScale(4),
             packetCount: 0,
@@ -600,6 +624,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     
     dom.btnAddVision.addEventListener('click', addVisionConcept);
     dom.btnAddMusic.addEventListener('click', addMusicConcept);
+
+    if (dom.ladderStageSelect) {
+        dom.ladderStageSelect.addEventListener('change', onLadderStageChange);
+    }
 
     dom.diffPreset.addEventListener('change', (e) => applyPreset(e.target.value));
     [dom.diffSteps, dom.diffCfg, dom.diffStrLow, dom.diffStrHigh, dom.diffEmaSmooth].forEach(inp => {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v7.8 (CLEAN STATIC DISCOVERY & STREAMING)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v8.0 (PER-REGION MONTY API & STREAMING)
 ===================================================================================
 """
 
@@ -65,12 +65,18 @@ world_state = {
     "preset": "balanced",
     "steps": 2,
     "guidance_scale": 1.0,
-    "strength_low": 0.55,
+    "strength_low": 0.50,
     "strength_high": 0.85,
-    "ema_smooth": 0.16,
+    "ema_smooth": 0.14,
     "is_recording": False,
+    "active_session_path": "",
     "current_puck": [0.0, 0.0],
-    "active_thought": ""
+    "active_thought": "",
+    "ladder_stage": 4,
+    "monty_loss": 0.0,
+    "persistence": 0.0,
+    "surprise": 0.0,
+    "regions": {}
 }
 world_state_lock = threading.Lock()
 
@@ -79,6 +85,7 @@ devices_lock = threading.Lock()
 
 sse_clients = []
 sse_lock = threading.Lock()
+
 
 def broadcast_sse(event_name: str, payload: dict):
     msg = f"event: {event_name}\ndata: {json.dumps(payload)}\n\n".encode('utf-8')
@@ -92,6 +99,7 @@ def broadcast_sse(event_name: str, payload: dict):
         for d in dead:
             if d in sse_clients:
                 sse_clients.remove(d)
+
 
 class DynamicLSLRouter:
     def __init__(self):
@@ -122,7 +130,9 @@ class DynamicLSLRouter:
             if len(s) == NUM_CHANNELS:
                 outlet.push_sample(s)
 
+
 lsl_router = DynamicLSLRouter()
+
 
 def make_wav_header(sample_rate=SAMPLE_RATE, num_channels=1, bits_per_sample=16):
     data_size = 0x7FFFFFFF - 44
@@ -135,23 +145,24 @@ def make_wav_header(sample_rate=SAMPLE_RATE, num_channels=1, bits_per_sample=16)
         bits_per_sample, b'data', data_size
     )
 
+
 OPENAPI_SPEC = {
     "openapi": "3.0.1",
     "info": {
-        "title": "NeuroCanvas Unified World & MusicGen Agent API",
-        "description": "API для внешних LLM-агентов для управления генерацией.",
-        "version": "7.8.0"
+        "title": "NeuroCanvas Unified World, Region Monty & MusicGen Agent API",
+        "description": "API для управления концептами и по-региональной гетерархией Монти (FCz, F3, F4, AFz, Fpz).",
+        "version": "8.0.0"
     },
     "servers": [{"url": "http://localhost:8080"}],
     "paths": {
         "/api/world/concepts": {
-            "get": { "summary": "Список активных визуальных концептов", "operationId": "getVisionConcepts", "responses": {"200": {"description": "Список"}} }
+            "get": {"summary": "Список активных визуальных концептов", "operationId": "getVisionConcepts", "responses": {"200": {"description": "Список"}}}
         },
         "/api/world/concepts/add": {
             "post": {
-                "summary": "Добавить новый визуальный концепт в диффузию",
+                "summary": "Добавить визуальный концепт в диффузию",
                 "operationId": "addVisionConcept",
-                "requestBody": { "required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}} },
+                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}}},
                 "responses": {"200": {"description": "Добавлено"}}
             }
         },
@@ -159,18 +170,65 @@ OPENAPI_SPEC = {
             "post": {
                 "summary": "Удалить визуальный концепт из диффузии",
                 "operationId": "removeVisionConcept",
-                "requestBody": { "required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}} },
+                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}}},
                 "responses": {"200": {"description": "Удалено"}}
             }
         },
+        "/api/preset/ladder": {
+            "post": {
+                "summary": "Переключить ступень региональной гетерархии (1=FCz Действия, 2=+F3/F4, 3=+AFz, 4=+Fpz)",
+                "operationId": "setRegionLadderStage",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "stage": {"type": "integer", "enum": [1, 2, 3, 4]},
+                                    "anchor": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "Ступень активирована"}}
+            }
+        },
+        "/api/region/config": {
+            "post": {
+                "summary": "Настроить конкретный кортикальный регион (FCz, F3, F4, AFz, Fpz)",
+                "operationId": "configureCorticalRegion",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "region": {"type": "string", "enum": ["FCz", "F3", "F4", "AFz", "Fpz"]},
+                                    "mode": {"type": "string", "enum": ["auto", "locked"]},
+                                    "locked_concept": {"type": "string"},
+                                    "tau_sec": {"type": "number"}
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "Регион настроен"}}
+            }
+        },
+        "/api/region/telemetry": {
+            "get": {"summary": "Детальная телеметрия колонок Монти по всем 5 регионам", "operationId": "getRegionMontyTelemetry", "responses": {"200": {"description": "Телеметрия регионов"}}}
+        },
         "/api/music/concepts": {
-            "get": { "summary": "Список активных музыкальных тем MusicGen", "operationId": "getMusicConcepts", "responses": {"200": {"description": "Список"}} }
+            "get": {"summary": "Список активных музыкальных тем MusicGen", "operationId": "getMusicConcepts", "responses": {"200": {"description": "Список"}}}
         },
         "/api/music/concepts/add": {
             "post": {
-                "summary": "Добавить новую тему саундтрека в MusicGen",
+                "summary": "Добавить тему саундтрека в MusicGen",
                 "operationId": "addMusicConcept",
-                "requestBody": { "required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}} },
+                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}}},
                 "responses": {"200": {"description": "Добавлено"}}
             }
         },
@@ -178,21 +236,22 @@ OPENAPI_SPEC = {
             "post": {
                 "summary": "Удалить тему саундтрека из MusicGen",
                 "operationId": "removeMusicConcept",
-                "requestBody": { "required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}} },
+                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}}},
                 "responses": {"200": {"description": "Удалено"}}
             }
         },
         "/api/world/telemetry": {
-            "get": { "summary": "Фокус внимания и эмоциональное состояние пользователя", "operationId": "getUserMentalState", "responses": {"200": {"description": "Телеметрия"}} }
+            "get": {"summary": "Фокус внимания, MSE Loss Монти и настойчивость пользователя", "operationId": "getUserMentalState", "responses": {"200": {"description": "Телеметрия"}}}
         },
         "/api/recording/start": {
-            "post": { "summary": "Начать мультимодальную запись (ЭЭГ + Видео + Теги)", "operationId": "startRecording", "responses": {"200": {"description": "Запущено"}} }
+            "post": {"summary": "Начать мультимодальную запись (ЭЭГ + Видео + Теги)", "operationId": "startRecording", "responses": {"200": {"description": "Запущено"}}}
         },
         "/api/recording/stop": {
-            "post": { "summary": "Остановить запись и сохранить датасет", "operationId": "stopRecording", "responses": {"200": {"description": "Сохранено"}} }
+            "post": {"summary": "Остановить запись и сохранить датасет", "operationId": "stopRecording", "responses": {"200": {"description": "Сохранено"}}}
         }
     }
 }
+
 
 class UnifiedCloudHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -240,7 +299,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         clean_path = self.path.split('?')[0].rstrip('/')
 
-        # 1. Отдача index.html
         if clean_path in ['', '/index.html']:
             candidate_paths = [
                 os.path.join(BASE_DIR, 'static', 'index.html'),
@@ -252,9 +310,8 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             if found:
                 self._serve_file(found, 'text/html')
             else:
-                self.send_error(404, "index.html не найден ни в static/, ни в корне")
+                self.send_error(404, "index.html не найден")
 
-        # 2. Отдача app.js
         elif clean_path in ['/app.js', '/static/app.js']:
             candidate_js = [
                 os.path.join(BASE_DIR, 'static', 'app.js'),
@@ -266,7 +323,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             if found_js:
                 self._serve_file(found_js, 'application/javascript')
             else:
-                self.send_error(404, "app.js не найден в static/app.js")
+                self.send_error(404, "app.js не найден")
 
         elif clean_path == '/openapi.json':
             self._send_json(200, OPENAPI_SPEC)
@@ -327,7 +384,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             client_q = queue.Queue(maxsize=30)
             with sse_lock:
                 sse_clients.append(client_q)
-            
+
             with world_state_lock, music_state_lock:
                 combo = {"world": world_state, "music": music_state}
                 init_msg = f"event: state\ndata: {json.dumps(combo)}\n\n".encode('utf-8')
@@ -357,7 +414,21 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {
                     "active_thought": world_state["active_thought"],
                     "puck": world_state["current_puck"],
+                    "ladder_stage": world_state["ladder_stage"],
+                    "monty_loss": world_state["monty_loss"],
+                    "persistence": world_state["persistence"],
+                    "surprise": world_state["surprise"],
                     "concepts": world_state["concepts"]
+                })
+
+        elif clean_path == '/api/region/telemetry':
+            with world_state_lock:
+                self._send_json(200, {
+                    "ladder_stage": world_state["ladder_stage"],
+                    "monty_loss": world_state["monty_loss"],
+                    "persistence": world_state["persistence"],
+                    "surprise": world_state["surprise"],
+                    "regions": world_state["regions"]
                 })
 
         else:
@@ -421,6 +492,22 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": world_state["concepts"]})
 
+        elif clean_path == '/api/region/config':
+            region = data.get('region', 'AFz')
+            cfg = {k: v for k, v in data.items() if k != 'region'}
+            send_diff_ipc({"cmd": "region_config", "region": region, "config": cfg})
+            broadcast_full_state()
+            self._send_json(200, {"status": "ok", "region": region, "config": cfg})
+
+        elif clean_path == '/api/preset/ladder':
+            stage = int(data.get('stage', 4))
+            anchor = str(data.get('anchor', ''))
+            with world_state_lock:
+                world_state["ladder_stage"] = stage
+            send_diff_ipc({"cmd": "set_ladder", "stage": stage, "anchor": anchor})
+            broadcast_full_state()
+            self._send_json(200, {"status": "ok", "ladder_stage": stage, "anchor": anchor})
+
         elif clean_path == '/api/music/concepts/add':
             concept = data.get('concept', '').strip()
             if concept:
@@ -458,18 +545,24 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok"})
 
         elif clean_path == '/api/recording/start':
+            ts_str = time.strftime("%Y%m%d_%H%M%S")
+            req_name = data.get("name")
+            s_name = f"session_{ts_str}" if not req_name else f"{req_name}_{ts_str}"
+            expected_path = f"sessions/{s_name}"
             with world_state_lock:
                 world_state["is_recording"] = True
-            send_diff_ipc({"cmd": "start_recording", "session_name": data.get("name")})
+                world_state["active_session_path"] = expected_path
+            send_diff_ipc({"cmd": "start_recording", "session_name": req_name})
             broadcast_full_state()
-            self._send_json(200, {"status": "recording_started"})
+            self._send_json(200, {"status": "recording_started", "session_path": expected_path})
 
         elif clean_path == '/api/recording/stop':
             with world_state_lock:
                 world_state["is_recording"] = False
+                saved_p = world_state.get("active_session_path", "sessions/latest")
             send_diff_ipc({"cmd": "stop_recording"})
             broadcast_full_state()
-            self._send_json(200, {"status": "recording_stopped"})
+            self._send_json(200, {"status": "recording_stopped", "saved_path": saved_p})
 
         else:
             self.send_error(404)
@@ -477,10 +570,12 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+
 def broadcast_full_state():
     with world_state_lock, music_state_lock:
         st = {"world": world_state.copy(), "music": music_state.copy()}
     broadcast_sse("state", st)
+
 
 def send_diff_ipc(payload):
     global active_diff_ctrl_conn
@@ -491,10 +586,12 @@ def send_diff_ipc(payload):
             except Exception:
                 active_diff_ctrl_conn = None
 
+
 class ThreadedHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 128
     allow_reuse_address = True
+
 
 def ipc_frame_receiver():
     global latest_jpeg_frame
@@ -512,6 +609,7 @@ def ipc_frame_receiver():
                         latest_jpeg_frame = data
         except Exception:
             time.sleep(0.5)
+
 
 def ipc_audio_receiver():
     global active_music_conn
@@ -544,8 +642,10 @@ def ipc_audio_receiver():
             with music_conn_lock:
                 active_music_conn = None
 
+
 def ipc_control_listener():
     global active_diff_ctrl_conn
+    last_sse_push = 0.0
     try:
         listener = Listener(('localhost', IPC_DIFF_CONTROL_PORT), authkey=IPC_DIFF_AUTHKEY)
     except Exception:
@@ -568,17 +668,28 @@ def ipc_control_listener():
                         with world_state_lock:
                             world_state["current_puck"] = msg.get("puck", [0.0, 0.0])
                             world_state["active_thought"] = msg.get("active_thought", "")
+                            world_state["ladder_stage"] = msg.get("ladder_stage", 4)
+                            world_state["monty_loss"] = msg.get("monty_loss", 0.0)
+                            world_state["persistence"] = msg.get("persistence", 0.0)
+                            world_state["surprise"] = msg.get("surprise", 0.0)
+                            world_state["regions"] = msg.get("regions", {})
+                        now = time.time()
+                        if now - last_sse_push > 0.25:
+                            last_sse_push = now
+                            broadcast_full_state()
         except Exception:
             time.sleep(0.5)
         finally:
             with diff_ctrl_lock:
                 active_diff_ctrl_conn = None
 
+
 def load_initial_lore(lore_path):
     if lore_path and os.path.exists(lore_path):
         with open(lore_path, 'r', encoding='utf-8') as f:
             return [line.strip() for line in f if line.strip() and not line.startswith('#')]
     return []
+
 
 def main():
     parser = argparse.ArgumentParser(description="NeuroCanvas Production Web & LSL Gateway")
@@ -647,6 +758,7 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nОстановка шлюза.")
+
 
 if __name__ == '__main__':
     main()

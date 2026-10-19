@@ -3,10 +3,8 @@
 ===================================================================================
 NEUROCANVAS: PURE UNCONSTRAINED MULTIDIMENSIONAL HETERARCHY BCI (TBT 2.0)
 ===================================================================================
-- ДИСПЕТЧЕР КОНВЕЙЕРА С ЗАЩИТОЙ ДИАПАЗОНА (WATCHDOG & REVERT).
-- НУЛЕВОЙ СТАРТ: Если лор пуст, начинает со свободного потока [].
-- ПЛАВНОСТЬ VS ДИНАМИКА: Поддержка пресетов и авто-коррекции параметров.
-- В режиме --headless работает БЕЗ импорта Pygame!
+- Поддержка по-регионального API управления (/api/region/config и /api/preset/ladder).
+- Передача живой телеметрии колонок Монти (MSE Loss, Persistence, Surprise) в веб-шлюз.
 ===================================================================================
 """
 
@@ -37,6 +35,7 @@ from neuro_recorder import recorder_instance
 
 ipc_lock = threading.Lock()
 
+
 class AsyncDiffusionWorker(threading.Thread):
     def __init__(self, conn, initial_h=384, initial_w=512, use_color=True, is_sdxl=False, inference_steps=2):
         super().__init__(daemon=True)
@@ -52,8 +51,7 @@ class AsyncDiffusionWorker(threading.Thread):
         self.gateway_conn = None
         self.fps = 0.0
         self.latest_telemetry = {}
-        
-        # Резервные параметры для авто-отката при ошибках
+
         self.last_safe_config = {
             'steps': 2, 'strength': 0.60, 'guidance': 1.0
         }
@@ -65,10 +63,12 @@ class AsyncDiffusionWorker(threading.Thread):
             self.latest_telemetry = telemetry
 
     def flush(self):
-        with self.lock: self.display_rgb.fill(0)
+        with self.lock:
+            self.display_rgb.fill(0)
 
     def get_canvas(self):
-        with self.lock: return self.display_rgb
+        with self.lock:
+            return self.display_rgb
 
     def run(self):
         times = []
@@ -80,9 +80,12 @@ class AsyncDiffusionWorker(threading.Thread):
                 steps = self.inference_steps
                 cfg = self.guidance_scale
                 telem = self.latest_telemetry
-                if np.max(self.display_rgb) > 0: internal_rgb = self.display_rgb.copy()
+                if np.max(self.display_rgb) > 0:
+                    internal_rgb = self.display_rgb.copy()
 
-            if embeds is None: time.sleep(0.005); continue
+            if embeds is None:
+                time.sleep(0.005)
+                continue
 
             try:
                 t0 = time.time()
@@ -99,15 +102,18 @@ class AsyncDiffusionWorker(threading.Thread):
                     resp = self.conn.recv()
 
                 if isinstance(resp, np.ndarray):
-                    if resp.shape[:2] != (self.img_h, self.img_w): resp = cv2.resize(resp, (self.img_w, self.img_h))
+                    if resp.shape[:2] != (self.img_h, self.img_w):
+                        resp = cv2.resize(resp, (self.img_w, self.img_h))
                     internal_rgb = apply_color_surgery(resp, internal_rgb.astype(np.float32)) if (self.use_color and np.max(internal_rgb) > 0) else resp
                     with self.lock:
                         self.display_rgb = internal_rgb
                         self.last_safe_config = {'steps': steps, 'strength': s_val, 'guidance': cfg}
 
                     if self.gateway_conn is None:
-                        try: self.gateway_conn = Client(('localhost', 6002), authkey=b'canvas')
-                        except Exception: self.gateway_conn = None
+                        try:
+                            self.gateway_conn = Client(('localhost', 6002), authkey=b'canvas')
+                        except Exception:
+                            self.gateway_conn = None
 
                     bgr = cv2.cvtColor(internal_rgb, cv2.COLOR_RGB2BGR)
                     if self.gateway_conn is not None:
@@ -115,18 +121,20 @@ class AsyncDiffusionWorker(threading.Thread):
                             _, enc_jpg = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
                             self.gateway_conn.send(enc_jpg.tobytes())
                         except Exception:
-                            try: self.gateway_conn.close()
-                            except Exception: pass
+                            try:
+                                self.gateway_conn.close()
+                            except Exception:
+                                pass
                             self.gateway_conn = None
 
                     if recorder_instance.is_recording:
                         recorder_instance.push_frame(bgr, telem)
 
                     times.append(time.time() - t0)
-                    if len(times) > 5: times.pop(0)
+                    if len(times) > 5:
+                        times.pop(0)
                     self.fps = 1.0 / (np.mean(times) + 1e-6)
                 else:
-                    # Авто-откат при сбое генератора
                     with self.lock:
                         self.inference_steps = self.last_safe_config['steps']
                         self.strength = self.last_safe_config['strength']
@@ -134,28 +142,29 @@ class AsyncDiffusionWorker(threading.Thread):
             except Exception:
                 time.sleep(0.05)
 
+
 def main():
     parser = argparse.ArgumentParser(description="NeuroCanvas Decoupled Runner")
     parser.add_argument('--lore', '--concepts-file', dest='lore_file', type=str, default=None)
     parser.add_argument('--concepts', type=str, default=None)
     parser.add_argument('--vocab-ratio', type=float, default=1.0)
     parser.add_argument('--vocab-size', type=int, default=None)
-    
+
     parser.add_argument('--users', type=str, default=None)
     parser.add_argument('--sps', type=int, default=250, choices=[250, 500])
     parser.add_argument('--gamma-max', type=float, default=100.0)
-    
+
     parser.add_argument('--mode', type=str, default="lcm", choices=["lcm", "turbo", "sdxl-turbo", "sdxl"])
     parser.add_argument('--speed', type=str, default="fast", choices=["fast", "quality"])
     parser.add_argument('--steps', type=int, default=2)
     parser.add_argument('--no-taesd', action='store_true', default=False)
     parser.add_argument('--no-color', action='store_true', default=False)
 
-    parser.add_argument('--strength-low', type=float, default=0.55)
-    parser.add_argument('--strength-high', type=float, default=0.75)
-    parser.add_argument('--burst-strength', type=float, default=0.75)
-    parser.add_argument('--burst-duration', type=float, default=0.0)
-    parser.add_argument('--ema-smooth', type=float, default=0.16)
+    parser.add_argument('--strength-low', type=float, default=0.50)
+    parser.add_argument('--strength-high', type=float, default=0.85)
+    parser.add_argument('--burst-strength', type=float, default=0.85)
+    parser.add_argument('--burst-duration', type=float, default=1.2)
+    parser.add_argument('--ema-smooth', type=float, default=0.14)
 
     parser.add_argument('--seal-thresh', type=float, default=0.68)
     parser.add_argument('--seal-cycles', type=int, default=4)
@@ -177,12 +186,13 @@ def main():
                 resp = conn.recv()
             is_sdxl = resp.get('is_sdxl', False)
             print(f"✅ Диффузия готова! (SDXL: {is_sdxl})")
-        except Exception: time.sleep(0.5)
+        except Exception:
+            time.sleep(0.5)
 
     target_k = args.vocab_size if args.vocab_size is not None else (int(49400 * args.vocab_ratio) if args.vocab_ratio < 1.0 else None)
     semantic = UniversalSemanticSpace(lore_file=args.lore_file, concepts_cli=args.concepts, target_k=target_k)
     router = SelfSufficientHeterarchyRouter(args.users)
-    
+
     processor = HeterarchyDeltaProcessor(
         semantic=semantic,
         router=router,
@@ -228,15 +238,22 @@ def main():
                     if cmd == 'update_concepts':
                         new_words = msg.get('concepts', [])
                         semantic.update_concepts_on_the_fly(new_words)
-                        processor.fatigue = torch.zeros(max(1, len(semantic.words)), dtype=torch.float32, device=DEVICE)
                     elif cmd == 'update_params':
                         p = msg.get('params', {})
-                        # Валидация и защита от некорректных значений
-                        if 'steps' in p: worker.inference_steps = max(1, min(6, int(p['steps'])))
-                        if 'guidance_scale' in p: worker.guidance_scale = max(0.0, min(3.0, float(p['guidance_scale'])))
-                        if 'strength_low' in p: processor.strength_low = max(0.35, min(0.75, float(p['strength_low'])))
-                        if 'strength_high' in p: processor.burst_strength = max(processor.strength_low + 0.05, min(0.95, float(p['strength_high'])))
-                        if 'ema_smooth' in p: current_ema_smooth = max(0.04, min(0.50, float(p['ema_smooth'])))
+                        if 'steps' in p:
+                            worker.inference_steps = max(1, min(6, int(p['steps'])))
+                        if 'guidance_scale' in p:
+                            worker.guidance_scale = max(0.0, min(3.0, float(p['guidance_scale'])))
+                        if 'strength_low' in p:
+                            processor.strength_low = max(0.35, min(0.75, float(p['strength_low'])))
+                        if 'strength_high' in p:
+                            processor.burst_strength = max(processor.strength_low + 0.05, min(0.95, float(p['strength_high'])))
+                        if 'ema_smooth' in p:
+                            current_ema_smooth = max(0.04, min(0.50, float(p['ema_smooth'])))
+                    elif cmd == 'region_config':
+                        processor.configure_region_api(msg.get('region', 'AFz'), msg.get('config', {}))
+                    elif cmd == 'set_ladder':
+                        processor.set_ladder_stage(int(msg.get('stage', 4)), str(msg.get('anchor', '')))
                     elif cmd == 'start_recording':
                         recorder_instance.start_session(session_name=msg.get('session_name'))
                     elif cmd == 'stop_recording':
@@ -255,18 +272,20 @@ def main():
             if hud:
                 dt, commands = hud.poll_events(len(engine.get_frame().nodes))
                 for cmd, payload in commands:
-                    if cmd == "set_role": router.set_role(payload[0], payload[1])
+                    if cmd == "set_role":
+                        router.set_role(payload[0], payload[1])
                     elif cmd == "reset_seals":
-                        for eng in processor.engines.values(): 
+                        for eng in processor.engines.values():
                             eng.seals.charge.fill(0)
-                            eng.seals.mask = [False]*MAX_SLOTS_CAPACITY
+                            eng.seals.mask = [False] * MAX_SLOTS_CAPACITY
                         hud.spiral.rings.clear()
-                    elif cmd == "flush_canvas": 
+                    elif cmd == "flush_canvas":
                         worker.flush()
 
             frame = engine.get_frame()
             if frame.num_live == 0:
-                if hud: hud.render_waiting()
+                if hud:
+                    hud.render_waiting()
                 time.sleep(0.01)
                 continue
 
@@ -276,15 +295,21 @@ def main():
                 try:
                     puck = [telemetry.get("f3_x_local", 0.0), telemetry.get("f3_y_global", 0.0)]
                     active_w = telemetry.get("dag_log_parts", [""])[0]
-                    sat_mask = frame.nodes[0].saturation_mask if len(frame.nodes) > 0 else [False]*16
+                    sat_mask = frame.nodes[0].saturation_mask if len(frame.nodes) > 0 else [False] * 16
                     ctrl_conn.send({
                         "cmd": "telemetry",
                         "puck": puck,
                         "active_thought": active_w,
                         "dyn_strength": dyn_str,
+                        "ladder_stage": telemetry.get("ladder_stage", 4),
+                        "monty_loss": telemetry.get("monty_loss", 0.0),
+                        "persistence": telemetry.get("persistence", 0.0),
+                        "surprise": telemetry.get("surprise", 0.0),
+                        "regions": telemetry.get("regions_telemetry", {}),
                         "gpu_sat_mask": sat_mask
                     })
-                except Exception: pass
+                except Exception:
+                    pass
 
             ema = float(np.clip(dt / current_ema_smooth, 0.04, 0.60))
             smoothed_target.mul_(1.0 - ema).add_(target_77, alpha=ema)
@@ -299,8 +324,9 @@ def main():
         worker.running = False
         recorder_instance.stop_session()
         engine.stop()
-        if hud: hud.close()
+        if hud:
+            hud.close()
+
 
 if __name__ == '__main__':
     main()
-
