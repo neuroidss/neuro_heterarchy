@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS ORANGE PI HTTPS CLOUD ORCHESTRATOR v2.4 (IMMERS.CLOUD NATIVE)
+NEUROCANVAS ORANGE PI HTTPS CLOUD ORCHESTRATOR v3.1 (WITH SESSION MANAGER & VIEWER)
 ===================================================================================
-1. Веса моделей сохраняются на SSD-диске в /opt/hf_cache (никогда не качаются заново
-   после паузы Shelve или пересоздания VM из тома).
-2. Автоматический git pull при каждом пробуждении VM + кнопка "🔄 Обновить с GitHub"
-   (обновляет код внутри контейнеров за 5 секунд без пересоздания тома!).
-3. Мгновенное скачивание сессий одним .tar.gz архивом БЕЗ папки frames/*.jpg
-   (только video_timeline.mp4, eeg_raw.npz, events.csv, manifest.json) + ссылка
-   на скачивание архива прямо из браузера.
+- Исправлен таймаут SSH (фон запускается через nohup ... </dev/null >/dev/null 2>&1 &
+  и возвращает управление за 0.15 сек).
+- Полноценный МЕНЕДЖЕР СЕССИЙ на Orange Pi (./downloaded_sessions/):
+  * Скачивает каждую сессию отдельно (video_timeline.mp4, eeg_raw.npz, events.csv,
+    manifest.json — БЕЗ тысяч мелких картинок frames/*.jpg).
+  * Автоматически запускает analyze_session.py и строит график синхронизации ЭЭГ.
+  * Позволяет прямо в браузере (даже когда облако полностью удалено в 0 ₽/ч!)
+    смотреть видео сессии, график ЭЭГ и скачивать .tar.gz любой выбранной сессии.
 ===================================================================================
 """
 
@@ -18,6 +19,8 @@ import sys
 import time
 import json
 import base64
+import random
+import shutil
 import ipaddress
 import subprocess
 import threading
@@ -25,7 +28,7 @@ from pathlib import Path
 import requests
 import urllib3
 import openstack
-from flask import Flask, request, jsonify, render_template_string, send_from_directory
+from flask import Flask, Response, request, jsonify, render_template_string, send_from_directory
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -50,6 +53,7 @@ SSH_PUB_KEY_PATH = os.path.expanduser("~/.ssh/id_ed25519.pub")
 SSH_PRIV_KEY     = os.path.expanduser("~/.ssh/id_ed25519")
 LOCAL_SESSIONS   = Path(os.environ.get("LOCAL_SESSIONS_DIR", "./downloaded_sessions")).resolve()
 LOCAL_SESSIONS.mkdir(parents=True, exist_ok=True)
+CUSTOM_PIPELINE_FILE = Path(os.path.expanduser("~/.neurocanvas_custom_pipeline.json"))
 
 
 def is_private_ip(ip_str: str) -> bool:
@@ -78,8 +82,25 @@ def ensure_ssh_keypair() -> str:
         return f.read().strip()
 
 
-# Единый скрипт развертывания, сохранения кэша весов в /opt/hf_cache и обновления с GitHub
-DEPLOY_SHELL_COMMANDS = """
+def load_initial_custom_pipeline() -> list[dict]:
+    if CUSTOM_PIPELINE_FILE.exists():
+        try:
+            with open(CUSTOM_PIPELINE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    try:
+        import run_meditation_timeline
+        if hasattr(run_meditation_timeline, "TIMELINE_STAGES"):
+            return list(run_meditation_timeline.TIMELINE_STAGES)
+    except Exception:
+        pass
+    return [
+        {"minute": 0.0, "mode": "set", "name": "Стадия 1: Базовый фокус", "concepts": ["silver shining ball of light"]}
+    ]
+
+
+DEPLOY_SHELL_COMMANDS = """#!/bin/bash
 exec > /var/log/neuro_deploy.log 2>&1
 set -x
 export DEBIAN_FRONTEND=noninteractive
@@ -94,7 +115,7 @@ if ! docker compose version &> /dev/null; then
 fi
 
 if ! docker info 2>/dev/null | grep -qi nvidia; then
-    echo "Настройка NVIDIA Container Toolkit для Docker..."
+    echo "Настройка NVIDIA Container Toolkit..."
     if ! command -v nvidia-ctk &> /dev/null; then
         curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg || true
         curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
@@ -106,7 +127,7 @@ if ! docker info 2>/dev/null | grep -qi nvidia; then
     systemctl restart docker || true
 fi
 
-echo "=== [2/5] Клонирование и свежее обновление с GitHub (git pull) ==="
+echo "=== [2/5] Обновление кода с GitHub (git pull в /opt/neuro_heterarchy) ==="
 mkdir -p /opt /opt/hf_cache
 if [ ! -d "/opt/neuro_heterarchy/.git" ]; then
     rm -rf /opt/neuro_heterarchy
@@ -120,27 +141,27 @@ fi
 cd /opt/neuro_heterarchy
 mkdir -p sessions lore /opt/hf_cache
 
-# Привязываем постоянную папку /opt/hf_cache на SSD-диске ко всем контейнерам,
-# чтобы веса HuggingFace НИКОГДА не качались заново после паузы или ребута!
-sed -i 's|hf_cache:/root/.cache/huggingface|/opt/hf_cache:/root/.cache/huggingface|g' docker-compose.fast.yml || true
 sed -i 's|hf_cache:/root/.cache/huggingface|/opt/hf_cache:/root/.cache/huggingface|g' docker-compose.yml || true
 
-echo "=== [3/5] Проверка HTTPS сертификатов ==="
+echo "=== [3/5] Генерация сертификатов HTTPS ==="
 if [ ! -f "cert.pem" ] || [ ! -f "key.pem" ]; then
     openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=neurocanvas.cloud"
 fi
 
-echo "=== [4/5] Проверка базового образа neuroidss/neuro_heterarchy_diffusion:latest ==="
+echo "=== [4/5] Проверка готового образа neuroidss/neuro_heterarchy_diffusion:latest ==="
 if ! docker image inspect neuroidss/neuro_heterarchy_diffusion:latest &> /dev/null; then
     docker pull neuroidss/neuro_heterarchy_diffusion:latest
 else
-    echo "Базовый образ уже на SSD-диске! Пропускаем долгое скачивание."
+    echo "Образ уже сохранен на SSD-диске!"
 fi
 
-echo "=== [5/5] Быстрая сборка кода с GitHub и старт контейнеров ==="
+echo "=== [5/5] Очистка старых контейнеров и чистый запуск docker-compose.yml (--no-build) ==="
+docker compose -f docker-compose.yml down --remove-orphans || true
+docker rm -f neuro_brain_server neuro_web_gateway neuro_canvas_engine neuro_musicgen_server neuro_musicgen_engine 2>/dev/null || true
+
 cat << 'EOF' > /etc/systemd/system/neuro-heterarchy.service
 [Unit]
-Description=NeuroCanvas RTX 4090 Heterarchy Stack
+Description=NeuroCanvas RTX 4090 Heterarchy Stack (Zero-Build Direct Mount)
 After=docker.service network-online.target
 Requires=docker.service
 
@@ -150,9 +171,10 @@ RemainAfterExit=yes
 WorkingDirectory=/opt/neuro_heterarchy
 ExecStartPre=-/usr/bin/git fetch --all
 ExecStartPre=-/usr/bin/git reset --hard origin/HEAD
-ExecStartPre=-/bin/sed -i 's|hf_cache:/root/.cache/huggingface|/opt/hf_cache:/root/.cache/huggingface|g' docker-compose.fast.yml
-ExecStart=/usr/bin/docker compose -f docker-compose.fast.yml up -d --build
-ExecStop=/usr/bin/docker compose -f docker-compose.fast.yml stop
+ExecStartPre=-/bin/sed -i 's|hf_cache:/root/.cache/huggingface|/opt/hf_cache:/root/.cache/huggingface|g' docker-compose.yml
+ExecStartPre=-/usr/bin/docker rm -f neuro_brain_server neuro_web_gateway neuro_canvas_engine
+ExecStart=/usr/bin/docker compose -f docker-compose.yml up -d --no-build --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.yml stop
 ExecStopPost=/bin/sync
 TimeoutStartSec=0
 
@@ -162,21 +184,15 @@ EOF
 
 systemctl daemon-reload
 systemctl enable neuro-heterarchy.service
-docker compose -f docker-compose.fast.yml up -d --build
+docker compose -f docker-compose.yml up -d --no-build --remove-orphans
 sync
-echo "=== [ГОТОВО] ВСЕ КОНТЕЙНЕРЫ ЗАПУЩЕНЫ И ВЕСА НА SSD СОХРАНЕНЫ! ==="
+echo "=== [ГОТОВО] ВСЕ КОНТЕЙНЕРЫ ЗАПУЩЕНЫ БЕЗ БИЛДА! ==="
 """
 
 
 def build_cloud_init_script(ssh_pub_key: str, git_repo: str) -> str:
     body = DEPLOY_SHELL_COMMANDS.replace("__GIT_REPO__", git_repo)
     script = f"""#!/bin/bash
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-echo "{ssh_pub_key}" >> /root/.ssh/authorized_keys
-sed -i 's/.*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || true
-chmod 600 /root/.ssh/authorized_keys
-
 if [ -d "/home/ubuntu" ]; then
     mkdir -p /home/ubuntu/.ssh
     echo "{ssh_pub_key}" >> /home/ubuntu/.ssh/authorized_keys
@@ -186,6 +202,141 @@ fi
 {body}
 """
     return base64.b64encode(script.encode("utf-8")).decode("utf-8")
+
+
+class CustomPipelineRunner:
+    def __init__(self, cloud_mgr):
+        self.mgr = cloud_mgr
+        self.stages = load_initial_custom_pipeline()
+        self.is_running = False
+        self.stop_event = threading.Event()
+        self.current_stage_idx = 0
+        self.elapsed_sec = 0.0
+        self.total_duration_min = 25.0
+        self.override_mode = "as_defined"
+        self.max_concepts_per_stage = 0
+        self.random_sample = False
+        self.status_text = "Протокол не запущен"
+        self.active_session_name = ""
+
+    def save_stages(self, new_stages: list[dict]):
+        self.stages = new_stages
+        try:
+            with open(CUSTOM_PIPELINE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.stages, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _vm_api(self, endpoint: str, method: str = "GET", payload: dict = None) -> dict:
+        ip = self.mgr.vm_ip
+        if not ip:
+            return {}
+        url = f"https://{ip}:8080{endpoint}"
+        try:
+            if method == "POST":
+                r = requests.post(url, json=payload or {}, verify=False, timeout=4.0)
+            else:
+                r = requests.get(url, verify=False, timeout=4.0)
+            return r.json() if r.status_code == 200 else {}
+        except Exception:
+            return {}
+
+    def apply_stage_concepts(self, stage: dict):
+        raw_concepts = list(stage.get("concepts", []))
+        if self.max_concepts_per_stage > 0 and len(raw_concepts) > self.max_concepts_per_stage:
+            if self.random_sample:
+                target_concepts = random.sample(raw_concepts, self.max_concepts_per_stage)
+            else:
+                target_concepts = raw_concepts[:self.max_concepts_per_stage]
+        else:
+            target_concepts = raw_concepts
+
+        mode = stage.get("mode", "set")
+        if self.override_mode == "always_set":
+            mode = "set"
+        elif self.override_mode == "always_add":
+            mode = "add"
+
+        if mode == "set":
+            res = self._vm_api("/api/world/concepts/set", "POST", {"concepts": target_concepts})
+            if not res:
+                current_pool = self._vm_api("/api/world/concepts", "GET").get("concepts", [])
+                for c in current_pool:
+                    if c not in target_concepts:
+                        self._vm_api("/api/world/concepts/remove", "POST", {"concept": c})
+                        time.sleep(0.04)
+                for c in target_concepts:
+                    if c not in current_pool:
+                        self._vm_api("/api/world/concepts/add", "POST", {"concept": c})
+                        time.sleep(0.04)
+        else:
+            current_pool = self._vm_api("/api/world/concepts", "GET").get("concepts", [])
+            for c in target_concepts:
+                if c not in current_pool:
+                    self._vm_api("/api/world/concepts/add", "POST", {"concept": c})
+                    time.sleep(0.04)
+
+        self.status_text = f"Активна [{stage.get('name', 'Фаза')}]: {', '.join(target_concepts[:4])}"
+
+    def start_protocol(self, session_name: str = "meditation", speedup: float = 1.0,
+                       override_mode: str = "as_defined", max_pick: int = 0, random_pick: bool = False):
+        if self.is_running:
+            return
+        if not self.mgr.vm_ip or not self.mgr.endpoints_status.get("gateway_8080"):
+            self.status_text = "❌ Сначала дождитесь готовности HTTPS Студии :8080!"
+            return
+
+        self.override_mode = override_mode
+        self.max_concepts_per_stage = max(0, int(max_pick))
+        self.random_sample = bool(random_pick)
+        self.active_session_name = session_name or "meditation"
+        self.stop_event.clear()
+        self.is_running = True
+
+        threading.Thread(target=self._run_loop, args=(max(0.1, float(speedup)),), daemon=True).start()
+
+    def stop_protocol(self):
+        self.stop_event.set()
+
+    def trigger_next_stage_now(self):
+        if self.is_running and self.current_stage_idx + 1 < len(self.stages):
+            self.current_stage_idx += 1
+            self.apply_stage_concepts(self.stages[self.current_stage_idx])
+
+    def reshuffle_current_stage(self):
+        if self.stages and 0 <= self.current_stage_idx < len(self.stages):
+            self.apply_stage_concepts(self.stages[self.current_stage_idx])
+
+    def _run_loop(self, speedup: float):
+        try:
+            rec_res = self._vm_api("/api/recording/start", "POST", {"name": self.active_session_name})
+            s_path = rec_res.get("session_path", "sessions/active")
+            self.status_text = f"🔴 Запись включена ({s_path}). Старт протокола..."
+
+            t_start = time.time()
+            last_minute = self.stages[-1].get("minute", 21.0) if self.stages else 21.0
+            self.total_duration_min = last_minute + 4.0
+
+            applied_indices = set()
+            while not self.stop_event.is_set():
+                self.elapsed_sec = (time.time() - t_start) * speedup
+                cur_min = self.elapsed_sec / 60.0
+
+                for idx, stg in enumerate(self.stages):
+                    if cur_min >= float(stg.get("minute", 0.0)) and idx not in applied_indices:
+                        applied_indices.add(idx)
+                        self.current_stage_idx = idx
+                        self.apply_stage_concepts(stg)
+
+                if cur_min >= self.total_duration_min:
+                    break
+                time.sleep(0.5)
+        finally:
+            self._vm_api("/api/recording/stop", "POST")
+            self.is_running = False
+            self.status_text = "✅ Протокол завершен! Автоматическое скачивание сессии на Orange Pi..."
+            time.sleep(1.0)
+            self.mgr.sync_sessions_from_vm()
 
 
 class OpenStackNeuroManager:
@@ -207,21 +358,41 @@ class OpenStackNeuroManager:
         self.vol_status = "UNKNOWN"
         self.is_busy = False
         self.auth_ok = False
-        self.last_archive_name = ""
-        self.last_sync_count = self._count_local_sessions()
 
         self.billable_items = []
         self.remote_logs = "Ожидание подключения к виртуальной машине..."
         self.endpoints_status = {"gateway_8080": False, "ssh_22": False}
+        self.pipeline = CustomPipelineRunner(self)
 
         threading.Thread(target=self._poll_cloud_loop, daemon=True).start()
         threading.Thread(target=self._poll_ssh_logs_loop, daemon=True).start()
 
-    def _count_local_sessions(self) -> int:
-        return len([d for d in LOCAL_SESSIONS.iterdir() if d.is_dir() and d.name.startswith("session")])
-
-    def _get_archives_list(self) -> list[str]:
-        return sorted([f.name for f in LOCAL_SESSIONS.glob("*.tar.gz")], reverse=True)
+    def get_local_sessions_catalog(self) -> list[dict]:
+        """Возвращает список всех скачанных на Orange Pi сессий с их метаданными для Менеджера Сессий"""
+        catalog = []
+        for d in sorted(LOCAL_SESSIONS.iterdir(), reverse=True):
+            if d.is_dir() and (d / "manifest.json").exists():
+                try:
+                    with open(d / "manifest.json", "r", encoding="utf-8") as f:
+                        man = json.load(f)
+                    tar_name = f"{d.name}.tar.gz"
+                    has_tar = (LOCAL_SESSIONS / tar_name).exists()
+                    has_plot = (d / "verified_sync_alignment.png").exists()
+                    has_vid = (d / "video_timeline.mp4").exists()
+                    catalog.append({
+                        "name": d.name,
+                        "duration_sec": round(float(man.get("duration_seconds", 0.0)), 1),
+                        "video_sec": round(float(man.get("video_duration_seconds", 0.0)), 1),
+                        "eeg_samples": int(man.get("eeg_samples_count", 0)),
+                        "frames": int(man.get("unique_generated_frames", 0)),
+                        "created_at": man.get("created_at", ""),
+                        "tar_file": tar_name if has_tar else "",
+                        "has_plot": has_plot,
+                        "has_video": has_vid
+                    })
+                except Exception:
+                    pass
+        return catalog
 
     def discover_project_id_if_needed(self) -> str:
         if self.project_id and self.project_id != "ВАШ_PROJECT_ID":
@@ -365,23 +536,21 @@ class OpenStackNeuroManager:
         except Exception:
             return False
 
-    def _run_ssh_cmd(self, ip: str, command: str, timeout: int = 12) -> tuple[bool, str]:
-        """Универсальный вызов SSH (сначала пробует ubuntu с sudo, затем root)"""
-        for ssh_user in ("ubuntu", "root"):
-            try:
-                res = subprocess.run([
-                    "ssh", "-i", SSH_PRIV_KEY,
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "UserKnownHostsFile=/dev/null",
-                    "-o", "ConnectTimeout=4",
-                    "-o", "BatchMode=yes",
-                    f"{ssh_user}@{ip}", command
-                ], capture_output=True, text=True, timeout=timeout)
-                if res.returncode == 0 and "Please login as the user" not in res.stdout:
-                    return True, res.stdout
-            except Exception:
-                pass
-        return False, ""
+    def _run_ssh_ubuntu(self, ip: str, command: str, timeout: int = 12) -> tuple[bool, str]:
+        try:
+            res = subprocess.run([
+                "ssh", "-i", SSH_PRIV_KEY,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ConnectTimeout=4",
+                "-o", "BatchMode=yes",
+                f"ubuntu@{ip}", command
+            ], capture_output=True, text=True, timeout=timeout)
+            if res.returncode == 0:
+                return True, res.stdout
+            return False, f"SSH Exit {res.returncode}: {res.stderr.strip()} {res.stdout.strip()}"
+        except Exception as e:
+            return False, str(e)
 
     def _poll_cloud_loop(self):
         while True:
@@ -455,99 +624,116 @@ class OpenStackNeuroManager:
     def _poll_ssh_logs_loop(self):
         while True:
             ip = self.vm_ip
-            if ip and not is_private_ip(ip):
+            if ip and not is_private_ip(ip) and "SHELVED" not in self.vm_status:
                 ssh_cmd = (
-                    "echo '=== 1. КОНТЕЙНЕРЫ DOCKER & КЭШ ВЕСОВ (/opt/hf_cache) ==='; "
+                    "echo '=== 1. КОНТЕЙНЕРЫ DOCKER & ЗАПИСАННЫЕ СЕССИИ НА VM ==='; "
                     "sudo docker ps -a --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null || echo 'Docker еще устанавливается...'; "
-                    "sudo du -sh /opt/hf_cache /opt/neuro_heterarchy/sessions 2>/dev/null || true; "
+                    "echo 'Папка сессий на VM:'; ls -lh /opt/neuro_heterarchy/sessions 2>/dev/null || echo 'Пусто'; "
+                    "echo 'Кэш весов (/opt/hf_cache):'; sudo du -sh /opt/hf_cache 2>/dev/null || true; "
                     "echo ''; echo '=== 2. GPU NVIDIA-SMI ==='; "
                     "nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || echo 'GPU инициализируется...'; "
                     "echo ''; echo '=== 3. ЛОГИ КОНТЕЙНЕРОВ (ПОСЛЕДНИЕ СТРОКИ) ==='; "
-                    "cd /opt/neuro_heterarchy 2>/dev/null && sudo docker compose -f docker-compose.fast.yml logs --tail=12 2>/dev/null || echo 'Контейнеры еще не запущены'; "
+                    "cd /opt/neuro_heterarchy 2>/dev/null && sudo docker compose -f docker-compose.yml logs --tail=12 2>/dev/null || echo 'Контейнеры еще не запущены'; "
                     "echo ''; echo '=== 4. ЖИВОЙ ЛОГ УСТАНОВКИ (/var/log/neuro_deploy.log) ==='; "
-                    "sudo tail -n 18 /var/log/neuro_deploy.log 2>/dev/null || echo 'Ожидание лога...'"
+                    "sudo tail -n 16 /var/log/neuro_deploy.log 2>/dev/null || echo 'Ожидание лога...'"
                 )
-                ok, out = self._run_ssh_cmd(ip, ssh_cmd, timeout=8)
+                ok, out = self._run_ssh_ubuntu(ip, ssh_cmd, timeout=8)
                 self.endpoints_status["ssh_22"] = ok
                 if ok and out.strip():
                     self.remote_logs = out.strip()
             else:
-                self.remote_logs = "Виртуалка выключена или в паузе Shelve..."
+                self.endpoints_status["ssh_22"] = False
+                self.remote_logs = "Виртуалка выключена или в паузе Shelve (SSH недоступен, когда VM на паузе)..."
             time.sleep(3.5)
 
     def repair_or_git_pull_on_live_vm(self):
-        """Обновляет код с GitHub (git pull) и перезапускает контейнеры за 5 секунд с сохранением /opt/hf_cache!"""
-        if not self.vm_ip or is_private_ip(self.vm_ip):
-            self.status_msg = "❌ Нет белого IP у виртуалки для SSH-обновления"
+        """
+        Отправляет скрипт на VM и запускает его через nohup с закрытием дескрипторов
+        (</dev/null >/dev/null 2>&1 &), чтобы SSH возвращался мгновенно за 0.15 сек без таймаута!
+        """
+        if not self.vm_ip or is_private_ip(self.vm_ip) or "SHELVED" in self.vm_status:
+            self.status_msg = "❌ Сначала разбудите виртуалку (в режиме Shelve SSH выключен)!"
             return
-        self.status_msg = f"🔄 Обновление кода с GitHub и перезапуск контейнеров на {self.vm_ip}..."
+        self.status_msg = f"🔄 Обновление с GitHub (git pull) и чистый перезапуск контейнеров на {self.vm_ip}..."
         remote_script = DEPLOY_SHELL_COMMANDS.replace("__GIT_REPO__", GIT_REPO_URL)
         b64_cmd = base64.b64encode(remote_script.encode("utf-8")).decode("utf-8")
-        ok, _ = self._run_ssh_cmd(self.vm_ip, f"echo {b64_cmd} | base64 -d | sudo bash &", timeout=10)
+
+        launch_cmd = (
+            f"echo {b64_cmd} | base64 -d | sudo tee /tmp/neuro_deploy.sh > /dev/null && "
+            f"sudo chmod +x /tmp/neuro_deploy.sh && "
+            f"sudo nohup bash /tmp/neuro_deploy.sh > /var/log/neuro_deploy.log 2>&1 < /dev/null &"
+        )
+        ok, err = self._run_ssh_ubuntu(self.vm_ip, launch_cmd, timeout=10)
         if ok:
-            self.status_msg = f"✅ Команда git pull + docker compose build отправлена на {self.vm_ip}! Смотрите лог ниже..."
+            self.status_msg = f"✅ Код с GitHub обновлен на {self.vm_ip} (без билда)! Смотрите лог ниже..."
         else:
-            self.status_msg = f"⚠️ Не удалось подключиться по SSH к {self.vm_ip}"
+            self.status_msg = f"⚠️ Ошибка SSH к ubuntu@{self.vm_ip}: {err}"
 
     def sync_sessions_from_vm(self) -> bool:
         """
-        Упаковывает все сессии на VM в единый .tar.gz архив БЕЗ папки frames/ и БЕЗ *.jpg
-        (только video_timeline.mp4, eeg_raw.npz, events.csv, manifest.json) и качает за 1 секунду!
+        Скачивает все сессии с 4090 на Orange Pi (./downloaded_sessions/),
+        создает по-сессионные архивы .tar.gz (без папки frames/) и строит график analyze_session.py!
         """
         if not self.vm_ip or is_private_ip(self.vm_ip):
+            self.status_msg = "❌ Нет активного белого IP у виртуалки для скачивания"
             return False
-        self.status_msg = f"📦 Архивация сессий на {self.vm_ip} (только Видео + ЭЭГ + CSV, без картинок frames/)..."
-
-        pack_cmd = (
-            "if [ -d /opt/neuro_heterarchy/sessions ] && [ \"$(ls -A /opt/neuro_heterarchy/sessions 2>/dev/null)\" ]; then "
-            "  sudo tar --exclude='frames' --exclude='*.jpg' -czf /tmp/neuro_sessions_clean.tar.gz -C /opt/neuro_heterarchy sessions && "
-            "  sudo chmod 644 /tmp/neuro_sessions_clean.tar.gz && echo 'ARCHIVE_READY'; "
-            "else "
-            "  echo 'NO_SESSIONS'; "
-            "fi"
-        )
-        ok, out = self._run_ssh_cmd(self.vm_ip, pack_cmd, timeout=25)
-        if not ok or "NO_SESSIONS" in out:
-            self.status_msg = "ℹ️ На виртуалке пока нет записанных сессий в /opt/neuro_heterarchy/sessions"
+        if "SHELVED" in self.vm_status:
+            self.status_msg = "❌ Виртуалка сейчас в паузе Shelve! Сначала разбудите её кнопкой '1. Запустить', чтобы забрать файлы."
             return False
 
-        ts_str = time.strftime("%Y%m%d_%H%M%S")
-        archive_filename = f"sessions_clean_{ts_str}.tar.gz"
-        local_archive_path = LOCAL_SESSIONS / archive_filename
+        self.status_msg = f"🔍 Поиск записанных сессий на ubuntu@{self.vm_ip}..."
+        list_cmd = "sudo find /opt/neuro_heterarchy/sessions -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' 2>/dev/null"
+        ok, out = self._run_ssh_ubuntu(self.vm_ip, list_cmd, timeout=10)
+        if not ok:
+            self.status_msg = f"❌ Ошибка SSH при проверке сессий: {out}"
+            return False
 
-        for ssh_user in ("ubuntu", "root"):
+        session_names = [line.strip() for line in out.splitlines() if line.strip().startswith("session") or line.strip()]
+        if not session_names:
+            self.status_msg = "ℹ️ Папка /opt/neuro_heterarchy/sessions на VM пуста."
+            return False
+
+        downloaded_now = 0
+        for s_name in session_names:
+            remote_tar = f"/tmp/{s_name}.tar.gz"
+            local_tar = LOCAL_SESSIONS / f"{s_name}.tar.gz"
+            self.status_msg = f"📥 Упаковка и скачивание сессии '{s_name}' (без картинок frames/)..."
+
+            pack_one = (
+                f"sudo tar --exclude='frames' --exclude='*.jpg' -czf {remote_tar} -C /opt/neuro_heterarchy/sessions {s_name} && "
+                f"sudo chmod 644 {remote_tar}"
+            )
+            ok_p, _ = self._run_ssh_ubuntu(self.vm_ip, pack_one, timeout=25)
+            if not ok_p:
+                continue
+
             scp_cmd = [
                 "scp", "-i", SSH_PRIV_KEY,
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "ConnectTimeout=4",
                 "-o", "BatchMode=yes",
-                f"{ssh_user}@{self.vm_ip}:/tmp/neuro_sessions_clean.tar.gz",
-                str(local_archive_path)
+                f"ubuntu@{self.vm_ip}:{remote_tar}",
+                str(local_tar)
             ]
-            try:
-                r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60)
-                if r.returncode == 0 and local_archive_path.exists() and local_archive_path.stat().st_size > 100:
-                    # Распаковываем рядом в downloaded_sessions/
-                    subprocess.run(["tar", "-xzf", str(local_archive_path), "--strip-components=1", "-C", str(LOCAL_SESSIONS)], check=False)
-                    self.last_archive_name = archive_filename
-                    self.last_sync_count = self._count_local_sessions()
-                    sz_mb = local_archive_path.stat().st_size / (1024 * 1024)
-                    self.status_msg = f"✅ Архив {archive_filename} ({sz_mb:.1f} МБ, без картинок!) скачан на Orange Pi!"
-                    return True
-            except Exception:
-                pass
+            r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60)
+            if r.returncode == 0 and local_tar.exists():
+                subprocess.run(["tar", "-xzf", str(local_tar), "-C", str(LOCAL_SESSIONS)], check=False)
+                # Автоматически запускаем analyze_session.py для генерации графика синхронизации ЭЭГ и видео!
+                s_dir = LOCAL_SESSIONS / s_name
+                if s_dir.exists() and Path("analyze_session.py").exists():
+                    subprocess.run([sys.executable, "analyze_session.py", str(s_dir)], check=False)
+                downloaded_now += 1
 
-        self.status_msg = "⚠️ Не удалось скачать архив сессий по SCP"
-        return False
+        self.status_msg = f"✅ Синхронизировано сессий на Orange Pi: {downloaded_now} шт. Доступны в Менеджере Сессий ниже!"
+        return downloaded_now > 0
 
     def _safe_flush_vm_before_stop(self):
-        """Перед паузой Shelve или удалением VM аккуратно сбрасывает кэш диска (sync), чтобы не бились веса!"""
-        if self.vm_ip and not is_private_ip(self.vm_ip):
-            self.status_msg = "💾 Сохранение дискового кэша весов на VM (sync)..."
-            self._run_ssh_cmd(
+        if self.vm_ip and not is_private_ip(self.vm_ip) and "SHELVED" not in self.vm_status:
+            self.status_msg = "💾 Остановка контейнеров и сброс кэша весов на SSD (sync)..."
+            self._run_ssh_ubuntu(
                 self.vm_ip,
-                "cd /opt/neuro_heterarchy && sudo docker compose -f docker-compose.fast.yml stop && sudo sync",
+                "cd /opt/neuro_heterarchy && sudo docker compose -f docker-compose.yml stop && sudo sync",
                 timeout=20
             )
 
@@ -570,11 +756,10 @@ class OpenStackNeuroManager:
                 srv = conn.compute.wait_for_server(srv, status="ACTIVE", interval=3, wait=300)
                 pub_ip, priv_ip = self._extract_ips(srv)
                 self.vm_ip = pub_ip or priv_ip
-                self.status_msg = f"🟢 Сервер разбужен ({self.vm_ip})! Ждем SSH и запускаем git pull + Docker..."
-                # Ждем появления SSH и автоматически обновляем код с GitHub + поднимаем контейнеры!
+                self.status_msg = f"🟢 Сервер разбужен ({self.vm_ip})! Ждем SSH и обновляем с GitHub..."
                 for _ in range(25):
                     time.sleep(3.0)
-                    ok, _ = self._run_ssh_cmd(self.vm_ip, "echo READY", timeout=4)
+                    ok, _ = self._run_ssh_ubuntu(self.vm_ip, "echo READY", timeout=4)
                     if ok:
                         self.repair_or_git_pull_on_live_vm()
                         break
@@ -634,12 +819,11 @@ class OpenStackNeuroManager:
 
             pub_ip, priv_ip = self._extract_ips(srv)
             self.vm_ip = pub_ip or priv_ip
-            self.status_msg = f"🟢 VM запущена ({self.vm_ip})! Проверяем SSH и запускаем git pull + Docker..."
+            self.status_msg = f"🟢 VM запущена ({self.vm_ip})! Ждем SSH и запускаем контейнеры..."
 
-            # На случай если это Warm Boot из старого тома (где cloud-init уже не крутится сам) — толкаем по SSH!
             for _ in range(25):
                 time.sleep(3.0)
-                ok, _ = self._run_ssh_cmd(self.vm_ip, "echo READY", timeout=4)
+                ok, _ = self._run_ssh_ubuntu(self.vm_ip, "echo READY", timeout=4)
                 if ok:
                     self.repair_or_git_pull_on_live_vm()
                     break
@@ -653,14 +837,15 @@ class OpenStackNeuroManager:
             return
         self.is_busy = True
         try:
-            self.sync_sessions_from_vm()
-            self._safe_flush_vm_before_stop()
+            if "SHELVED" not in self.vm_status:
+                self.sync_sessions_from_vm()
+                self._safe_flush_vm_before_stop()
             conn = self._get_conn()
             srv = conn.compute.find_server(SERVER_NAME, ignore_missing=True)
             if srv and srv.status == "ACTIVE":
                 self.status_msg = "❄️ Перевод в бесплатную паузу (Shelve)..."
                 conn.compute.shelve_server(srv)
-                self.status_msg = "❄️ Сервер переведен в Shelve (оплата за GPU остановлена, кэш весов сохранен)."
+                self.status_msg = "❄️ Сервер переведен в Shelve (GPU 0 ₽/ч, кэш весов /opt/hf_cache сохранен)."
         except Exception as e:
             self.status_msg = f"❌ Ошибка Shelve: {e}"
         finally:
@@ -671,8 +856,9 @@ class OpenStackNeuroManager:
             return
         self.is_busy = True
         try:
-            self.sync_sessions_from_vm()
-            self._safe_flush_vm_before_stop()
+            if "SHELVED" not in self.vm_status:
+                self.sync_sessions_from_vm()
+                self._safe_flush_vm_before_stop()
             conn = self._get_conn()
             for srv in conn.compute.servers():
                 self.status_msg = f"⏸️ Удаление VM {srv.name}..."
@@ -688,7 +874,7 @@ class OpenStackNeuroManager:
     def force_nuke_all(self, skip_sync: bool = False):
         self.is_busy = True
         try:
-            if not skip_sync:
+            if not skip_sync and "SHELVED" not in self.vm_status:
                 self.sync_sessions_from_vm()
 
             conn = self._get_conn()
@@ -708,7 +894,7 @@ class OpenStackNeuroManager:
                     pass
 
             for vol in list(conn.block_storage.volumes()):
-                self.status_msg = f"💥 Отправка команды удаления тома {vol.name or vol.id[:8]}..."
+                self.status_msg = f"💥 Удаление тома {vol.name or vol.id[:8]}..."
                 for _ in range(15):
                     v_cur = conn.block_storage.get_volume(vol.id)
                     if v_cur.status in ("available", "error", "error_deleting"):
@@ -756,13 +942,13 @@ DASHBOARD_HTML = """
 <html lang="ru">
 <head>
     <meta charset="utf-8">
-    <title>Orange Pi HTTPS — Контроллер Облака и Докеров</title>
+    <title>Orange Pi HTTPS — Контроллер Облака и Сессий</title>
     <style>
         body { background: #070b12; color: #e2e8f0; font-family: monospace; margin: 0; padding: 16px; }
-        .card { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 14px; margin-bottom: 14px; max-width: 840px; margin-left: auto; margin-right: auto; }
+        .card { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 14px; margin-bottom: 14px; max-width: 880px; margin-left: auto; margin-right: auto; }
         h2 { margin-top: 0; color: #00ffc8; font-size: 15px; border-bottom: 1px solid #1e293b; padding-bottom: 6px; }
         .stat { font-size: 13px; margin: 5px 0; }
-        .btn { display: block; width: 100%; padding: 11px; margin: 7px 0; font-size: 13px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; font-family: monospace; }
+        .btn { display: block; width: 100%; padding: 11px; margin: 7px 0; font-size: 13px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; font-family: monospace; text-align: center; text-decoration: none; box-sizing: border-box; }
         .btn-start  { background: #059669; color: #fff; }
         .btn-repair { background: #4f46e5; color: #fff; }
         .btn-sync   { background: #0d9488; color: #fff; }
@@ -770,45 +956,93 @@ DASHBOARD_HTML = """
         .btn-pause  { background: #d97706; color: #fff; }
         .btn-nuke   { background: #e11d48; color: #fff; }
         .btn-panic  { background: #991b1b; color: #fef08a; border: 2px solid #ef4444; }
-        .log-box { background: #020617; color: #38bdf8; padding: 10px; border-radius: 6px; border: 1px solid #1e293b; font-size: 11px; white-space: pre-wrap; max-height: 340px; overflow-y: auto; }
-        .inv-row { display: flex; justify-content: space-between; align-items: center; background: #131d2e; padding: 6px 10px; border-radius: 4px; margin: 4px 0; font-size: 12px; }
-        .btn-del-sm { background: #ef4444; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 11px; }
+        .log-box { background: #020617; color: #38bdf8; padding: 10px; border-radius: 6px; border: 1px solid #1e293b; font-size: 11px; white-space: pre-wrap; max-height: 280px; overflow-y: auto; }
+        .inv-row { display: flex; justify-content: space-between; align-items: center; background: #131d2e; padding: 8px 10px; border-radius: 4px; margin: 5px 0; font-size: 12px; gap: 8px; }
+        .btn-sm { background: #0284c7; color: #fff; border: none; padding: 5px 9px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 11px; text-decoration: none; }
+        .btn-del-sm { background: #ef4444; color: #fff; border: none; padding: 5px 9px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 11px; }
         .badge { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
         .b-ok { background: #059669; color: #fff; }
         .b-wait { background: #475569; color: #cbd5e1; }
-        .input-row { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr auto; gap: 6px; margin-top: 8px; }
-        input { padding: 7px; background: #030712; border: 1px solid #334155; color: #fff; border-radius: 4px; font-family: monospace; font-size: 11px; }
+        .pipe-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; margin: 8px 0; }
+        input, select, textarea { padding: 7px; background: #030712; border: 1px solid #334155; color: #fff; border-radius: 4px; font-family: monospace; font-size: 11px; width: 100%; box-sizing: border-box; }
         a { color: #00ffc8; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>🍊 Orange Pi HTTPS × immers.cloud (RTX 4090 & SSD Orchestrator)</h2>
+        <h2>🍊 Orange Pi HTTPS × immers.cloud (RTX 4090 & Session Manager)</h2>
         <div class="stat">🔑 <b>Проект OpenStack:</b> <span id="authStat">...</span></div>
         <div class="stat">🖥️ <b>Статус GPU VM:</b> <span id="vmStat">...</span></div>
         <div class="stat">💾 <b>Статус Cinder Тома:</b> <span id="volStat">...</span></div>
         <div class="stat">🌐 <b>Белый IP Студии:</b> <span id="vmIp">...</span></div>
-        <div class="stat">📦 <b>Сессий на Orange Pi:</b> <span id="syncCnt">0</span> <span id="archLinks"></span></div>
         <div class="stat">📡 <b>Эндпоинты VM:</b> 
             <span class="badge b-wait" id="epSsh">SSH :22</span>
             <span class="badge b-wait" id="epGw">HTTPS Студия :8080</span>
         </div>
         <div class="stat" style="color:#fbbf24; margin-top:8px;" id="msgBox">...</div>
-
-        <details style="margin-top:10px;">
-            <summary style="cursor:pointer; color:#94a3b8; font-size:12px;">⚙️ Настройки подключения, Сети (immers) и Диска (ssd)</summary>
-            <div class="input-row">
-                <input type="text" id="osUser" placeholder="Логин (пусто = не менять)">
-                <input type="password" id="osPass" placeholder="Пароль (пусто = не менять)">
-                <input type="text" id="osNet" value="immers" placeholder="Сеть (immers)">
-                <input type="text" id="osVolType" value="ssd" placeholder="Тип тома (ssd)">
-                <button class="btn-del-sm" style="background:#0284c7;" onclick="saveCreds()">ПРИМЕНИТЬ</button>
-            </div>
-        </details>
     </div>
 
     <div class="card">
-        <h2>📜 Живой прогресс установки и логи контейнеров Docker (по SSH)</h2>
+        <h2>🎬 Авто-Пилот Протокола Сессии (С Авто-Записью Видео 1:1 и ЭЭГ)</h2>
+        <div class="stat" style="color:#00ffc8;" id="pipeStat">Протокол не запущен</div>
+        <div class="pipe-grid">
+            <div>
+                <label style="font-size:10px; color:#94a3b8;">Имя сессии:</label>
+                <input type="text" id="pName" value="meditation_session">
+            </div>
+            <div>
+                <label style="font-size:10px; color:#94a3b8;">Режим смены концептов:</label>
+                <select id="pMode">
+                    <option value="as_defined">По сценарию (SET / ++)</option>
+                    <option value="always_set">Всегда ЗАМЕНА (SET)</option>
+                    <option value="always_add">Всегда НАКОПЛЕНИЕ (++)</option>
+                </select>
+            </div>
+            <div>
+                <label style="font-size:10px; color:#94a3b8;">Сколько брать из фазы (0=все):</label>
+                <input type="number" id="pMaxPick" value="0" min="0" max="20">
+            </div>
+            <div>
+                <label style="font-size:10px; color:#94a3b8;">Выборка при K &gt; 0:</label>
+                <select id="pRand">
+                    <option value="0">Первые K по порядку</option>
+                    <option value="1">Случайные K из фазы</option>
+                </select>
+            </div>
+        </div>
+        <div style="display:flex; gap:8px;">
+            <button class="btn btn-start" onclick="startPipeline()">▶️ СТАРТ ПРОТОКОЛА + АВТО-ЗАПИСЬ СЕССИИ</button>
+            <button class="btn btn-nuke" style="width:240px;" onclick="apiPost('/pipeline/stop')">⏹️ СТОП (СОХРАНИТЬ СЕССИЮ)</button>
+        </div>
+        <div style="display:flex; gap:8px;">
+            <button class="btn btn-shelve" onclick="apiPost('/pipeline/next')">⏭️ Следующая фаза сейчас</button>
+            <button class="btn btn-repair" onclick="apiPost('/pipeline/reshuffle')">🎲 Перевыбрать K концептов текущей фазы</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>📂 Менеджер Сессий на Orange Pi (Доступны даже после удаления облака!)</h2>
+        <button class="btn btn-sync" onclick="apiPost('/cloud/sync')">
+            📥 СИНХРОНИЗИРОВАТЬ НОВЫЕ СЕССИИ С 4090 НА ORANGE PI СЕЙЧАС (Видео + ЭЭГ + CSV, без картинок)
+        </button>
+        <div id="sessionsCatalog">Загрузка списка сохраненных сессий...</div>
+        <div id="sessionViewerBox" style="display:none; margin-top:12px; background:#020617; padding:12px; border-radius:8px; border:1px solid #38bdf8;">
+            <h3 id="viewerTitle" style="margin-top:0; color:#00ffc8;">Просмотр сессии</h3>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                <div>
+                    <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">Видео таймлайн 1:1 (video_timeline.mp4):</div>
+                    <video id="viewerVideo" controls style="width:100%; border-radius:6px; background:#000;"></video>
+                </div>
+                <div>
+                    <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">Синхронизация ЭЭГ и кадров (analyze_session.py):</div>
+                    <img id="viewerPlot" style="width:100%; border-radius:6px; background:#111;" alt="График ЭЭГ строится...">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>📜 Живой прогресс установки и логи контейнеров Docker (ubuntu@VM)</h2>
         <div class="log-box" id="logBox">Подключение к логам виртуальной машины...</div>
     </div>
 
@@ -823,22 +1057,19 @@ DASHBOARD_HTML = """
             🚀 1. ЗАПУСТИТЬ / РАЗБУДИТЬ RTX 4090 (Сеть 'immers' + Быстрый SSD Том + Кэш Весов)
         </button>
         <button class="btn btn-repair" onclick="apiPost('/cloud/repair_docker')">
-            🔄 ОБНОВИТЬ КОД С GITHUB (git pull + пересборка контейнеров за 5 сек без потери весов!)
-        </button>
-        <button class="btn btn-sync" onclick="apiPost('/cloud/sync')">
-            📦 СКАЧАТЬ СЕССИИ СЕЙЧАС АРХИВОМ .TAR.GZ (Видео + ЭЭГ + CSV, БЕЗ картинок frames!)
+            🔄 ОБНОВИТЬ КОД С GITHUB (git pull + перезапуск за 3 сек БЕЗ docker build и без потери весов!)
         </button>
         <button class="btn btn-shelve" onclick="apiPost('/cloud/shelve')">
-            ❄️ 2А. БЕСПЛАТНАЯ ПАУЗА SHELVE (Скачать архив сессий + Сохранить кэш + Заморозить GPU)
+            ❄️ 2А. БЕСПЛАТНАЯ ПАУЗА SHELVE (Скачать сессии на Orange Pi + Заморозить GPU в 0 ₽/ч)
         </button>
         <button class="btn btn-pause" onclick="apiPost('/cloud/pause')">
             ⏸️ 2Б. УДАЛИТЬ VM, ОСТАВИТЬ SSD-ТОМ С ВЕСАМИ (~2 ₽/ч, быстрый старт за 40с)
         </button>
         <button class="btn btn-nuke" onclick="apiPost('/cloud/nuke')">
-            🌙 3. КОНЕЦ ДНЯ: СКАЧАТЬ АРХИВ СЕССИЙ И УДАЛИТЬ ВСЁ В 0 ₽/ЧАС
+            🌙 3. КОНЕЦ ДНЯ: СКАЧАТЬ СЕССИИ НА ORANGE PI И УДАЛИТЬ ВСЁ В 0 ₽/ЧАС
         </button>
         <button class="btn btn-panic" onclick="if(confirm('Экстренно убить все VM и SSD-тома без ожидания архивации?')) apiPost('/cloud/panic_nuke')">
-            🚨 ЭКСТРЕННЫЙ СБРОС ВСЕГО В 0 ₽/ЧАС (МГНОВЕННО, БЕЗ RSYNC/SCP)
+            🚨 ЭКСТРЕННЫЙ СБРОС ВСЕГО В 0 ₽/ЧАС (МГНОВЕННО, БЕЗ ОЖИДАНИЯ)
         </button>
     </div>
 
@@ -847,12 +1078,24 @@ DASHBOARD_HTML = """
             await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
             pollStatus();
         }
-        async function saveCreds() {
-            const u = document.getElementById('osUser').value;
-            const p = document.getElementById('osPass').value;
-            const net = document.getElementById('osNet').value;
-            const vt = document.getElementById('osVolType').value;
-            await apiPost('/cloud/credentials', {username: u, password: p, net_substr: net, vol_type: vt});
+        async function startPipeline() {
+            await apiPost('/pipeline/start', {
+                name: document.getElementById('pName').value,
+                override_mode: document.getElementById('pMode').value,
+                max_pick: parseInt(document.getElementById('pMaxPick').value) || 0,
+                random_pick: document.getElementById('pRand').value === "1"
+            });
+        }
+        function openSessionViewer(sName) {
+            const box = document.getElementById('sessionViewerBox');
+            box.style.display = 'block';
+            document.getElementById('viewerTitle').textContent = '📊 Просмотр сессии: ' + sName;
+            document.getElementById('viewerVideo').src = `/session_file/${sName}/video_timeline.mp4?t=` + Date.now();
+            document.getElementById('viewerPlot').src = `/session_file/${sName}/verified_sync_alignment.png?t=` + Date.now();
+        }
+        async function delLocalSession(sName) {
+            if (!confirm('Удалить локальную копию сессии ' + sName + ' с Orange Pi?')) return;
+            await apiPost('/local_session/delete', {name: sName});
         }
         async function delItem(t, id) {
             await apiPost('/cloud/delete_item', {type: t, id: id});
@@ -865,12 +1108,9 @@ DASHBOARD_HTML = """
                 document.getElementById('vmStat').textContent = d.vm_status;
                 document.getElementById('volStat').textContent = d.vol_status;
                 document.getElementById('vmIp').innerHTML = d.vm_ip ? `<a href="https://${d.vm_ip}:8080" target="_blank">https://${d.vm_ip}:8080 (Открыть студию)</a>` : 'Оффлайн';
-                document.getElementById('syncCnt').textContent = d.last_sync_count;
-                if (d.archives && d.archives.length > 0) {
-                    document.getElementById('archLinks').innerHTML = ' | Последний архив: <a href="/downloads/' + d.archives[0] + '">⬇️ ' + d.archives[0] + '</a>';
-                }
                 document.getElementById('msgBox').textContent = d.status_msg;
                 document.getElementById('logBox').textContent = d.remote_logs;
+                document.getElementById('pipeStat').textContent = d.pipeline_status;
 
                 const epSsh = document.getElementById('epSsh');
                 epSsh.className = 'badge ' + (d.endpoints.ssh_22 ? 'b-ok' : 'b-wait');
@@ -879,6 +1119,24 @@ DASHBOARD_HTML = """
                 const epGw = document.getElementById('epGw');
                 epGw.className = 'badge ' + (d.endpoints.gateway_8080 ? 'b-ok' : 'b-wait');
                 epGw.textContent = 'HTTPS Студия :8080 ' + (d.endpoints.gateway_8080 ? '🟢 ГОТОВА' : '⏳');
+
+                const cat = document.getElementById('sessionsCatalog');
+                if (!d.sessions_catalog || d.sessions_catalog.length === 0) {
+                    cat.innerHTML = '<div style="color:#64748b; margin-top:6px;">На Orange Pi пока нет скачанных сессий.</div>';
+                } else {
+                    cat.innerHTML = d.sessions_catalog.map(s => `
+                        <div class="inv-row">
+                            <span>
+                                <b>${s.name}</b> | Видео: ${s.video_sec}с | ЭЭГ: ${s.eeg_samples} сэмплов | Кадров: ${s.frames}
+                            </span>
+                            <div style="display:flex; gap:6px;">
+                                <button class="btn-sm" onclick="openSessionViewer('${s.name}')">🎬 Видео + ЭЭГ</button>
+                                ${s.tar_file ? `<a class="btn-sm" style="background:#059669;" href="/downloads/${s.tar_file}">⬇️ .tar.gz</a>` : ''}
+                                <button class="btn-del-sm" onclick="delLocalSession('${s.name}')">🗑️</button>
+                            </div>
+                        </div>
+                    `).join('');
+                }
 
                 const inv = document.getElementById('invList');
                 if (!d.billable_items || d.billable_items.length === 0) {
@@ -900,58 +1158,10 @@ DASHBOARD_HTML = """
 </html>
 """
 
-PROJECTOR_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>NeuroCanvas Projector Display</title>
-    <style>
-        body, html { margin: 0; padding: 0; width: 100vw; height: 100vh; background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; color: #334155; font-family: monospace; }
-        img { width: 100vw; height: 100vh; object-fit: contain; display: none; }
-    </style>
-</head>
-<body>
-    <div id="waitMsg">🧠 ОЖИДАНИЕ ПРОБУЖДЕНИЯ ОБЛАЧНОЙ КОРЫ (RTX 4090)...</div>
-    <img id="streamImg" alt="">
-    <script>
-        let currentIp = null;
-        const img = document.getElementById('streamImg');
-        const msg = document.getElementById('waitMsg');
-
-        setInterval(async () => {
-            try {
-                const r = await fetch('/cloud/status');
-                const d = await r.json();
-                if (d.vm_ip && d.endpoints && d.endpoints.gateway_8080) {
-                    if (currentIp !== d.vm_ip) {
-                        currentIp = d.vm_ip;
-                        img.src = `https://${currentIp}:8080/stream.mjpg?t=` + Date.now();
-                        img.style.display = 'block';
-                        msg.style.display = 'none';
-                    }
-                } else {
-                    currentIp = null;
-                    img.style.display = 'none';
-                    msg.style.display = 'block';
-                    msg.textContent = "⏳ " + (d.status_msg || "Ожидание запуска сессии");
-                }
-            } catch(e) {}
-        }, 2500);
-    </script>
-</body>
-</html>
-"""
-
 
 @app.route("/")
 def index():
     return render_template_string(DASHBOARD_HTML)
-
-
-@app.route("/projector")
-def projector():
-    return render_template_string(PROJECTOR_HTML)
 
 
 @app.route("/downloads/<path:filename>")
@@ -959,8 +1169,34 @@ def download_archive(filename):
     return send_from_directory(str(LOCAL_SESSIONS), filename, as_attachment=True)
 
 
+@app.route("/session_file/<session_name>/<path:filename>")
+def serve_session_file(session_name, filename):
+    s_dir = LOCAL_SESSIONS / session_name
+    if filename == "verified_sync_alignment.png" and not (s_dir / filename).exists():
+        if Path("analyze_session.py").exists():
+            subprocess.run([sys.executable, "analyze_session.py", str(s_dir)], check=False)
+    return send_from_directory(str(s_dir), filename)
+
+
+@app.route("/local_session/delete", methods=["POST"])
+def delete_local_session():
+    data = request.get_json(force=True)
+    s_name = data.get("name", "")
+    if s_name and "/" not in s_name and ".." not in s_name:
+        shutil.rmtree(LOCAL_SESSIONS / s_name, ignore_errors=True)
+        tar_f = LOCAL_SESSIONS / f"{s_name}.tar.gz"
+        if tar_f.exists():
+            tar_f.unlink()
+    return jsonify({"status": "deleted"})
+
+
 @app.route("/cloud/status")
 def cloud_status():
+    p = manager.pipeline
+    pipe_str = (
+        f"🟢 ИДЕТ СЕССИЯ ({p.elapsed_sec/60.0:.1f}/{p.total_duration_min:.1f} мин) | {p.status_text}"
+        if p.is_running else f"⏹️ {p.status_text}"
+    )
     return jsonify({
         "auth_ok": manager.auth_ok,
         "project_id": manager.project_id[:10] + "..." if manager.project_id else "",
@@ -971,21 +1207,40 @@ def cloud_status():
         "remote_logs": manager.remote_logs,
         "endpoints": manager.endpoints_status,
         "billable_items": manager.billable_items,
-        "last_sync_count": manager.last_sync_count,
-        "archives": manager._get_archives_list()
+        "sessions_catalog": manager.get_local_sessions_catalog(),
+        "pipeline_status": pipe_str
     })
 
 
-@app.route("/cloud/credentials", methods=["POST"])
-def cloud_credentials():
+@app.route("/pipeline/start", methods=["POST"])
+def pipeline_start():
     data = request.get_json(force=True)
-    manager.set_credentials(
-        data.get("username", ""),
-        data.get("password", ""),
-        data.get("net_substr", ""),
-        data.get("vol_type", "")
+    manager.pipeline.start_protocol(
+        session_name=data.get("name", "meditation"),
+        speedup=float(data.get("speedup", 1.0)),
+        override_mode=data.get("override_mode", "as_defined"),
+        max_pick=int(data.get("max_pick", 0)),
+        random_pick=bool(data.get("random_pick", False))
     )
-    return jsonify({"status": "updated"})
+    return jsonify({"status": "started"})
+
+
+@app.route("/pipeline/stop", methods=["POST"])
+def pipeline_stop():
+    manager.pipeline.stop_protocol()
+    return jsonify({"status": "stopping"})
+
+
+@app.route("/pipeline/next", methods=["POST"])
+def pipeline_next():
+    manager.pipeline.trigger_next_stage_now()
+    return jsonify({"status": "next_triggered"})
+
+
+@app.route("/pipeline/reshuffle", methods=["POST"])
+def pipeline_reshuffle():
+    manager.pipeline.reshuffle_current_stage()
+    return jsonify({"status": "reshuffled"})
 
 
 @app.route("/cloud/start", methods=["POST"])
@@ -1037,39 +1292,9 @@ def cloud_delete_item():
     return jsonify({"status": "deleting"})
 
 
-@app.route("/cloud/proxy_ladder", methods=["POST"])
-def proxy_ladder():
-    if not manager.vm_ip:
-        return jsonify({"error": "VM offline"}), 503
-    data = request.get_json(force=True)
-    try:
-        r = requests.post(f"https://{manager.vm_ip}:8080/api/preset/ladder", json=data, verify=False, timeout=3.0)
-        return jsonify(r.json())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/eeg_push", methods=["POST"])
-def proxy_eeg_push():
-    if not manager.vm_ip:
-        return jsonify({"status": "vm_offline"}), 200
-    data = request.get_data()
-    try:
-        requests.post(
-            f"https://{manager.vm_ip}:8080/api/eeg_push",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            verify=False,
-            timeout=0.8
-        )
-        return jsonify({"status": "ok"})
-    except Exception:
-        return jsonify({"status": "dropped"}), 200
-
-
 if __name__ == "__main__":
     cert_f, key_f = ensure_https_certificates()
     print("=" * 70)
-    print("🔒 HTTPS Оркестратор запущен: https://0.0.0.0:5000")
+    print("🔒 HTTPS Оркестратор v3.1 запущен: https://0.0.0.0:5000")
     print("=" * 70)
     app.run(host="0.0.0.0", port=5000, ssl_context=(cert_f, key_f), threaded=True)

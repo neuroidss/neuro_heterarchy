@@ -222,38 +222,38 @@ def main():
     current_ema_smooth = args.ema_smooth
 
     ctrl_conn = None
+    ctrl_lock = threading.Lock()
+
     def control_listener_thread():
         nonlocal current_ema_smooth, ctrl_conn
         print("🔗 [IPC CTRL] Запуск клиента команд управления (порт 6004)...")
         while worker.running:
             try:
                 if ctrl_conn is None:
-                    ctrl_conn = Client(('localhost', 6004), authkey=b'diff_ctrl')
+                    new_c = Client(('localhost', 6004), authkey=b'diff_ctrl')
+                    with ctrl_lock:
+                        ctrl_conn = new_c
                     print("✅ [IPC CTRL] Соединен со шлюзом web_cloud_gateway!")
-                    ctrl_conn.send({'cmd': 'init_concepts', 'concepts': list(semantic.words)})
 
-                if ctrl_conn.poll(0.05):
-                    msg = ctrl_conn.recv()
+                has_msg = False
+                with ctrl_lock:
+                    if ctrl_conn is not None and ctrl_conn.poll(0.05):
+                        msg = ctrl_conn.recv()
+                        has_msg = True
+
+                if has_msg:
                     cmd = msg.get('cmd')
                     if cmd == 'update_concepts':
                         new_words = msg.get('concepts', [])
                         semantic.update_concepts_on_the_fly(new_words)
+                        print(f"📥 [DIFFUSION] Получен актуальный пул концептов: {semantic.words}")
                     elif cmd == 'update_params':
                         p = msg.get('params', {})
-                        if 'steps' in p:
-                            worker.inference_steps = max(1, min(6, int(p['steps'])))
-                        if 'guidance_scale' in p:
-                            worker.guidance_scale = max(0.0, min(3.0, float(p['guidance_scale'])))
-                        if 'strength_low' in p:
-                            processor.strength_low = max(0.35, min(0.75, float(p['strength_low'])))
-                        if 'strength_high' in p:
-                            processor.burst_strength = max(processor.strength_low + 0.05, min(0.95, float(p['strength_high'])))
-                        if 'ema_smooth' in p:
-                            current_ema_smooth = max(0.04, min(0.50, float(p['ema_smooth'])))
-                    elif cmd == 'region_config':
-                        processor.configure_region_api(msg.get('region', 'AFz'), msg.get('config', {}))
-                    elif cmd == 'set_ladder':
-                        processor.set_ladder_stage(int(msg.get('stage', 4)), str(msg.get('anchor', '')))
+                        if 'steps' in p: worker.inference_steps = max(1, min(6, int(p['steps'])))
+                        if 'guidance_scale' in p: worker.guidance_scale = max(0.0, min(3.0, float(p['guidance_scale'])))
+                        if 'strength_low' in p: processor.strength_low = max(0.35, min(0.75, float(p['strength_low'])))
+                        if 'strength_high' in p: processor.burst_strength = max(processor.strength_low + 0.05, min(0.95, float(p['strength_high'])))
+                        if 'ema_smooth' in p: current_ema_smooth = max(0.04, min(0.50, float(p['ema_smooth'])))
                     elif cmd == 'start_recording':
                         recorder_instance.start_session(session_name=msg.get('session_name'))
                     elif cmd == 'stop_recording':
@@ -261,11 +261,14 @@ def main():
                     elif cmd == 'flush':
                         worker.flush()
             except Exception:
-                ctrl_conn = None
+                with ctrl_lock:
+                    ctrl_conn = None
                 time.sleep(0.5)
 
     threading.Thread(target=control_listener_thread, daemon=True).start()
 
+    last_telem_t = 0.0
+    
     try:
         while True:
             dt = 0.016
@@ -290,6 +293,29 @@ def main():
                 continue
 
             target_77, dyn_str, telemetry = processor.step(frame, dt)
+            
+            if (t_now - last_telem_t) >= 0.15:
+                last_telem_t = t_now
+                with ctrl_lock:
+                    if ctrl_conn is not None:
+                        try:
+                            puck = [telemetry.get("f3_x_local", 0.0), telemetry.get("f3_y_global", 0.0)]
+                            active_w = telemetry.get("dag_log_parts", [""])[0]
+                            sat_mask = frame.nodes[0].saturation_mask if len(frame.nodes) > 0 else [False] * 16
+                            ctrl_conn.send({
+                                "cmd": "telemetry",
+                                "puck": puck,
+                                "active_thought": active_w,
+                                "dyn_strength": dyn_str,
+                                "ladder_stage": telemetry.get("ladder_stage", 4),
+                                "monty_loss": telemetry.get("monty_loss", 0.0),
+                                "persistence": telemetry.get("persistence", 0.0),
+                                "surprise": telemetry.get("surprise", 0.0),
+                                "regions": telemetry.get("regions_telemetry", {}),
+                                "gpu_sat_mask": sat_mask
+                            })
+                        except Exception:
+                            ctrl_conn = None
 
             if ctrl_conn is not None:
                 try:

@@ -166,6 +166,17 @@ OPENAPI_SPEC = {
                 "responses": {"200": {"description": "Добавлено"}}
             }
         },
+        "/api/world/concepts/set": {
+            "post": {
+                "summary": "Атомарно заменить весь список концептов",
+                "operationId": "setVisionConcepts",
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": {"type": "object", "properties": {"concepts": {"type": "array", "items": {"type": "string"}}}}}}
+                },
+                "responses": {"200": {"description": "Список концептов обновлен"}}
+            }
+        },        
         "/api/world/concepts/remove": {
             "post": {
                 "summary": "Удалить визуальный концепт из диффузии",
@@ -482,6 +493,14 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 send_diff_ipc({"cmd": "update_concepts", "concepts": world_state["concepts"]})
                 broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": world_state["concepts"]})
+        
+        elif clean_path == '/api/world/concepts/set':
+            new_list = [str(c).strip() for c in data.get('concepts', []) if str(c).strip()]
+            with world_state_lock:
+                world_state["concepts"] = new_list
+            send_diff_ipc({"cmd": "update_concepts", "concepts": world_state["concepts"]})
+            broadcast_full_state()
+            self._send_json(200, {"status": "ok", "concepts": world_state["concepts"]})
 
         elif clean_path == '/api/world/concepts/remove':
             concept = data.get('concept', '').strip()
@@ -655,15 +674,18 @@ def ipc_control_listener():
             conn = listener.accept()
             with diff_ctrl_lock:
                 active_diff_ctrl_conn = conn
-            print("🔗 [GATEWAY IPC] Канал управления диффузией соединен!")
+                # Шлюз сразу проталкивает свой актуальный список в диффузию!
+                with world_state_lock:
+                    active_diff_ctrl_conn.send({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
+            print("🔗 [GATEWAY IPC] Канал управления соединен и синхронизирован!")
             while True:
                 msg = conn.recv()
                 if isinstance(msg, dict):
                     cmd = msg.get("cmd")
                     if cmd == "init_concepts":
+                        # Игнорируем старый список от диффузии, принудительно пушим актуальный список шлюза!
                         with world_state_lock:
-                            world_state["concepts"] = msg.get("concepts", [])
-                        broadcast_full_state()
+                            send_diff_ipc({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
                     elif cmd == "telemetry":
                         with world_state_lock:
                             world_state["current_puck"] = msg.get("puck", [0.0, 0.0])
