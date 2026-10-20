@@ -263,19 +263,33 @@
                 <audio id="neuroAudio" preload="none"></audio>
                 
                 <div id="musicLagStatus" class="lag-status">
-                    Буфер: 0.0 с (0 чанков) | RTF: 1.0x | Отставание: 0 мс
+                    Буфер: 0.0 с (0 чанков) | RTF: 1.0x | DynStr: 0.25
                 </div>
 
-                <label>Активные музыкальные темы (Пусто = Свободный звук):</label>
+                <label>Активные музыкальные темы (Пусто = Свободный дрейф по словарю T5):</label>
                 <div id="musicConceptList" class="concept-container"></div>
                 <div class="input-row">
                     <input type="text" id="newMusicInput" placeholder="Новая музыкальная тема...">
                     <button type="button" class="btn btn-green btn-fixed" id="btnAddMusic">+ ТЕМА</button>
                 </div>
 
-                <div class="grid-3">
-                    <div><label>Блок (сек):</label><input type="number" id="mBlock" value="2.4" step="0.2"></div>
-                    <div><label>Контекст (сек):</label><input type="number" id="mContext" value="0.4" step="0.1"></div>
+                <label class="mt-8">Сила влияния рабочей памяти на музыку (Пресеты):</label>
+                <select id="musicPreset">
+                    <option value="meditation">🧘 Удержание темы (Связная песня: Ctx 2.8с, Str 0.12-0.45, EMA 0.35)</option>
+                    <option value="balanced" selected>⚖️ Баланс / Морфинг (Ctx 2.4с, Str 0.25-0.80, EMA 0.20)</option>
+                    <option value="dynamic">⚡ Быстрый отклик на мозг (Ctx 1.6с, Str 0.40-0.95, EMA 0.08)</option>
+                    <option value="custom">🛠️ Пользовательский (Ручная настройка)</option>
+                </select>
+
+                <div class="grid-3 mt-6">
+                    <div><label>Min Str (Покой):</label><input type="number" id="mStrLow" value="0.25" min="0.05" max="0.80" step="0.05"></div>
+                    <div><label>Max Str (Импульс):</label><input type="number" id="mStrHigh" value="0.80" min="0.20" max="0.98" step="0.05"></div>
+                    <div><label>EMA Плавность:</label><input type="number" id="mEmaSmooth" value="0.20" min="0.04" max="0.60" step="0.02"></div>
+                </div>
+
+                <div class="grid-3 mt-4">
+                    <div><label>Блок (сек):</label><input type="number" id="mBlock" value="1.8" step="0.2" min="0.6" max="4.0"></div>
+                    <div><label>Контекст (сек):</label><input type="number" id="mContext" value="2.4" step="0.2" min="0.2" max="6.0"></div>
                     <div><label>Буфер (чанков):</label><input type="number" id="mBuffer" value="2" min="1" max="5"></div>
                 </div>
                 <div class="grid-3 mt-4">
@@ -286,7 +300,7 @@
             </div>
 
             <div class="panel">
-                <h3>📼 Сессионная запись (ЭЭГ + Видео + Теги)</h3>
+                <h3>📼 Сессионная запись (ЭЭГ + Видео + Музыка + Теги)</h3>
                 <div class="flex-row">
                     <button type="button" id="btnRecStart" class="btn btn-red">🔴 СТАРТ ЗАПИСИ</button>
                     <button type="button" id="btnRecStop" class="btn btn-gray">⏹️ СТОП</button>

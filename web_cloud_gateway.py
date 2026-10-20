@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v8.0 (PER-REGION MONTY API & STREAMING)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v8.3 (DIRECT RECORDER & MUSIC STRENGTH)
+===================================================================================
+- Прямой запуск recorder_instance.start_session() / stop_session() прямо в шлюзе:
+  папка sessions/session_YYYYMMDD_HHMMSS создается ВСЕГДА гарантированно (с ЭЭГ,
+  events.csv, manifest.json и живым аудио music_timeline.wav), даже если запущена
+  только музыка без диффузии!
+- Полная поддержка настроек силы рабочей памяти для музыки (strength_low,
+  strength_high, ema_smooth) + телеметрия колонок Монти.
 ===================================================================================
 """
 
 import sys
 import os
 import ssl
+import wave
 import json
 import time
 import struct
@@ -18,6 +26,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from multiprocessing.connection import Listener
 from pylsl import StreamInfo, StreamOutlet
 import numpy as np
+
+from neuro_recorder import recorder_instance
 
 HTTP_PORT = 8080
 IPC_PORT = 6002
@@ -39,6 +49,10 @@ jpeg_lock = threading.Lock()
 audio_pcm_queue = []
 audio_pcm_lock = threading.Lock()
 
+# Запись живого аудио в файл сессии при активной записи
+session_wav_writer = None
+session_wav_lock = threading.Lock()
+
 active_music_conn = None
 music_conn_lock = threading.Lock()
 
@@ -47,13 +61,22 @@ diff_ctrl_lock = threading.Lock()
 
 music_state = {
     "concepts": [],
-    "target_block": 2.4,
-    "target_context": 0.4,
+    "preset": "balanced",
+    "target_block": 1.8,
+    "target_context": 2.4,
     "target_buffer_count": 2,
     "speed_safety_factor": 1.0,
     "temp": 1.0,
     "top_k": 250,
     "cfg_coef": 1.0,
+    "strength_low": 0.25,
+    "strength_high": 0.80,
+    "ema_smooth": 0.20,
+    "dyn_strength": 0.25,
+    "monty_loss": 0.02,
+    "persistence": 0.0,
+    "surprise": 0.0,
+    "active_thought": "",
     "buffer_sec": 0.0,
     "buffer_chunks": 0,
     "rtf": 1.0
@@ -151,115 +174,14 @@ OPENAPI_SPEC = {
     "info": {
         "title": "NeuroCanvas Unified World, Region Monty & MusicGen Agent API",
         "description": "API для управления концептами и по-региональной гетерархией Монти (FCz, F3, F4, AFz, Fpz).",
-        "version": "8.0.0"
+        "version": "8.3.0"
     },
     "servers": [{"url": "http://localhost:8080"}],
     "paths": {
-        "/api/world/concepts": {
-            "get": {"summary": "Список активных визуальных концептов", "operationId": "getVisionConcepts", "responses": {"200": {"description": "Список"}}}
-        },
-        "/api/world/concepts/add": {
-            "post": {
-                "summary": "Добавить визуальный концепт в диффузию",
-                "operationId": "addVisionConcept",
-                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}}},
-                "responses": {"200": {"description": "Добавлено"}}
-            }
-        },
-        "/api/world/concepts/set": {
-            "post": {
-                "summary": "Атомарно заменить весь список концептов",
-                "operationId": "setVisionConcepts",
-                "requestBody": {
-                    "required": True,
-                    "content": {"application/json": {"schema": {"type": "object", "properties": {"concepts": {"type": "array", "items": {"type": "string"}}}}}}
-                },
-                "responses": {"200": {"description": "Список концептов обновлен"}}
-            }
-        },        
-        "/api/world/concepts/remove": {
-            "post": {
-                "summary": "Удалить визуальный концепт из диффузии",
-                "operationId": "removeVisionConcept",
-                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}}},
-                "responses": {"200": {"description": "Удалено"}}
-            }
-        },
-        "/api/preset/ladder": {
-            "post": {
-                "summary": "Переключить ступень региональной гетерархии (1=FCz Действия, 2=+F3/F4, 3=+AFz, 4=+Fpz)",
-                "operationId": "setRegionLadderStage",
-                "requestBody": {
-                    "required": True,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "stage": {"type": "integer", "enum": [1, 2, 3, 4]},
-                                    "anchor": {"type": "string"}
-                                }
-                            }
-                        }
-                    }
-                },
-                "responses": {"200": {"description": "Ступень активирована"}}
-            }
-        },
-        "/api/region/config": {
-            "post": {
-                "summary": "Настроить конкретный кортикальный регион (FCz, F3, F4, AFz, Fpz)",
-                "operationId": "configureCorticalRegion",
-                "requestBody": {
-                    "required": True,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "region": {"type": "string", "enum": ["FCz", "F3", "F4", "AFz", "Fpz"]},
-                                    "mode": {"type": "string", "enum": ["auto", "locked"]},
-                                    "locked_concept": {"type": "string"},
-                                    "tau_sec": {"type": "number"}
-                                }
-                            }
-                        }
-                    }
-                },
-                "responses": {"200": {"description": "Регион настроен"}}
-            }
-        },
-        "/api/region/telemetry": {
-            "get": {"summary": "Детальная телеметрия колонок Монти по всем 5 регионам", "operationId": "getRegionMontyTelemetry", "responses": {"200": {"description": "Телеметрия регионов"}}}
-        },
-        "/api/music/concepts": {
-            "get": {"summary": "Список активных музыкальных тем MusicGen", "operationId": "getMusicConcepts", "responses": {"200": {"description": "Список"}}}
-        },
-        "/api/music/concepts/add": {
-            "post": {
-                "summary": "Добавить тему саундтрека в MusicGen",
-                "operationId": "addMusicConcept",
-                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}}},
-                "responses": {"200": {"description": "Добавлено"}}
-            }
-        },
-        "/api/music/concepts/remove": {
-            "post": {
-                "summary": "Удалить тему саундтрека из MusicGen",
-                "operationId": "removeMusicConcept",
-                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"concept": {"type": "string"}}}}}},
-                "responses": {"200": {"description": "Удалено"}}
-            }
-        },
-        "/api/world/telemetry": {
-            "get": {"summary": "Фокус внимания, MSE Loss Монти и настойчивость пользователя", "operationId": "getUserMentalState", "responses": {"200": {"description": "Телеметрия"}}}
-        },
-        "/api/recording/start": {
-            "post": {"summary": "Начать мультимодальную запись (ЭЭГ + Видео + Теги)", "operationId": "startRecording", "responses": {"200": {"description": "Запущено"}}}
-        },
-        "/api/recording/stop": {
-            "post": {"summary": "Остановить запись и сохранить датасет", "operationId": "stopRecording", "responses": {"200": {"description": "Сохранено"}}}
-        }
+        "/api/world/concepts": {"get": {"summary": "Список визуальных концептов", "operationId": "getVisionConcepts"}},
+        "/api/world/concepts/set": {"post": {"summary": "Заменить визуальные концепты", "operationId": "setVisionConcepts"}},
+        "/api/music/concepts": {"get": {"summary": "Список музыкальных тем", "operationId": "getMusicConcepts"}},
+        "/api/music/concepts/set": {"post": {"summary": "Заменить музыкальные темы", "operationId": "setMusicConcepts"}}
     }
 }
 
@@ -446,6 +368,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        global session_wav_writer
         clean_path = self.path.split('?')[0].rstrip('/')
         length = int(self.headers.get('Content-Length', 0))
         data = json.loads(self.rfile.read(length).decode('utf-8')) if length else {}
@@ -493,7 +416,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 send_diff_ipc({"cmd": "update_concepts", "concepts": world_state["concepts"]})
                 broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": world_state["concepts"]})
-        
+
         elif clean_path == '/api/world/concepts/set':
             new_list = [str(c).strip() for c in data.get('concepts', []) if str(c).strip()]
             with world_state_lock:
@@ -542,6 +465,19 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
+        elif clean_path == '/api/music/concepts/set':
+            new_list = [str(c).strip() for c in data.get('concepts', []) if str(c).strip()]
+            with music_state_lock:
+                music_state["concepts"] = new_list
+            with music_conn_lock:
+                if active_music_conn is not None:
+                    try:
+                        active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
+                    except Exception:
+                        pass
+            broadcast_full_state()
+            self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
+
         elif clean_path == '/api/music/concepts/remove':
             concept = data.get('concept', '').strip()
             with music_state_lock:
@@ -553,7 +489,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                         active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
                     except Exception:
                         pass
-                broadcast_full_state()
+            broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
         elif clean_path == '/api/diffusion/config':
@@ -564,21 +500,41 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok"})
 
         elif clean_path == '/api/recording/start':
-            ts_str = time.strftime("%Y%m%d_%H%M%S")
             req_name = data.get("name")
-            s_name = f"session_{ts_str}" if not req_name else f"{req_name}_{ts_str}"
-            expected_path = f"sessions/{s_name}"
+            # ГАРАНТИРОВАННЫЙ ЗАПУСК ЗАПИСИ ПРЯМО В ШЛЮЗЕ (создает папку sessions/... даже без диффузии!)
+            actual_session_dir = recorder_instance.start_session(session_name=req_name)
+            with session_wav_lock:
+                if session_wav_writer is not None:
+                    try:
+                        session_wav_writer.close()
+                    except Exception:
+                        pass
+                wav_path = os.path.join(actual_session_dir, "music_timeline.wav")
+                session_wav_writer = wave.open(wav_path, 'wb')
+                session_wav_writer.setnchannels(1)
+                session_wav_writer.setsampwidth(2)
+                session_wav_writer.setframerate(SAMPLE_RATE)
+
             with world_state_lock:
                 world_state["is_recording"] = True
-                world_state["active_session_path"] = expected_path
+                world_state["active_session_path"] = actual_session_dir
             send_diff_ipc({"cmd": "start_recording", "session_name": req_name})
             broadcast_full_state()
-            self._send_json(200, {"status": "recording_started", "session_path": expected_path})
+            self._send_json(200, {"status": "recording_started", "session_path": actual_session_dir})
 
         elif clean_path == '/api/recording/stop':
+            with session_wav_lock:
+                if session_wav_writer is not None:
+                    try:
+                        session_wav_writer.close()
+                    except Exception:
+                        pass
+                    session_wav_writer = None
+
+            saved_dir = recorder_instance.stop_session()
             with world_state_lock:
                 world_state["is_recording"] = False
-                saved_p = world_state.get("active_session_path", "sessions/latest")
+                saved_p = saved_dir or world_state.get("active_session_path", "sessions/latest")
             send_diff_ipc({"cmd": "stop_recording"})
             broadcast_full_state()
             self._send_json(200, {"status": "recording_stopped", "saved_path": saved_p})
@@ -631,7 +587,7 @@ def ipc_frame_receiver():
 
 
 def ipc_audio_receiver():
-    global active_music_conn
+    global active_music_conn, session_wav_writer
     try:
         listener = Listener(('localhost', IPC_AUDIO_PORT), authkey=IPC_AUDIO_AUTHKEY)
     except Exception:
@@ -641,11 +597,47 @@ def ipc_audio_receiver():
             conn = listener.accept()
             with music_conn_lock:
                 active_music_conn = conn
+                with music_state_lock:
+                    if music_state["concepts"]:
+                        active_music_conn.send({
+                            'cmd': 'update_concepts',
+                            'concepts': list(music_state["concepts"]),
+                            'is_initial_sync': True
+                        })
             while True:
                 data = conn.recv()
+                raw_bytes = None
                 if isinstance(data, bytes):
+                    raw_bytes = data
+                elif isinstance(data, dict):
+                    cmd = data.get('cmd')
+                    if cmd == 'audio_chunk':
+                        raw_bytes = data.get('pcm')
+                        with music_state_lock:
+                            music_state["rtf"] = round(float(data.get('rtf', 1.0)), 2)
+                            if 'dyn_strength' in data:
+                                music_state["dyn_strength"] = round(float(data['dyn_strength']), 2)
+                    elif cmd == 'sync_from_runner':
+                        runner_concepts = data.get('concepts', [])
+                        with music_state_lock:
+                            if runner_concepts and not music_state["concepts"]:
+                                music_state["concepts"] = list(runner_concepts)
+                            music_state["rtf"] = round(float(data.get('rtf', 1.0)), 2)
+                        broadcast_full_state()
+
+                if raw_bytes is not None:
+                    # Если идет запись сессии — пишем чистый WAV на диск!
+                    with session_wav_lock:
+                        if session_wav_writer is not None:
+                            try:
+                                flt = np.frombuffer(raw_bytes, dtype=np.float32)
+                                pcm16 = (np.clip(flt, -1.0, 1.0) * 32767).astype(np.int16)
+                                session_wav_writer.writeframes(pcm16.tobytes())
+                            except Exception:
+                                pass
+
                     with audio_pcm_lock:
-                        audio_pcm_queue.append(data)
+                        audio_pcm_queue.append(raw_bytes)
                         target_max_chunks = music_state.get("target_buffer_count", 2)
                         while len(audio_pcm_queue) > target_max_chunks:
                             audio_pcm_queue.pop(0)
@@ -655,6 +647,7 @@ def ipc_audio_receiver():
                         with music_state_lock:
                             music_state["buffer_sec"] = b_sec
                             music_state["buffer_chunks"] = len(audio_pcm_queue)
+                    broadcast_full_state()
         except Exception:
             time.sleep(0.5)
         finally:
@@ -674,7 +667,6 @@ def ipc_control_listener():
             conn = listener.accept()
             with diff_ctrl_lock:
                 active_diff_ctrl_conn = conn
-                # Шлюз сразу проталкивает свой актуальный список в диффузию!
                 with world_state_lock:
                     active_diff_ctrl_conn.send({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
             print("🔗 [GATEWAY IPC] Канал управления соединен и синхронизирован!")
@@ -683,7 +675,6 @@ def ipc_control_listener():
                 if isinstance(msg, dict):
                     cmd = msg.get("cmd")
                     if cmd == "init_concepts":
-                        # Игнорируем старый список от диффузии, принудительно пушим актуальный список шлюза!
                         with world_state_lock:
                             send_diff_ipc({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
                     elif cmd == "telemetry":

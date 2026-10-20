@@ -41,6 +41,10 @@ const dom = {
     musicConceptList: document.getElementById('musicConceptList'),
     newMusicInput: document.getElementById('newMusicInput'),
     btnAddMusic: document.getElementById('btnAddMusic'),
+    musicPreset: document.getElementById('musicPreset'),
+    mStrLow: document.getElementById('mStrLow'),
+    mStrHigh: document.getElementById('mStrHigh'),
+    mEmaSmooth: document.getElementById('mEmaSmooth'),
     mBlock: document.getElementById('mBlock'),
     mContext: document.getElementById('mContext'),
     mBuffer: document.getElementById('mBuffer'),
@@ -158,6 +162,12 @@ const PRESETS = {
     dynamic:    { steps: 3, cfg: 1.2, strLow: 0.60, strHigh: 0.92, ema: 0.08 }
 };
 
+const MUSIC_PRESETS = {
+    meditation: { block: 1.8, ctx: 2.8, strLow: 0.12, strHigh: 0.45, ema: 0.35, temp: 0.9 },
+    balanced:   { block: 1.8, ctx: 2.4, strLow: 0.25, strHigh: 0.80, ema: 0.20, temp: 1.0 },
+    dynamic:    { block: 1.4, ctx: 1.6, strLow: 0.40, strHigh: 0.95, ema: 0.08, temp: 1.1 }
+};
+
 function applyPreset(presetKey) {
     if (presetKey === 'custom') return;
     const p = PRESETS[presetKey];
@@ -168,6 +178,19 @@ function applyPreset(presetKey) {
     dom.diffStrHigh.value = p.strHigh;
     dom.diffEmaSmooth.value = p.ema;
     sendDiffConfig(p.steps, p.cfg, p.strLow, p.strHigh, p.ema, presetKey);
+}
+
+function applyMusicPreset(presetKey) {
+    if (presetKey === 'custom') return;
+    const p = MUSIC_PRESETS[presetKey];
+    if (!p) return;
+    dom.mBlock.value = p.block;
+    dom.mContext.value = p.ctx;
+    dom.mStrLow.value = p.strLow;
+    dom.mStrHigh.value = p.strHigh;
+    dom.mEmaSmooth.value = p.ema;
+    dom.mTemp.value = p.temp;
+    updateMusicConfig();
 }
 
 function onManualParamChange() {
@@ -242,17 +265,21 @@ sse.addEventListener('state', (e) => {
     }
     if (st.music) {
         renderMusicConcepts(st.music.concepts || []);
-        dom.mBlock.value = st.music.target_block || 2.4;
-        dom.mContext.value = st.music.target_context || 0.4;
-        dom.mBuffer.value = st.music.target_buffer_count || 2;
-        dom.mTemp.value = st.music.temp || 1.0;
-        dom.mTopK.value = st.music.top_k || 250;
-        dom.mCfg.value = st.music.cfg_coef || 1.0;
+        if (document.activeElement !== dom.mBlock) dom.mBlock.value = st.music.target_block ?? 1.8;
+        if (document.activeElement !== dom.mContext) dom.mContext.value = st.music.target_context ?? 2.4;
+        if (document.activeElement !== dom.mBuffer) dom.mBuffer.value = st.music.target_buffer_count ?? 2;
+        if (document.activeElement !== dom.mTemp) dom.mTemp.value = st.music.temp ?? 1.0;
+        if (document.activeElement !== dom.mTopK) dom.mTopK.value = st.music.top_k ?? 250;
+        if (document.activeElement !== dom.mCfg) dom.mCfg.value = st.music.cfg_coef ?? 1.0;
+        if (document.activeElement !== dom.mStrLow) dom.mStrLow.value = st.music.strength_low ?? 0.25;
+        if (document.activeElement !== dom.mStrHigh) dom.mStrHigh.value = st.music.strength_high ?? 0.80;
+        if (document.activeElement !== dom.mEmaSmooth) dom.mEmaSmooth.value = st.music.ema_smooth ?? 0.20;
 
         const bSec = (st.music.buffer_sec || 0).toFixed(1);
         const bChunks = st.music.buffer_chunks || 0;
         const rtf = (st.music.rtf || 1.0).toFixed(2);
-        dom.musicLagStatus.textContent = `Буфер: ${bSec} с (${bChunks} чанков) | RTF: ${rtf}x | Отставание: ${(bSec * 1000).toFixed(0)} мс 🟢`;
+        const dStr = (st.music.dyn_strength || 0.25).toFixed(2);
+        dom.musicLagStatus.textContent = `Буфер: ${bSec} с (${bChunks} чанков) | RTF: ${rtf}x | Сила WM (DynStr): ${dStr} 🟢`;
     }
 });
 
@@ -514,7 +541,7 @@ function renderConceptList(containerEl, list, isMusic, onRemove) {
     if (list.length === 0) {
         const empty = document.createElement('span');
         empty.className = 'empty-concepts';
-        empty.textContent = isMusic ? 'Пул пуст (Свободный эмбиент)' : 'Пул пуст (Свободный латентный дрейф)';
+        empty.textContent = isMusic ? 'Пул пуст (Свободный дрейф по словарю T5)' : 'Пул пуст (Свободный латентный дрейф)';
         containerEl.appendChild(empty);
         return;
     }
@@ -589,16 +616,27 @@ async function removeMusicConcept(c) {
 }
 
 async function updateMusicConfig() {
+    let sLow = Math.max(0.05, Math.min(0.85, parseFloat(dom.mStrLow.value) || 0.25));
+    let sHigh = Math.max(sLow + 0.05, Math.min(0.98, parseFloat(dom.mStrHigh.value) || 0.80));
+    const ema = Math.max(0.04, Math.min(0.60, parseFloat(dom.mEmaSmooth.value) || 0.20));
+
+    dom.mStrLow.value = sLow;
+    dom.mStrHigh.value = sHigh;
+    dom.mEmaSmooth.value = ema;
+
     await fetch('/api/music_config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-            target_block: parseFloat(dom.mBlock.value),
-            target_context: parseFloat(dom.mContext.value),
-            target_buffer_count: parseInt(dom.mBuffer.value),
-            temp: parseFloat(dom.mTemp.value),
-            top_k: parseInt(dom.mTopK.value),
-            cfg_coef: parseFloat(dom.mCfg.value)
+            target_block: parseFloat(dom.mBlock.value) || 1.8,
+            target_context: parseFloat(dom.mContext.value) || 2.4,
+            target_buffer_count: parseInt(dom.mBuffer.value) || 2,
+            temp: parseFloat(dom.mTemp.value) || 1.0,
+            top_k: parseInt(dom.mTopK.value) || 250,
+            cfg_coef: parseFloat(dom.mCfg.value) || 1.0,
+            strength_low: sLow,
+            strength_high: sHigh,
+            ema_smooth: ema
         })
     });
 }
@@ -634,8 +672,16 @@ window.addEventListener('DOMContentLoaded', async () => {
         inp.addEventListener('change', onManualParamChange);
     });
 
-    [dom.mBlock, dom.mContext, dom.mBuffer, dom.mTemp, dom.mTopK, dom.mCfg].forEach(inp => {
-        inp.addEventListener('change', updateMusicConfig);
+    if (dom.musicPreset) {
+        dom.musicPreset.addEventListener('change', (e) => applyMusicPreset(e.target.value));
+    }
+    [dom.mStrLow, dom.mStrHigh, dom.mEmaSmooth, dom.mBlock, dom.mContext, dom.mBuffer, dom.mTemp, dom.mTopK, dom.mCfg].forEach(inp => {
+        if (inp) {
+            inp.addEventListener('change', () => {
+                if (dom.musicPreset) dom.musicPreset.value = 'custom';
+                updateMusicConfig();
+            });
+        }
     });
 
     dom.btnRecStart.addEventListener('click', () => toggleRecording(true));
