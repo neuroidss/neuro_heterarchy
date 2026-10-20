@@ -102,17 +102,18 @@ services:
     command: >
       python3 neuro_heterarchy_diffusion.py
       --headless
-      --lore /app/lore/world_lore.txt
       --mode lcm
-      --steps 2
+      --steps 3
       --strength-low 0.55
       --strength-high 0.85
       --burst-strength 0.85
       --gamma-max 100.0
       --seal-thresh 1.0
+      --ema-smooth 0.04
       --no-taesd
       --no-color
       --speed quality
+      --lore /app/lore/world_lore.txt
     network_mode: host
     ipc: host
     shm_size: "1gb"
@@ -144,7 +145,6 @@ services:
     command: >
       python3 neuro_heterarchy_musicgen.py
       --headless
-      --lore /app/lore/music_lore.txt
       --mode semantic
       --gamma-max 100.0
       --seal-thresh 1.0
@@ -154,6 +154,7 @@ services:
       --top-k 250
       --cfg-coef 1.0
       --gateway-port 6003
+      --lore /app/lore/music_lore.txt
     network_mode: host
     ipc: host
     shm_size: "1gb"
