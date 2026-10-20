@@ -272,6 +272,7 @@ def main():
     try:
         while True:
             dt = 0.016
+            t_now = time.time()
             if hud:
                 dt, commands = hud.poll_events(len(engine.get_frame().nodes))
                 for cmd, payload in commands:
