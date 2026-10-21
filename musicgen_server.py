@@ -14,7 +14,8 @@ NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (0.1s BLOCK CAPABLE)
 - ЗАКОН СОХРАНЕНИЯ СЭМПЛОВ (Zero-Drop) И ОТСУТСТВИЕ ПО-БЛОЧНОГО ПАМПИНГА ГРОМКОСТИ.
 ===================================================================================
 """
-
+from __future__ import annotations
+from typing import Optional
 import os
 import sys
 import time
