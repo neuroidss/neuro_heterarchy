@@ -28,10 +28,10 @@
 4. [Hardware Signal Chain & Transport Integrity](#4-hardware-signal-chain--transport-integrity)
    - 4.1 [ADS131M08 Programmable Gain Amplifier with Hardware Readback Verification](#41-ads131m08-programmable-gain-amplifier-with-hardware-readback-verification)
    - 4.2 [Real-Time 24-Bit Hardware Rail Saturation & Clipping Detection](#42-real-time-24-bit-hardware-rail-saturation--clipping-detection)
-5. [Decoupled Cloud Architecture & Orange Pi OpenStack Orchestrator](#5-decoupled-cloud-architecture--orange-pi-openstack-orchestrator)
-   - 5.1 [Orange Pi HTTPS Cloud Controller (`orangepi_cloud_controller.py`)](#51-orange-pi-https-cloud-controller-orangepi_cloud_controllerpy)
-   - 5.2 [Cloud Cost Optimization Lifecycle (90 RUB/h ➔ Free Shelve / 2 RUB/h SSD ➔ 0 RUB/h)](#52-cloud-cost-optimization-lifecycle-90-rubh--free-shelve--2-rubh-ssd--0-rubh)
-   - 5.3 [Zero-Build GitHub Hot-Reload & Persistent `/opt/hf_cache`](#53-zero-build-github-hot-reload--persistent-opthf_cache)
+5. [Decoupled Cloud Architecture & RunPod / OpenStack Orchestrator](#5-decoupled-cloud-architecture--runpod--openstack-orchestrator)
+   - 5.1 [Bulletproof FSM Cloud Controller & Community Cloud Fallbacks](#51-bulletproof-fsm-cloud-controller--community-cloud-fallbacks)
+   - 5.2 [Next-Gen GPU Support: RTX 5090 (Blackwell) & 0.1s Zero-Drop Audio](#52-next-gen-gpu-support-rtx-5090-blackwell--01s-zero-drop-audio)
+   - 5.3 [Zero-Build GitHub Hot-Reload & Persistent `/workspace/hf_cache`](#53-zero-build-github-hot-reload--persistent-workspacehf_cache)
 6. [Multimodal 1:1 Synchronized Session Recorder & Session Manager](#6-multimodal-11-synchronized-session-recorder--session-manager)
 7. [REST API & AI Agent Integration (OpenAPI 3.0)](#7-rest-api--ai-agent-integration-openapi-30)
 8. [Deployment & Operations](#8-deployment--operations)
@@ -158,31 +158,31 @@ Controlled via `POST /api/preset/ladder` or the Web Studio dropdown, allowing us
 
 ---
 
-## 5. Decoupled Cloud Architecture & Orange Pi OpenStack Orchestrator
+## 5. Decoupled Cloud Architecture & RunPod / OpenStack Orchestrator
 
-### 5.1 Orange Pi HTTPS Cloud Controller (`orangepi_cloud_controller.py`)
-Designed for gallery and studio deployments with low-latency links (~8 ms) to **OpenStack Zed** GPU clouds (`immers.cloud`):
-* Runs a local HTTPS server (`https://0.0.0.0:5000`) on an Orange Pi in the gallery.
-* **Keystone v3 Auto-Discovery:** Automatically discovers `OS_PROJECT_ID`, the direct external network (`immers`), and fast `SSD` Cinder volume types (`ssd_replicated_hv_multiattach`) using only `OS_USERNAME` and `OS_PASSWORD`.
-* **Permanent Projector Kiosk (`/projector`):** The gallery projector stays pointed at `https://localhost:5000/projector` on the Orange Pi and automatically switches to the live `stream.mjpg` feed whenever a cloud RTX 4090 VM wakes up.
+### 5.1 Bulletproof FSM Cloud Controller & Community Cloud Fallbacks
+The new unified orchestrator (`orangepi_runpod_rest.py` v8.4) manages the entire lifecycle of GPU pods via GraphQL API:
+* **FSM (Finite State Machine) Pipeline:** Automates pod creation, SSH KEX negotiation, GitHub sync, PyTorch environment patching, and process daemonization without blocking or hanging.
+* **MTU / GnuTLS Fallback:** If `git clone` fails on Community Cloud nodes (e.g., AT&T routing blocking large MTU packets), the orchestrator automatically falls back to raw `curl` downloading of `.tar.gz` over OpenSSL.
+* **SSH KexAlgorithms Optimization:** Explicitly uses `curve25519-sha256` and `IPQoS=throughput` to bypass MTU freezes during SSH Handshakes on problematic datacenters.
 
-### 5.2 Cloud Cost Optimization Lifecycle (90 RUB/h ➔ Free Shelve / 2 RUB/h SSD ➔ 0 RUB/h)
-1. **🚀 Start / Wake Up RTX 4090:** Boots from an existing `SHELVED_OFFLOADED` state, or performs a 40-second **Warm Boot** from the persistent SSD volume (`delete_on_termination=False`), or performs a fresh **Cold Init**.
-2. **❄️ Free Pause (`Shelve`):** Archives recorded sessions to the Orange Pi, flushes disk caches (`sync`), and calls `conn.compute.shelve_server()`, detaching the RTX 4090 and stopping GPU billing (`0 RUB/h` for GPU).
-3. **⏸️ Delete VM, Keep SSD Volume:** Deletes the compute instance while preserving the SSD volume with `/opt/hf_cache` (~2 RUB/h).
-4. **🌙 End of Day (`Full Teardown` into 0.00 RUB/h):** Harvests all recorded sessions to the Orange Pi and deletes all VMs, Cinder volumes, and Floating IPs.
+### 5.2 Next-Gen GPU Support: RTX 5090 (Blackwell) & 0.1s Zero-Drop Audio
+NeuroCanvas natively scales to next-gen hardware, including **RTX 5090 (sm_120)** and **H100**:
+* **Auto-PyTorch Upgrade:** If a Blackwell architecture is detected in the pod, the orchestrator automatically upgrades PyTorch to the latest Nightly (`cu124` / `cu128`), removes legacy `xformers`, and switches all Transformers to native FlashAttention (SDPA).
+* **Continuous Diagonal Stream MusicGen:** On RTX 5090 and H100, the server sustains generation of **0.10s audio blocks (100 ms)** with a full 3.6s contextual window at a Real-Time Factor (RTF) of >1.35x.
+* **Zero-Drop Pacing:** The Web Gateway (`web_cloud_gateway.py`) utilizes a dynamic pacing queue. Instead of dropping late chunks, it enforces micro-pauses at the server level, guaranteeing zero skipped audio frames and perfect phase alignment for the Web Audio API crossfader.
 
-### 5.3 Zero-Build GitHub Hot-Reload & Persistent `/opt/hf_cache`
-* Uses `docker-compose.yml` (`--no-build`) with direct host bind-mounts (`/opt/neuro_heterarchy:/app` and `/opt/hf_cache:/root/.cache/huggingface`).
-* Model weights (LCM, CLIP, TAESD, MusicGen) are stored on the persistent SSD volume in `/opt/hf_cache` and are never re-downloaded after pause/resume.
-* Clicking **«🔄 Update Code from GitHub»** executes `git fetch && git reset --hard origin/HEAD` and restarts the containers in **3 seconds** over SSH without rebuilding Docker images.
+### 5.3 Zero-Build GitHub Hot-Reload & Persistent `/workspace/hf_cache`
+* Uses bare-metal Python environments (`python3.10` for Diffusion, `/opt/venv_musicgen` for AudioCraft) running directly inside the container without `docker-compose`.
+* All heavy weights (LCM, CLIP, TAESD, MusicGen) are stored on the persistent `/workspace/hf_cache` and are never re-downloaded after pause/resume.
+* Code updates are applied instantly via `git reset --hard` (or `curl` tarballs) with a 3-second restart via `pkill`.
 
 ---
 
 ## 6. Multimodal 1:1 Synchronized Session Recorder & Session Manager
 
 * **Hardware-Locked 1:1 CFR Video Timeline (`neuro_recorder.py`):** Duplicates variable-framerate diffusion frames across exact 30 FPS ticks locked to `pylsl.local_clock()`, guaranteeing $<15\text{ ms}$ alignment between `video_timeline.mp4` and 16-channel `eeg_raw.npz`.
-* **Built-In Session Manager on Orange Pi:** Downloads each session as a compact `.tar.gz` archive (`video_timeline.mp4`, `eeg_raw.npz`, `events.csv`, `manifest.json` — automatically excluding raw `frames/*.jpg`), runs `analyze_session.py` to generate `verified_sync_alignment.png`, and provides an in-browser video + EEG alignment viewer that remains accessible even after the cloud GPU is deleted.
+* **Built-In Session Manager:** The orchestrator syncs completed sessions from the Pod to local storage (or Orange Pi) as compact `.tar.gz` archives (excluding the raw `.jpg` frames), runs `analyze_session.py` to plot the EEG alignment, and provides a built-in HTML5 viewer for the synchronized video and graphs.
 
 ---
 
@@ -203,23 +203,16 @@ Full OpenAPI specification is served at `https://<HOST>:8080/openapi.json`:
 
 ## 8. Deployment & Operations
 
-### 1. Orange Pi / Local Cloud Controller Deployment
+### 1. Unified RunPod / Local Orchestrator Deployment
 ```bash
-export OS_USERNAME="your_immers_cloud_login"
-export OS_PASSWORD="your_immers_cloud_password"
-python3 orangepi_cloud_controller.py
-# Open https://localhost:5000 (Operator Dashboard)
-# Open https://localhost:5000/projector (Fullscreen Projector View)
+export RUNPOD_API_KEY="your_runpod_key_here"
+python3 orangepi_runpod_rest.py
+# Open https://localhost:5000 (FSM Dashboard & Session Manager)
 ```
 
-### 2. Autonomous BLE-to-Cloud Bridge on Orange Pi
+### 2. Autonomous BLE-to-Cloud Bridge
 ```bash
-python3 orangepi_ble_bridge.py --role AFz --gain 4
-```
-
-### 3. Direct Docker Compose Deployment on GPU Host
-```bash
-docker compose -f docker-compose.yml up -d --no-build
+python3 direct_ble_to_lsl.py --gain 32 --sps 250
 ```
 
 ---
