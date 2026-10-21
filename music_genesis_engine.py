@@ -458,7 +458,7 @@ class MusicHeterarchyDeltaProcessor:
             target_64[42:58].add_(_scale_to_t5(sem_action_16x768, clean_norms[42:58]), alpha=0.40 * dyn_str)
 
             # 2. F3 [16:32] и F4 [32:48]: проецируются в SVD-многообразие V_aff, чтобы сохранять музыкальный строй!
-            f3_ musical = _project_into_svd_manifold(res["F3"]["monty"]["z_on_16x768"], v_aff_16x768, clean_norms[16:32])
+            f3_musical = _project_into_svd_manifold(res["F3"]["monty"]["z_on_16x768"], v_aff_16x768, clean_norms[16:32])
             target_64[16:32].add_(f3_musical, alpha=0.30 * dyn_str)
 
             f4_ctx = res["F4"]["monty"]["z_off_16x768"] * 0.6 + res["F4"]["monty"]["temp_asym_16x768"] * 0.4

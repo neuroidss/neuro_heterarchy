@@ -47,6 +47,11 @@ RUN pip3 install --no-cache-dir \
         --extra-index-url https://download.pytorch.org/whl/cu121 \
         -r requirements_musicgen.txt
 
+RUN apt-get update && apt-get install -y openssh-server git curl
+
 COPY . .
 
 EXPOSE 6005
+
+# По умолчанию запускаем SSH демон
+CMD ["/usr/sbin/sshd", "-D"]

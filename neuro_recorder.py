@@ -18,7 +18,10 @@ import time
 import json
 import csv
 import threading
-import cv2
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 import numpy as np
 from pathlib import Path
 from pylsl import local_clock, StreamInfo, StreamOutlet, resolve_byprop, StreamInlet
@@ -174,7 +177,8 @@ class NeuroSessionRecorder:
 
     def push_frame(self, frame_bgr: np.ndarray, telemetry: dict):
         """Фиксация сгенерированного кадра с точным удержанием времени"""
-        if not self.is_recording or frame_bgr is None: return
+        if not self.is_recording or frame_bgr is None or cv2 is None:
+            return
         t_now = local_clock()
 
         with self.lock:
@@ -281,6 +285,9 @@ class NeuroSessionRecorder:
 
     def _rebuild_timeline_video(self):
         """Резервная пересборка видео 1:1 из JPG-файлов с точным числом тиков"""
+        if cv2 is None:
+            return
+
         try:
             csv_path = self.session_dir / "events.csv"
             if not csv_path.exists(): return
