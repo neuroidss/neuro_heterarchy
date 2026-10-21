@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v8.3 (DIRECT RECORDER & MUSIC STRENGTH)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v8.5 (ZERO-DROP & PROXY-READY)
 ===================================================================================
-- Прямой запуск recorder_instance.start_session() / stop_session() прямо в шлюзе:
-  папка sessions/session_YYYYMMDD_HHMMSS создается ВСЕГДА гарантированно (с ЭЭГ,
-  events.csv, manifest.json и живым аудио music_timeline.wav), даже если запущена
-  только музыка без диффузии!
-- Полная поддержка настроек силы рабочей памяти для музыки (strength_low,
-  strength_high, ema_smooth) + телеметрия колонок Монти.
+- БЕСШОВНЫЙ СТРИМИНГ АУДИО БЕЗ ДРОПОВ: Все чанки поступают в непрерывный поток.
+- RUNPOD PROXY READY: Если сертификаты не переданы, работает по HTTP для корректного
+  проксирования через https://<id>-8080.proxy.runpod.net (без зависания Handshake).
 ===================================================================================
 """
 
+from __future__ import annotations
 import sys
 import os
 import ssl
@@ -49,7 +47,6 @@ jpeg_lock = threading.Lock()
 audio_pcm_queue = []
 audio_pcm_lock = threading.Lock()
 
-# Запись живого аудио в файл сессии при активной записи
 session_wav_writer = None
 session_wav_lock = threading.Lock()
 
@@ -62,10 +59,9 @@ diff_ctrl_lock = threading.Lock()
 music_state = {
     "concepts": [],
     "preset": "balanced",
-    "target_block": 1.8,
-    "target_context": 2.4,
+    "target_block": 1.0,
+    "target_context": 3.6,
     "target_buffer_count": 2,
-    "speed_safety_factor": 1.0,
     "temp": 1.0,
     "top_k": 250,
     "cfg_coef": 1.0,
@@ -73,10 +69,6 @@ music_state = {
     "strength_high": 0.80,
     "ema_smooth": 0.20,
     "dyn_strength": 0.25,
-    "monty_loss": 0.02,
-    "persistence": 0.0,
-    "surprise": 0.0,
-    "active_thought": "",
     "buffer_sec": 0.0,
     "buffer_chunks": 0,
     "rtf": 1.0
@@ -144,7 +136,6 @@ class DynamicLSLRouter:
                     source_id=f"ble_{stream_name}_{int(time.time())}"
                 )
                 self.outlets[stream_name] = StreamOutlet(info)
-                print(f"📡 [LSL ROUTER] Поток зарегистрирован: '{stream_name}' ({sps:.0f} Hz)")
             return self.outlets[stream_name]
 
     def push(self, user, role, samples, sps=DEFAULT_SPS):
@@ -169,23 +160,6 @@ def make_wav_header(sample_rate=SAMPLE_RATE, num_channels=1, bits_per_sample=16)
     )
 
 
-OPENAPI_SPEC = {
-    "openapi": "3.0.1",
-    "info": {
-        "title": "NeuroCanvas Unified World, Region Monty & MusicGen Agent API",
-        "description": "API для управления концептами и по-региональной гетерархией Монти (FCz, F3, F4, AFz, Fpz).",
-        "version": "8.3.0"
-    },
-    "servers": [{"url": "http://localhost:8080"}],
-    "paths": {
-        "/api/world/concepts": {"get": {"summary": "Список визуальных концептов", "operationId": "getVisionConcepts"}},
-        "/api/world/concepts/set": {"post": {"summary": "Заменить визуальные концепты", "operationId": "setVisionConcepts"}},
-        "/api/music/concepts": {"get": {"summary": "Список музыкальных тем", "operationId": "getMusicConcepts"}},
-        "/api/music/concepts/set": {"post": {"summary": "Заменить музыкальные темы", "operationId": "setMusicConcepts"}}
-    }
-}
-
-
 class UnifiedCloudHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -199,17 +173,12 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', f'{content_type}; charset=utf-8')
             self.send_header('Content-Length', str(file_size))
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.send_header('Pragma', 'no-cache')
-            self.send_header('Expires', '0')
             self.end_headers()
-
             with open(file_path, 'rb') as f:
                 shutil.copyfileobj(f, self.wfile, length=64 * 1024)
             self.wfile.flush()
-        except BrokenPipeError:
+        except Exception:
             pass
-        except Exception as e:
-            print(f"⚠️ Ошибка передачи файла {file_path}: {e}")
 
     def _send_json(self, code, obj):
         payload = json.dumps(obj).encode('utf-8')
@@ -235,9 +204,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         if clean_path in ['', '/index.html']:
             candidate_paths = [
                 os.path.join(BASE_DIR, 'static', 'index.html'),
-                os.path.join(BASE_DIR, 'index.html'),
-                os.path.join(os.getcwd(), 'static', 'index.html'),
-                os.path.join(os.getcwd(), 'index.html')
+                os.path.join(BASE_DIR, 'index.html')
             ]
             found = next((p for p in candidate_paths if os.path.isfile(p)), None)
             if found:
@@ -248,9 +215,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         elif clean_path in ['/app.js', '/static/app.js']:
             candidate_js = [
                 os.path.join(BASE_DIR, 'static', 'app.js'),
-                os.path.join(BASE_DIR, 'app.js'),
-                os.path.join(os.getcwd(), 'static', 'app.js'),
-                os.path.join(os.getcwd(), 'app.js')
+                os.path.join(BASE_DIR, 'app.js')
             ]
             found_js = next((p for p in candidate_js if os.path.isfile(p)), None)
             if found_js:
@@ -258,14 +223,10 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404, "app.js не найден")
 
-        elif clean_path == '/openapi.json':
-            self._send_json(200, OPENAPI_SPEC)
-
         elif clean_path in ['/stream.mjpg', '/live']:
             self.send_response(200)
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
             self.send_header('Cache-Control', 'no-cache, private')
-            self.send_header('Pragma', 'no-cache')
             self.end_headers()
             while True:
                 with jpeg_lock:
@@ -290,6 +251,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             except Exception:
                 return
 
+            # Непрерывный поток: без сброса чанков в середине фраз
             while True:
                 chunk = None
                 with audio_pcm_lock:
@@ -304,7 +266,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     except Exception:
                         break
                 else:
-                    time.sleep(0.02)
+                    time.sleep(0.01)
 
         elif clean_path == '/api/state_stream':
             self.send_response(200)
@@ -353,17 +315,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     "surprise": world_state["surprise"],
                     "concepts": world_state["concepts"]
                 })
-
-        elif clean_path == '/api/region/telemetry':
-            with world_state_lock:
-                self._send_json(200, {
-                    "ladder_stage": world_state["ladder_stage"],
-                    "monty_loss": world_state["monty_loss"],
-                    "persistence": world_state["persistence"],
-                    "surprise": world_state["surprise"],
-                    "regions": world_state["regions"]
-                })
-
         else:
             self.send_error(404)
 
@@ -394,19 +345,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             broadcast_full_state()
             self._send_json(200, {"status": "ok"})
 
-        elif clean_path == '/api/device/register':
-            dev_id = data.get('device_id')
-            with devices_lock:
-                devices_registry[dev_id] = data
-            self._send_json(200, {"status": "registered"})
-
-        elif clean_path == '/api/device/command':
-            cmd = data.get('cmd')
-            val = data.get('val')
-            dev_id = data.get('device_id', 'all')
-            broadcast_sse("ble_cmd", {"device_id": dev_id, "cmd": cmd, "val": val})
-            self._send_json(200, {"status": "command_broadcasted"})
-
         elif clean_path == '/api/world/concepts/add':
             concept = data.get('concept', '').strip()
             if concept:
@@ -433,22 +371,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             send_diff_ipc({"cmd": "update_concepts", "concepts": world_state["concepts"]})
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": world_state["concepts"]})
-
-        elif clean_path == '/api/region/config':
-            region = data.get('region', 'AFz')
-            cfg = {k: v for k, v in data.items() if k != 'region'}
-            send_diff_ipc({"cmd": "region_config", "region": region, "config": cfg})
-            broadcast_full_state()
-            self._send_json(200, {"status": "ok", "region": region, "config": cfg})
-
-        elif clean_path == '/api/preset/ladder':
-            stage = int(data.get('stage', 4))
-            anchor = str(data.get('anchor', ''))
-            with world_state_lock:
-                world_state["ladder_stage"] = stage
-            send_diff_ipc({"cmd": "set_ladder", "stage": stage, "anchor": anchor})
-            broadcast_full_state()
-            self._send_json(200, {"status": "ok", "ladder_stage": stage, "anchor": anchor})
 
         elif clean_path == '/api/music/concepts/add':
             concept = data.get('concept', '').strip()
@@ -501,7 +423,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
 
         elif clean_path == '/api/recording/start':
             req_name = data.get("name")
-            # ГАРАНТИРОВАННЫЙ ЗАПУСК ЗАПИСИ ПРЯМО В ШЛЮЗЕ (создает папку sessions/... даже без диффузии!)
             actual_session_dir = recorder_instance.start_session(session_name=req_name)
             with session_wav_lock:
                 if session_wav_writer is not None:
@@ -538,7 +459,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             send_diff_ipc({"cmd": "stop_recording"})
             broadcast_full_state()
             self._send_json(200, {"status": "recording_stopped", "saved_path": saved_p})
-
         else:
             self.send_error(404)
 
@@ -626,7 +546,6 @@ def ipc_audio_receiver():
                         broadcast_full_state()
 
                 if raw_bytes is not None:
-                    # Если идет запись сессии — пишем чистый WAV на диск!
                     with session_wav_lock:
                         if session_wav_writer is not None:
                             try:
@@ -638,8 +557,9 @@ def ipc_audio_receiver():
 
                     with audio_pcm_lock:
                         audio_pcm_queue.append(raw_bytes)
-                        target_max_chunks = music_state.get("target_buffer_count", 2)
-                        while len(audio_pcm_queue) > target_max_chunks:
+                        # ЗАЩИТА ОТ ДРОПОВ: Очередь не выбрасывает чанки!
+                        # Лимит 60 чанков (~12 секунд) срабатывает ТОЛЬКО при зависании браузера
+                        if len(audio_pcm_queue) > 60:
                             audio_pcm_queue.pop(0)
 
                         total_bytes = sum(len(c) for c in audio_pcm_queue)
@@ -647,6 +567,18 @@ def ipc_audio_receiver():
                         with music_state_lock:
                             music_state["buffer_sec"] = b_sec
                             music_state["buffer_chunks"] = len(audio_pcm_queue)
+
+                    # Передаем реальный остаток буфера обратно серверу для идеального темпа
+                    with music_conn_lock:
+                        if active_music_conn is not None:
+                            try:
+                                active_music_conn.send({
+                                    'cmd': 'gateway_buffer_stat',
+                                    'buffer_sec': b_sec
+                                })
+                            except Exception:
+                                pass
+
                     broadcast_full_state()
         except Exception:
             time.sleep(0.5)
@@ -669,15 +601,11 @@ def ipc_control_listener():
                 active_diff_ctrl_conn = conn
                 with world_state_lock:
                     active_diff_ctrl_conn.send({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
-            print("🔗 [GATEWAY IPC] Канал управления соединен и синхронизирован!")
             while True:
                 msg = conn.recv()
                 if isinstance(msg, dict):
                     cmd = msg.get("cmd")
-                    if cmd == "init_concepts":
-                        with world_state_lock:
-                            send_diff_ipc({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
-                    elif cmd == "telemetry":
+                    if cmd == "telemetry":
                         with world_state_lock:
                             world_state["current_puck"] = msg.get("puck", [0.0, 0.0])
                             world_state["active_thought"] = msg.get("active_thought", "")
@@ -724,53 +652,31 @@ def main():
     with music_state_lock:
         music_state["concepts"] = initial_music_words
 
-    cert_candidates = []
-    if args.cert:
-        cert_candidates.append(args.cert)
-    if os.environ.get("CERT_PATH"):
-        cert_candidates.append(os.environ.get("CERT_PATH"))
-    cert_candidates.extend(["cert.pem", "./cert.pem", "/app/cert.pem", "../cert.pem"])
-
-    key_candidates = []
-    if args.key:
-        key_candidates.append(args.key)
-    if os.environ.get("KEY_PATH"):
-        key_candidates.append(os.environ.get("KEY_PATH"))
-    key_candidates.extend(["key.pem", "./key.pem", "/app/key.pem", "../key.pem"])
-
-    found_cert = next((p for p in cert_candidates if os.path.exists(p)), None)
-    found_key = next((p for p in key_candidates if os.path.exists(p)), None)
-
     threading.Thread(target=ipc_frame_receiver, daemon=True).start()
     threading.Thread(target=ipc_audio_receiver, daemon=True).start()
     threading.Thread(target=ipc_control_listener, daemon=True).start()
 
     server = ThreadedHTTPServer(('0.0.0.0', port), UnifiedCloudHandler)
 
+    # В RunPod Proxy снаружи ВСЕГДА валидный HTTPS, поэтому внутрь слушаем чистый HTTP
     scheme = "http"
-    if found_cert and found_key:
+    if args.cert and args.key and os.path.exists(args.cert) and os.path.exists(args.key):
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(certfile=found_cert, keyfile=found_key)
+            ctx.load_cert_chain(certfile=args.cert, keyfile=args.key)
             server.socket = ctx.wrap_socket(server.socket, server_side=True)
             scheme = "https"
-            print(f"🔒 [GATEWAY] TLS АКТИВИРОВАН: Web Bluetooth Secure Context ГАРАНТИРОВАН!")
+            print(f"🔒 [GATEWAY] Прямой TLS активирован: {args.cert}")
         except Exception as e:
-            print(f"⚠️ [GATEWAY] Ошибка TLS: {e}. Режим HTTP.")
+            print(f"⚠️ [GATEWAY] Режим чистого HTTP: {e}")
     else:
-        print("⚠️ [GATEWAY] Сертификаты не найдены. Web Bluetooth на удаленных IP требует HTTPS!")
+        print("🌐 [GATEWAY] Запуск в режиме прямого HTTP для RunPod Proxy (Zero-Handshake Lag).")
 
-    print("=" * 65)
-    print(f"🌐 [GATEWAY] Веб-терминал:     {scheme}://0.0.0.0:{port}/")
-    print(f"📖 [GATEWAY] OpenAPI для GPT: {scheme}://0.0.0.0:{port}/openapi.json")
-    print(f"🎥 [GATEWAY] Видео-стрим:     {scheme}://0.0.0.0:{port}/stream.mjpg")
-    print(f"🔊 [GATEWAY] Аудио-стрим:     {scheme}://0.0.0.0:{port}/audio.wav")
-    print("=" * 65)
-
+    print(f"🚀 [GATEWAY] Веб-терминал: {scheme}://0.0.0.0:{port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nОстановка шлюза.")
+        pass
 
 
 if __name__ == '__main__':

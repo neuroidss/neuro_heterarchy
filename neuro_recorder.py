@@ -6,25 +6,25 @@ NEUROCANVAS SESSION RECORDER (TRUE 1:1 REAL-TIME TIMELINE SYNCHRONIZER)
 - ИСТИННЫЙ 1:1 ХРОНОМЕТРАЖ: Кадры удерживаются в MP4 ровно столько, сколько они
   висели на экране у человека (нулевое ускорение, воспроизведение в реальном темпе).
 - ZERO-CUMULATIVE-DRIFT: Привязка тиков видео к аппаратному LSL local_clock().
-- 16-КАНАЛЬНОЕ СЫРОЕ ЭЭГ: Запись массива сэмплов и аппаратных таймштампов в eeg_raw.npz.
-- СТРОГАЯ РАЗМЕТКА: events.csv с точными индексами кадров видео [start..end],
-  временем удержания в мс, 2D-координатами рабочей памяти и активными концептами.
-- СТРАХОВКА: Авто-пересборка MP4 из JPG с сохранением реальных длительностей.
+- БЕЗОПАСНЫЙ ИМПОРТ: В окружении MusicGen cv2 опционален и не требует установки.
 ===================================================================================
 """
 
+from __future__ import annotations
 import os
 import time
 import json
 import csv
 import threading
+import numpy as np
+from pathlib import Path
+from pylsl import local_clock, StreamInfo, StreamOutlet, resolve_byprop, StreamInlet
+
 try:
     import cv2
 except ImportError:
     cv2 = None
-import numpy as np
-from pathlib import Path
-from pylsl import local_clock, StreamInfo, StreamOutlet, resolve_byprop, StreamInlet
+
 
 class NeuroSessionRecorder:
     def __init__(self, output_root="sessions", video_fps=30.0):
@@ -35,19 +35,16 @@ class NeuroSessionRecorder:
         self.session_dir = None
         self.lock = threading.Lock()
         
-        # ЭЭГ сборщик
         self.eeg_thread = None
         self.stop_eeg_event = threading.Event()
         self.eeg_timestamps = []
         self.eeg_samples = []
         
-        # Видео параметры
         self.video_fps = float(video_fps)
         self.video_writer = None
         self.video_path = None
         self.video_dims = None
         
-        # Временная шкала 1:1 (Real-time Timeline)
         self.t_session_start = None
         self.last_frame_bgr = None
         self.last_frame_t = None
@@ -56,11 +53,9 @@ class NeuroSessionRecorder:
         self.total_video_ticks = 0
         self.unique_frames_count = 0
         
-        # Файлы
         self.events_file = None
         self.events_writer = None
         
-        # LSL Marker
         info = StreamInfo('NeuroCanvas_Markers', 'Markers', 1, 0, 'string', 'neurocanvas_mark_01')
         self.marker_outlet = StreamOutlet(info)
 
@@ -99,7 +94,6 @@ class NeuroSessionRecorder:
             self.session_dir.mkdir(parents=True, exist_ok=True)
             (self.session_dir / "frames").mkdir(exist_ok=True)
             
-            # Инициализация events.csv с диапазонами видеотиков
             csv_path = self.session_dir / "events.csv"
             self.events_file = open(csv_path, mode="w", newline="", encoding="utf-8")
             self.events_writer = csv.writer(self.events_file)
@@ -137,15 +131,11 @@ class NeuroSessionRecorder:
             return str(self.session_dir)
 
     def _flush_previous_frame_ticks(self, current_t: float):
-        """Дублирует предыдущий кадр в видео ровно столько тиков, сколько он висел на экране"""
         if self.last_frame_bgr is None or self.video_writer is None:
             return
 
-        # Истинное время сессии по аппаратному таймеру LSL
         elapsed_sec = current_t - self.t_session_start
         target_total_ticks = int(round(elapsed_sec * self.video_fps))
-        
-        # Сколько тиков 30 FPS занимал этот кадр в реальности
         ticks_to_write = max(1, target_total_ticks - self.total_video_ticks)
         
         tick_start = self.total_video_ticks
@@ -156,7 +146,6 @@ class NeuroSessionRecorder:
 
         duration_ms = (current_t - self.last_frame_t) * 1000.0
 
-        # Запись в events.csv
         telem = self.last_telemetry or {}
         dag = telem.get("dag_log_parts", ["NONE"])
         root_c = dag[0] if len(dag) > 0 else "NONE"
@@ -176,7 +165,6 @@ class NeuroSessionRecorder:
         self.events_file.flush()
 
     def push_frame(self, frame_bgr: np.ndarray, telemetry: dict):
-        """Фиксация сгенерированного кадра с точным удержанием времени"""
         if not self.is_recording or frame_bgr is None or cv2 is None:
             return
         t_now = local_clock()
@@ -184,7 +172,6 @@ class NeuroSessionRecorder:
         with self.lock:
             h, w = frame_bgr.shape[:2]
 
-            # Ленивая инициализация видеоконтейнера под реальные размеры кадра
             if self.video_writer is None:
                 self.video_dims = (w, h)
                 for codec in ['mp4v', 'avc1', 'MJPG']:
@@ -194,29 +181,25 @@ class NeuroSessionRecorder:
                         self.video_writer = writer
                         break
 
-            # 1. Завершаем хронометраж предыдущего кадра, если он был
             if self.last_frame_bgr is not None:
                 self._flush_previous_frame_ticks(t_now)
 
-            # 2. Сохраняем исходный JPEG кадра
             f_id = self.unique_frames_count
             self.unique_frames_count += 1
             frame_jpg_path = self.session_dir / "frames" / f"frame_{f_id:06d}.jpg"
             cv2.imwrite(str(frame_jpg_path), frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
-            # 3. Запоминаем текущий кадр как активный
             self.last_frame_bgr = frame_bgr.copy()
             self.last_frame_t = t_now
             self.last_frame_id = f_id
             self.last_telemetry = telemetry.copy() if telemetry else {}
 
-            # Отправка маркера в LSL
             root_c = telemetry.get("dag_log_parts", ["NONE"])[0] if telemetry else "NONE"
             self.marker_outlet.push_sample([f"FRAME:{f_id}|{root_c}"], timestamp=t_now)
 
     def log_custom_event(self, event_name: str, payload_str: str = ""):
-        """События от квестов / ChatGPT / смены концептов"""
-        if not self.is_recording: return
+        if not self.is_recording:
+            return
         t_lsl = local_clock()
         with self.lock:
             self.events_writer.writerow([
@@ -229,12 +212,12 @@ class NeuroSessionRecorder:
 
     def stop_session(self):
         with self.lock:
-            if not self.is_recording: return None
+            if not self.is_recording:
+                return None
             self.is_recording = False
             t_stop = local_clock()
             self.stop_eeg_event.set()
 
-            # Дописываем тики для самого последнего кадра до момента нажатия СТОП
             if self.last_frame_bgr is not None:
                 self._flush_previous_frame_ticks(t_stop)
 
@@ -249,9 +232,7 @@ class NeuroSessionRecorder:
 
             total_sec = float(t_stop - self.t_session_start) if self.t_session_start else 0.0
 
-            # Страховка: если видеопоток повредился, собираем 1:1 таймлайн из JPG по events.csv
-            if self.video_path.exists() and self.video_path.stat().st_size < 1000 and self.unique_frames_count > 0:
-                print("⚠️ [RECORDER] Восстановление MP4 таймлайна 1:1 по events.csv...")
+            if cv2 is not None and self.video_path.exists() and self.video_path.stat().st_size < 1000 and self.unique_frames_count > 0:
                 self._rebuild_timeline_video()
 
             eeg_arr = np.array(self.eeg_samples, dtype=np.float32)
@@ -278,22 +259,20 @@ class NeuroSessionRecorder:
                 json.dump(manifest, f, indent=2, ensure_ascii=False)
 
             print(f"⏹️ [RECORDER] Сессия сохранена: {self.session_dir}")
-            print(f"   ⏱️ Время: {total_sec:.2f} с | Видео: {self.total_video_ticks / self.video_fps:.2f} с (1:1 совпадение)")
             res_dir = str(self.session_dir)
             self.session_dir = None
             return res_dir
 
     def _rebuild_timeline_video(self):
-        """Резервная пересборка видео 1:1 из JPG-файлов с точным числом тиков"""
         if cv2 is None:
             return
-
         try:
             csv_path = self.session_dir / "events.csv"
-            if not csv_path.exists(): return
-            
+            if not csv_path.exists():
+                return
             first_img = cv2.imread(str(self.session_dir / "frames" / "frame_000000.jpg"))
-            if first_img is None: return
+            if first_img is None:
+                return
             h, w = first_img.shape[:2]
 
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -302,20 +281,20 @@ class NeuroSessionRecorder:
             with open(csv_path, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    if row.get('event_type') != 'FRAME_DISPLAYED': continue
+                    if row.get('event_type') != 'FRAME_DISPLAYED':
+                        continue
                     f_id = int(row['unique_frame_id'])
                     t_start = int(row['video_tick_start'])
                     t_end = int(row['video_tick_end'])
                     repeats = max(1, t_end - t_start + 1)
-                    
                     im_file = self.session_dir / "frames" / f"frame_{f_id:06d}.jpg"
                     if im_file.exists():
                         img = cv2.imread(str(im_file))
                         for _ in range(repeats):
                             re_writer.write(img)
             re_writer.release()
-            print("✅ [RECORDER] Резервный MP4 таймлайн 1:1 успешно восстановлен!")
         except Exception as e:
-            print(f"❌ [RECORDER ERROR] Ошибка пересборки: {e}")
+            print(f"❌ [RECORDER ERROR]: {e}")
+
 
 recorder_instance = NeuroSessionRecorder()

@@ -3,6 +3,7 @@ const DATA_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 const CMD_CHAR_UUID  = "c0de0001-36e1-4688-b7f5-ea07361b26a8";
 const BATCH_SIZE     = 40;
 const RAW_SAT_LIMIT  = 8300000;
+const AUDIO_SR       = 32000;
 
 function calcUvScale(gain) {
     return (1.2 / parseFloat(gain) / 8388607.0) * 1e6;
@@ -10,6 +11,8 @@ function calcUvScale(gain) {
 
 let activeDevices = [];
 let isAudioPlaying = false;
+let audioCtx = null;
+let audioAbortCtrl = null;
 const myClientId = "client_" + Math.random().toString(36).substring(2, 9);
 let isProbeMode = false;
 
@@ -159,13 +162,13 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
 const PRESETS = {
     meditation: { steps: 2, cfg: 1.0, strLow: 0.45, strHigh: 0.70, ema: 0.30 },
     balanced:   { steps: 2, cfg: 1.0, strLow: 0.50, strHigh: 0.85, ema: 0.14 },
-    dynamic:    { steps: 3, cfg: 1.2, strLow: 0.60, strHigh: 0.92, ema: 0.08 }
+    dynamic:    { steps: 3, cfg: 1.2, strLow: 0.60, strHigh: 0.92, EMA: 0.08 }
 };
 
 const MUSIC_PRESETS = {
-    meditation: { block: 1.8, ctx: 2.8, strLow: 0.12, strHigh: 0.45, ema: 0.35, temp: 0.9 },
-    balanced:   { block: 1.8, ctx: 2.4, strLow: 0.25, strHigh: 0.80, ema: 0.20, temp: 1.0 },
-    dynamic:    { block: 1.4, ctx: 1.6, strLow: 0.40, strHigh: 0.95, ema: 0.08, temp: 1.1 }
+    meditation: { block: 1.8, ctx: 3.6, strLow: 0.12, strHigh: 0.45, ema: 0.35, temp: 0.95 },
+    balanced:   { block: 1.8, ctx: 2.4, strLow: 0.25, strHigh: 0.75, ema: 0.20, temp: 1.0 },
+    dynamic:    { block: 1.4, ctx: 1.6, strLow: 0.35, strHigh: 0.92, ema: 0.10, temp: 1.05 }
 };
 
 function applyPreset(presetKey) {
@@ -176,8 +179,8 @@ function applyPreset(presetKey) {
     dom.diffCfg.value = p.cfg;
     dom.diffStrLow.value = p.strLow;
     dom.diffStrHigh.value = p.strHigh;
-    dom.diffEmaSmooth.value = p.ema;
-    sendDiffConfig(p.steps, p.cfg, p.strLow, p.strHigh, p.ema, presetKey);
+    dom.diffEmaSmooth.value = p.ema || 0.08;
+    sendDiffConfig(p.steps, p.cfg, p.strLow, p.strHigh, p.ema || 0.08, presetKey);
 }
 
 function applyMusicPreset(presetKey) {
@@ -272,7 +275,7 @@ sse.addEventListener('state', (e) => {
         if (document.activeElement !== dom.mTopK) dom.mTopK.value = st.music.top_k ?? 250;
         if (document.activeElement !== dom.mCfg) dom.mCfg.value = st.music.cfg_coef ?? 1.0;
         if (document.activeElement !== dom.mStrLow) dom.mStrLow.value = st.music.strength_low ?? 0.25;
-        if (document.activeElement !== dom.mStrHigh) dom.mStrHigh.value = st.music.strength_high ?? 0.80;
+        if (document.activeElement !== dom.mStrHigh) dom.mStrHigh.value = st.music.strength_high ?? 0.75;
         if (document.activeElement !== dom.mEmaSmooth) dom.mEmaSmooth.value = st.music.ema_smooth ?? 0.20;
 
         const bSec = (st.music.buffer_sec || 0).toFixed(1);
@@ -298,21 +301,136 @@ sse.addEventListener('ble_cmd', async (e) => {
     }
 });
 
+// =============================================================================
+// БЕСШОВНЫЙ WEB AUDIO API ПЛЕЕР (УСТРАНЯЕТ МИКРОПАУЗЫ БРАУЗЕРА МЕЖДУ БЛОКАМИ)
+// =============================================================================
+async function startWebAudioStream() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AudioContextClass({ sampleRate: AUDIO_SR });
+    if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+    }
+
+    audioAbortCtrl = new AbortController();
+    const response = await fetch('/audio.wav?t=' + Date.now(), { signal: audioAbortCtrl.signal });
+    const reader = response.body.getReader();
+
+    let headerBytesRemaining = 44; // Пропускаем 44-байтный WAV-заголовок
+    let leftoverByte = null;
+    let nextPlayTime = 0;
+    let pendingSamples = [];
+    let hasStarted = false;
+    const prebufferSamples = Math.floor(AUDIO_SR * 0.45); // 0.45с стартовый запас против микропауз
+    const sliceSamples = Math.floor(AUDIO_SR * 0.16);     // Планируем по 160 мс
+
+    function scheduleSlice(float32Arr) {
+        if (!audioCtx || !isAudioPlaying) return;
+        const now = audioCtx.currentTime;
+        if (nextPlayTime < now + 0.02) {
+            // Если вдруг буфер просел — ставим мягкий запас 180 мс без щелчка
+            nextPlayTime = now + 0.18;
+        }
+        const ahead = nextPlayTime - now;
+        // Плавная автоподстройка скорости в пределах ±2%, чтобы буфер никогда не пустел и не рос
+        let rate = 1.0;
+        if (ahead < 0.28) rate = 0.975;
+        else if (ahead > 2.2) rate = 1.03;
+
+        const audioBuf = audioCtx.createBuffer(1, float32Arr.length, AUDIO_SR);
+        audioBuf.getChannelData(0).set(float32Arr);
+
+        const src = audioCtx.createBufferSource();
+        src.buffer = audioBuf;
+        src.playbackRate.value = 1.0;
+        src.connect(audioCtx.destination);
+        src.start(nextPlayTime);
+        nextPlayTime += (float32Arr.length / AUDIO_SR);
+    }
+
+    (async () => {
+        try {
+            while (isAudioPlaying) {
+                const { done, value } = await reader.read();
+                if (done || !isAudioPlaying) break;
+                let chunk = value;
+
+                if (headerBytesRemaining > 0) {
+                    if (chunk.byteLength <= headerBytesRemaining) {
+                        headerBytesRemaining -= chunk.byteLength;
+                        continue;
+                    } else {
+                        chunk = chunk.subarray(headerBytesRemaining);
+                        headerBytesRemaining = 0;
+                    }
+                }
+
+                if (leftoverByte !== null) {
+                    const merged = new Uint8Array(chunk.byteLength + 1);
+                    merged[0] = leftoverByte;
+                    merged.set(chunk, 1);
+                    chunk = merged;
+                    leftoverByte = null;
+                }
+
+                if (chunk.byteLength % 2 !== 0) {
+                    leftoverByte = chunk[chunk.byteLength - 1];
+                    chunk = chunk.subarray(0, chunk.byteLength - 1);
+                }
+
+                const numSamples = chunk.byteLength >> 1;
+                if (numSamples === 0) continue;
+
+                const view = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+                for (let i = 0; i < numSamples; i++) {
+                    const s16 = view.getInt16(i * 2, true);
+                    pendingSamples.push(s16 / 32768.0);
+                }
+
+                if (!hasStarted) {
+                    if (pendingSamples.length >= prebufferSamples) {
+                        hasStarted = true;
+                        nextPlayTime = audioCtx.currentTime + 0.08;
+                        while (pendingSamples.length >= sliceSamples) {
+                            scheduleSlice(new Float32Array(pendingSamples.splice(0, sliceSamples)));
+                        }
+                    }
+                } else {
+                    while (pendingSamples.length >= sliceSamples) {
+                        scheduleSlice(new Float32Array(pendingSamples.splice(0, sliceSamples)));
+                    }
+                }
+            }
+        } catch (err) {
+            if (isAudioPlaying) console.warn("WebAudio stream interrupted:", err);
+        }
+    })();
+}
+
+function stopWebAudioStream() {
+    if (audioAbortCtrl) {
+        try { audioAbortCtrl.abort(); } catch (e) {}
+        audioAbortCtrl = null;
+    }
+    if (audioCtx) {
+        try { audioCtx.close(); } catch (e) {}
+        audioCtx = null;
+    }
+}
+
 function toggleAudio() {
     if (!isAudioPlaying) {
-        try { dom.neuroAudio.pause(); } catch(e) {}
-        dom.neuroAudio.removeAttribute('src');
-        try { dom.neuroAudio.load(); } catch(e) {}
-        dom.neuroAudio.src = '/audio.wav?t=' + Date.now();
-        dom.neuroAudio.play().then(() => {
-            isAudioPlaying = true;
-            dom.btnAudio.textContent = '⏸️ ВЫКЛЮЧИТЬ LIVE ЗВУК';
-            dom.btnAudio.classList.add('playing');
-        }).catch(e => alert("Аудио ошибка: " + e.message));
+        isAudioPlaying = true;
+        dom.btnAudio.textContent = '⏸️ ВЫКЛЮЧИТЬ LIVE ЗВУК';
+        dom.btnAudio.classList.add('playing');
+        startWebAudioStream().catch(e => {
+            isAudioPlaying = false;
+            dom.btnAudio.textContent = '▶️ ВКЛЮЧИТЬ LIVE ЗВУК';
+            dom.btnAudio.classList.remove('playing');
+            alert("Аудио ошибка: " + e.message);
+        });
     } else {
-        try { dom.neuroAudio.pause(); } catch(e) {}
-        dom.neuroAudio.removeAttribute('src');
         isAudioPlaying = false;
+        stopWebAudioStream();
         dom.btnAudio.textContent = '▶️ ВКЛЮЧИТЬ LIVE ЗВУК';
         dom.btnAudio.classList.remove('playing');
     }
@@ -617,7 +735,7 @@ async function removeMusicConcept(c) {
 
 async function updateMusicConfig() {
     let sLow = Math.max(0.05, Math.min(0.85, parseFloat(dom.mStrLow.value) || 0.25));
-    let sHigh = Math.max(sLow + 0.05, Math.min(0.98, parseFloat(dom.mStrHigh.value) || 0.80));
+    let sHigh = Math.max(sLow + 0.05, Math.min(0.98, parseFloat(dom.mStrHigh.value) || 0.75));
     const ema = Math.max(0.04, Math.min(0.60, parseFloat(dom.mEmaSmooth.value) || 0.20));
 
     dom.mStrLow.value = sLow;
