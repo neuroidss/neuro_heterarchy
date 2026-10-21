@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: ULTRA-FAST & PURE MUSICALITY MUSICGEN SERVER (PORT 6005)
+NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (0.1s BLOCK CAPABLE)
 ===================================================================================
-- СКОРОСТЬ 17.4 мс/шаг (RTF > 1.0x ДАЖЕ НА RTX 3060):
-  1) Cross-Attention KV-Cache (ключи и значения T5 считаются 1 раз на чанк).
-  2) Предвычисленная в FP32 таблица синусоидальных позиций (_STATIC_SIN_EMB_CACHE).
-  3) Persistent Self-Attention KV-Cache (_persistent_k / _persistent_v) + Gumbel-Max.
-- ЧИСТАЯ МУЗЫКА БЕЗ БУЛЬКАНИЯ:
-  1) Тайлинг только активных токенов T5 (attention_mask == 1) на 64 слота без
-     мертвых <pad>-векторов (сохраняет 100% нативное распределение Cross-Attention).
-  2) Отсечение 3 краевых неполных шагов DelayPattern (out_tokens[..., :-3]) перед
-     сохранением в current_tokens — исключает авторегрессионное вырождение в булькание!
-- ЗАКОН СОХРАНЕНИЯ СЭМПЛОВ (ZERO-DROP) И АВТО-МИНИМИЗАЦИЯ БУФЕРА / БЛОКА.
+- НЕПРЕРЫВНЫЙ ДИАГОНАЛЬНЫЙ ПОТОК (current_gen_sequence):
+  История контекста (например 3.6с = 180 шагов) хранится напрямую в диагональном
+  пространстве кодбуков [1, 4, S] БЕЗ краевых масок 2048 (special_token_id).
+  1) Размер блока (0.1с .. 2.4с) больше НЕ создает искусственного ритма!
+  2) Блок 0.1с (5 фреймов) требует ровно 5 шагов трансформера (1 батчевый prefill
+     контекста + 4 шага) без 3 холостых шагов закрытия диагонали (+60% к скорости
+     на сверхкоротких блоках 0.1с - 0.2с!).
+- СКОРОСТЬ 17.4 мс/шаг (Cross-KV Cache + FP32 Sinusoidal Cache + Gumbel-Max).
+- ЗАКОН СОХРАНЕНИЯ СЭМПЛОВ (Zero-Drop) И ОТСУТСТВИЕ ПО-БЛОЧНОГО ПАМПИНГА ГРОМКОСТИ.
 ===================================================================================
 """
 
@@ -73,7 +72,7 @@ LAST_PROFILE = {
 }
 
 # -----------------------------------------------------------------------------
-# 1. PERSISTENT SELF-ATTENTION & CROSS-ATTENTION KV-CACHE (17.4 ms/step)
+# 1. PERSISTENT SELF-ATTENTION & CROSS-ATTENTION KV-CACHE
 # -----------------------------------------------------------------------------
 _orig_complete_kv = StreamingMultiheadAttention._complete_kv
 
@@ -113,7 +112,7 @@ def fast_complete_kv(self, k, v):
         nk = static_k[:, :curr_len + slen, :, :]
         if v is not k:
             static_v[:, curr_len:curr_len + slen, :] = v
-            nv = static_v[:, :curr_len + slen, :, :]
+            nv = static_v[:, :curr_len + slen, :]
         else:
             nv = nk
 
@@ -227,7 +226,7 @@ StreamingMultiheadAttention.forward = fast_mha_forward
 
 
 # -----------------------------------------------------------------------------
-# 2. ТОЧНАЯ FP32 ТАБЛИЦА СИНУСОИДАЛЬНЫХ ПОЗИЦИЙ (БЕЗ ПОТЕРИ ТОЧНОСТИ ФАЗЫ)
+# 2. ТОЧНАЯ FP32 ТАБЛИЦА СИНУСОИДАЛЬНЫХ ПОЗИЦИЙ
 # -----------------------------------------------------------------------------
 _STATIC_SIN_EMB_CACHE = {}
 
@@ -240,7 +239,6 @@ def fast_transformer_forward(self, x: torch.Tensor, *args, **kwargs):
         cache_key = (C, x.device)
         if cache_key not in _STATIC_SIN_EMB_CACHE:
             pos = torch.arange(4096, device=x.device).view(1, -1, 1)
-            # Вычисляем строго в float32 (как в оригинальном transformer.py), чтобы не терять точность!
             sin_f32 = create_sin_embedding(
                 pos, C, max_period=self.max_period, dtype=torch.float32
             ) * self.positional_scale
@@ -259,76 +257,99 @@ StreamingTransformer.forward = fast_transformer_forward
 
 
 # -----------------------------------------------------------------------------
-# 3. FUSED BMM HEADS + ZERO-SYNC GUMBEL SAMPLING
+# 3. БЕСШОВНЫЙ ДИАГОНАЛЬНЫЙ ГЕНЕРАТОР (НОЛЬ МАСОК 2048 И НОЛЬ ХОЛОСТЫХ ШАГОВ!)
 # -----------------------------------------------------------------------------
 _CACHED_TOKENIZED = None
 
 
-def fast_lm_generate(self, prompt=None, conditions=[], num_samples=None, max_gen_len=256,
-                     use_sampling=True, temp=1.0, top_k=250, top_p=0.0, cfg_coef=1.0,
-                     cfg_coef_beta=None, two_step_cfg=None, remove_prompts=False,
-                     check=False, callback=None) -> torch.Tensor:
+@torch.no_grad()
+def step_continuous_diagonal_stream(
+    lm: LMModel,
+    prev_diag_seq: torch.Tensor | None,
+    conditions: list,
+    gen_frames: int,
+    ctx_frames: int,
+    temp: float = 1.0,
+    top_k: int = 250
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Генерирует ровно `gen_frames` новых 4-кодбуковых аудио-фреймов в непрерывном
+    диагональном потоке `diag_seq` [1, 4, S]:
+    - Если `prev_diag_seq is None` (холодный старт): инициализирует первые 4 шага диагонали.
+    - Если `prev_diag_seq` уже есть: берет последние `ctx_frames` чистых диагональных
+      шагов (без единого токена 2048!) и делает РОВНО `gen_frames` шагов трансформера
+      (1 батчевый prefill контекста + `gen_frames - 1` одиночных шагов)!
+    - Возвращает:
+      1) `new_diag_seq` (скользящее диагональное окно последних 450 шагов);
+      2) `ready_audio_codes` `[1, 4, gen_frames + 3]` (полностью собранные 4-кодбуковые
+         фреймы с 3 фреймами левого контекста для бесшовного декодирования EnCodec!).
+    """
     global _CACHED_TOKENIZED, LAST_PROFILE
     t_start_t5 = time.perf_counter()
-    first_param = next(iter(self.parameters()))
-    device = first_param.device
+    device = next(iter(lm.parameters())).device
 
     if conditions:
         if _CACHED_TOKENIZED is None:
-            _CACHED_TOKENIZED = self.condition_provider.tokenize(conditions)
-        cfg_conditions = self.condition_provider(_CACHED_TOKENIZED)
+            _CACHED_TOKENIZED = lm.condition_provider.tokenize(conditions)
+        cfg_conditions = lm.condition_provider(_CACHED_TOKENIZED)
         cross_attn_src = cfg_conditions['description'][0]
     else:
         cross_attn_src = None
 
-    if prompt is None:
-        num_samples = num_samples or 1
-        prompt = torch.zeros((num_samples, self.num_codebooks, 0), dtype=torch.long, device=device)
-
-    B, K, T = prompt.shape
-    start_offset = T
-    pattern = self.pattern_provider.get_pattern(max_gen_len)
-    unknown_token = -1
-
-    gen_codes = torch.full((B, K, max_gen_len), unknown_token, dtype=torch.long, device=device)
-    gen_codes[..., :start_offset] = prompt
-    gen_sequence, indexes, mask = pattern.build_pattern_sequence(gen_codes, self.special_token_id)
-    start_offset_sequence = pattern.get_first_step_with_timesteps(start_offset)
-
-    if not hasattr(self, '_fused_head_w'):
-        self._fused_head_w = torch.stack([l.weight for l in self.linears], dim=0)
-        self._fused_head_b = torch.stack([l.bias for l in self.linears], dim=0) if self.linears[0].bias is not None else None
+    if not hasattr(lm, '_fused_head_w'):
+        lm._fused_head_w = torch.stack([l.weight for l in lm.linears], dim=0)
+        lm._fused_head_b = torch.stack([l.bias for l in lm.linears], dim=0) if lm.linears[0].bias is not None else None
 
     if device.type == 'cuda':
         torch.cuda.synchronize()
     LAST_PROFILE["t5_ms"] = (time.perf_counter() - t_start_t5) * 1000.0
 
     t_start_lm = time.perf_counter()
+    B, K = 1, lm.num_codebooks
+    special_id = lm.special_token_id
     k_eff = min(int(top_k), 50)
     inv_temp = 1.0 / max(0.05, float(temp))
 
-    with self.streaming():
+    if prev_diag_seq is None or prev_diag_seq.shape[-1] < 8:
+        # Холодный старт: нужно генерить с 0-го шага с начальной диагональной лестницей 2048
+        steps_to_run = max(25, gen_frames + 4)
+        work_seq = torch.full((B, K, steps_to_run + 1), special_id, dtype=torch.long, device=device)
+        start_step = 1
+        LAST_PROFILE["ctx_tokens"] = 0
+    else:
+        # Непрерывный режим: берем последние ctx_frames шагов из prev_diag_seq (в них НЕТ ни одного 2048!)
+        avail = prev_diag_seq.shape[-1]
+        keep_ctx = max(8, min(avail, ctx_frames))
+        ctx_slice = prev_diag_seq[..., -keep_ctx:]
+        # На первом же шаге prefill (0..keep_ctx) трансформер предскажет токен в колонку keep_ctx,
+        # поэтому нам нужно ровно gen_frames новых колонок!
+        work_seq = torch.zeros((B, K, keep_ctx + gen_frames), dtype=torch.long, device=device)
+        work_seq[..., :keep_ctx] = ctx_slice
+        start_step = keep_ctx
+        steps_to_run = gen_frames
+        LAST_PROFILE["ctx_tokens"] = keep_ctx
+
+    total_seq_len = work_seq.shape[-1]
+
+    with lm.streaming():
         prev_offset = 0
-        gen_sequence_len = gen_sequence.shape[-1]
-        steps_ran = gen_sequence_len - start_offset_sequence
+        for offset in range(start_step, total_seq_len):
+            curr_sequence = work_seq[..., prev_offset:offset]
+            input_ = (lm.emb[0](curr_sequence[:, 0]) + lm.emb[1](curr_sequence[:, 1]) +
+                      lm.emb[2](curr_sequence[:, 2]) + lm.emb[3](curr_sequence[:, 3]))
 
-        for offset in range(start_offset_sequence, gen_sequence_len):
-            curr_sequence = gen_sequence[..., prev_offset:offset]
-            input_ = (self.emb[0](curr_sequence[:, 0]) + self.emb[1](curr_sequence[:, 1]) +
-                      self.emb[2](curr_sequence[:, 2]) + self.emb[3](curr_sequence[:, 3]))
-
-            out = self.transformer(input_, cross_attention_src=cross_attn_src)
-            if self.out_norm:
-                out = self.out_norm(out)
+            out = lm.transformer(input_, cross_attention_src=cross_attn_src)
+            if lm.out_norm:
+                out = lm.out_norm(out)
 
             out_last = out[:, -1, :].unsqueeze(0).expand(4, B, -1)
-            if self._fused_head_b is not None:
-                logits = torch.baddbmm(self._fused_head_b.unsqueeze(1), out_last, self._fused_head_w.transpose(1, 2))
+            if lm._fused_head_b is not None:
+                logits = torch.baddbmm(lm._fused_head_b.unsqueeze(1), out_last, lm._fused_head_w.transpose(1, 2))
             else:
-                logits = torch.bmm(out_last, self._fused_head_w.transpose(1, 2))
+                logits = torch.bmm(out_last, lm._fused_head_w.transpose(1, 2))
 
             logits = logits.permute(1, 0, 2)
-            if use_sampling and temp > 0.0:
+            if temp > 0.0:
                 top_logits, top_indices = torch.topk(logits * inv_temp, k=k_eff, dim=-1)
                 u = torch.empty_like(top_logits).uniform_(1e-6, 1.0 - 1e-6)
                 gumbel = top_logits - torch.log(-torch.log(u))
@@ -337,26 +358,44 @@ def fast_lm_generate(self, prompt=None, conditions=[], num_samples=None, max_gen
             else:
                 next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
-            valid_mask = mask[..., offset:offset + 1].expand(B, -1, -1)
-            next_token = torch.where(valid_mask, next_token, self.special_token_id)
-            curr_slice = gen_sequence[..., offset:offset + 1]
-            gen_sequence[..., offset:offset + 1] = torch.where(curr_slice == unknown_token, next_token, curr_slice)
+            if prev_diag_seq is None and offset < 4:
+                # Только в первые 3 миллисекунды старта потока соблюдаем начальную ступеньку DelayPattern
+                for k_i in range(K):
+                    if offset <= k_i:
+                        next_token[:, k_i, :] = special_id
+
+            work_seq[..., offset:offset + 1] = next_token
             prev_offset = offset
 
     if device.type == 'cuda':
         torch.cuda.synchronize()
     lm_ms = (time.perf_counter() - t_start_lm) * 1000.0
     LAST_PROFILE["lm_loop_ms"] = lm_ms
-    LAST_PROFILE["steps_count"] = max(1, steps_ran)
-    LAST_PROFILE["per_step_ms"] = lm_ms / max(1, steps_ran)
-    LAST_PROFILE["ctx_tokens"] = start_offset
+    LAST_PROFILE["steps_count"] = max(1, steps_to_run)
+    LAST_PROFILE["per_step_ms"] = lm_ms / max(1, steps_to_run)
 
-    out_codes, out_indexes, out_mask = pattern.revert_pattern_sequence(gen_sequence, special_token=unknown_token)
-    out_start_offset = start_offset if remove_prompts else 0
-    return out_codes[..., out_start_offset:max_gen_len]
+    # Собираем полностью готовые 4-кодбуковые аудио-фреймы из диагонали:
+    # В колонке s лежат: [c0(t=s-1), c1(t=s-2), c2(t=s-3), c3(t=s-4)]
+    # Значит для любого фрейма с индексом конца s (где s >= 4):
+    # c0 = work_seq[:, 0, s - 3]
+    # c1 = work_seq[:, 1, s - 2]
+    # c2 = work_seq[:, 2, s - 1]
+    # c3 = work_seq[:, 3, s]
+    n_extract = gen_frames if prev_diag_seq is not None else (steps_to_run - 4)
+    # Берем +3 предыдущих фрейма слева для идеального прогрева сверток EnCodec и кроссфейда
+    prefix_frames = 3 if (total_seq_len - n_extract >= 7) else 0
+    total_extract = n_extract + prefix_frames
+    s_start = total_seq_len - total_extract
 
+    c0 = work_seq[:, 0, s_start - 3 : total_seq_len - 3]
+    c1 = work_seq[:, 1, s_start - 2 : total_seq_len - 2]
+    c2 = work_seq[:, 2, s_start - 1 : total_seq_len - 1]
+    c3 = work_seq[:, 3, s_start     : total_seq_len]
+    ready_audio_codes = torch.stack([c0, c1, c2, c3], dim=1).clamp(0, lm.card - 1)
 
-LMModel.generate = fast_lm_generate
+    new_diag_seq = work_seq[..., -450:].contiguous()
+    return new_diag_seq, ready_audio_codes, prefix_frames
+
 
 ACTIVE_T5_EMBEDS = None
 _orig_t5_forward = T5Conditioner.forward
@@ -382,21 +421,13 @@ T5Conditioner.forward = intercepted_t5_forward
 
 
 def encode_clean_64_t5(t5_cond, prompt_text: str) -> torch.Tensor:
-    """
-    Кодирует концепт в [64, 768] БЕЗ НИ ОДНОГО МЕРТВОГО <pad>-ТОКЕНА!
-    В T5 <pad>-токены не несут информации и забивают 92% внимания Cross-Attention.
-    Мы прогоняем через T5 только реальные токены промпта (attention_mask == 1)
-    и равномерно повторяем их на 64 слота: по свойству softmax это дает 100%
-    точное совпадение с нативным MusicGen и открывает все 64 слота для 5 регионов мозга!
-    """
     text_clean = prompt_text.strip()
     if not text_clean:
-        # Для пустого промпта берем чистый нейтральный токен T5 без 63 <pad>-хвостов
         inp = t5_cond.t5_tokenizer([""], return_tensors='pt', padding=True).to(DEVICE)
         act_emb = t5_cond.t5(**inp).last_hidden_state[0].float()
     else:
         inp = t5_cond.t5_tokenizer([text_clean], return_tensors='pt', padding=True, truncation=True, max_length=MAX_T5_TOKENS).to(DEVICE)
-        act_emb = t5_cond.t5(**inp).last_hidden_state[0].float()  # Только реальные слова [L_act, 768]!
+        act_emb = t5_cond.t5(**inp).last_hidden_state[0].float()
 
     L_act = act_emb.shape[0]
     if L_act == MAX_T5_TOKENS:
@@ -430,16 +461,15 @@ signal.signal(signal.SIGTERM, graceful_shutdown)
 
 
 class AudioCrossfaderGPU:
-    def __init__(self, fade_len=512):
+    def __init__(self, fade_len=640):
         self.fade_len = fade_len
-        self.fade_in = torch.linspace(0.0, 1.0, fade_len, device=DEVICE, dtype=torch.float32)
-        self.fade_out = torch.linspace(1.0, 0.0, fade_len, device=DEVICE, dtype=torch.float32)
+        t = torch.linspace(0.0, 1.0, fade_len, device=DEVICE, dtype=torch.float32)
+        self.fade_in = torch.sin(t * (np.pi * 0.5))
+        self.fade_out = torch.cos(t * (np.pi * 0.5))
         self.overlap = None
 
     def process(self, chunk: torch.Tensor) -> torch.Tensor:
-        peak = torch.max(torch.abs(chunk))
-        if peak > 0.92:
-            chunk = chunk / (peak + 1e-5) * 0.92
+        chunk = torch.tanh(chunk * 0.95)
         t_len = chunk.shape[-1]
         if t_len <= self.fade_len:
             return chunk
@@ -450,25 +480,37 @@ class AudioCrossfaderGPU:
 
 
 def adapt_system(gen_time: float, raw_audio_duration: float, current_speed: float,
-                 current_block: float, user_max_block: float, safety_factor: float,
+                 current_block: float, user_target_block: float, safety_factor: float,
                  queue_sec: float) -> tuple[float, float, float]:
+    """
+    Адаптер супер-реалтайма (поддерживает блоки вплоть до 0.10 сек!):
+    - Стремится опустить current_block до user_target_block (даже если это 0.1с!),
+      но если видеокарта на текущем шаге не вытягивает RTF >= 0.95, плавно
+      увеличивает блок ровно настолько, чтобы удержать непрерывный звук.
+    - Ничего не выкидывает: регулирует current_speed (0.45x .. 1.18x) так, чтобы
+      доигрывать весь буфер и сводить задержку queue_sec к минимуму.
+    """
     gen_time = max(gen_time, 0.001)
     real_rtf = raw_audio_duration / gen_time
 
-    if real_rtf > 1.12 and queue_sec >= 0.4:
-        current_block *= 0.92
-    elif real_rtf < 0.96 or queue_sec < 0.3:
-        current_block *= 1.08
+    if real_rtf >= 1.05 and queue_sec >= 0.25:
+        # Мощности хватает — опускаем размер блока к целевому (вплоть до 0.10 с!)
+        current_block = max(user_target_block, current_block * 0.90)
+    elif real_rtf < 0.88 or queue_sec < 0.15:
+        # Если на 3060 блок 0.1с при контексте 3.6с тяжеловат — чуть поднимаем блок
+        current_block = min(max(user_target_block, 2.4), current_block * 1.08)
+    else:
+        current_block = current_block * 0.85 + user_target_block * 0.15
 
-    current_block = float(np.clip(current_block, 0.6, max(1.0, user_max_block)))
+    current_block = float(np.clip(current_block, 0.10, 4.0))
 
-    target_q = max(0.35, min(1.0, current_block * 0.45))
+    target_q = max(0.20, min(0.80, current_block * 0.50))
     q_error = queue_sec - target_q
 
-    speed_correction = float(np.clip(1.0 + q_error * 0.14, 0.82, 1.18))
+    speed_correction = float(np.clip(1.0 + q_error * 0.15, 0.82, 1.18))
     target_speed = real_rtf * safety_factor * speed_correction
 
-    if 0.96 <= target_speed <= 1.04 and abs(q_error) < 0.25:
+    if 0.96 <= target_speed <= 1.04 and abs(q_error) < 0.20:
         target_speed = 1.0
 
     alpha = 0.25
@@ -489,67 +531,57 @@ def resample_chunk_gpu(wav, speed):
 
 def run_startup_diagnostics(mg: MusicGen, dummy_t5: torch.Tensor):
     global ACTIVE_T5_EMBEDS, _CACHED_TOKENIZED
-    print("\n" + "=" * 88)
-    print("🔬 [ДИАГНОСТИКА MUSICGEN НА GPU: 17.4 ms/step + CLEAN 64-TOKEN T5]")
-    print("=" * 88)
+    print("\n" + "=" * 90)
+    print("🔬 [ДИАГНОСТИКА MUSICGEN: БЕСШОВНЫЙ ДИАГОНАЛЬНЫЙ СТРИМ (БЛОКИ ОТ 0.1с ДО 2.4с)]")
+    print("=" * 90)
 
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         free_b, total_b = torch.cuda.mem_get_info(0)
-        free_mb = free_b / (1024**2)
-        total_mb = total_b / (1024**2)
-        print(f"🖥️  GPU: {gpu_name} | Свободно VRAM: {free_mb:.0f} МБ / {total_mb:.0f} МБ")
+        print(f"🖥️  GPU: {gpu_name} | Свободно VRAM: {free_b / (1024**2):.0f} МБ / {total_b / (1024**2):.0f} МБ")
 
     ACTIVE_T5_EMBEDS = dummy_t5.to(DEVICE)
     set_efficient_attention_backend('torch')
     _CACHED_TOKENIZED = None
 
-    with torch.inference_mode():
-        mg.set_generation_params(duration=2.5, cfg_coef=1.0, use_sampling=True, top_k=250, temperature=1.0)
-        _, warm_tokens = mg.generate([""], progress=False, return_tokens=True)
-        _ = mg.compression_model.decode(warm_tokens[..., -40:], None)
+    attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
+    with torch.inference_mode(), mg.autocast:
+        diag_seq, codes, _ = step_continuous_diagonal_stream(mg.lm, None, attributes, gen_frames=185, ctx_frames=180)
+        _ = mg.compression_model.decode(codes[..., -20:], None)
         if DEVICE.type == 'cuda':
             torch.cuda.synchronize()
 
     print(f"{'Режим (Block / Context)':<28} | {'CtxТок':<6} | {'Шагов':<6} | {'LM Loop':<9} | {'1 Шаг':<8} | {'EnCodec':<7} | {'ЧИСТЫЙ RTF'}")
-    print("-" * 88)
+    print("-" * 90)
 
-    for b_sec, c_sec in [(1.2, 0.4), (1.8, 0.4), (2.4, 0.4), (2.4, 1.2)]:
-        ctx_tokens = max(1, int(round(c_sec * FRAME_RATE)))
-        prompt_tokens = warm_tokens[..., -ctx_tokens:]
-        gen_tokens = max(1, int(round(b_sec * FRAME_RATE)))
-        total_tokens = prompt_tokens.shape[-1] + gen_tokens
-        total_dur = total_tokens / float(FRAME_RATE)
-
-        mg.set_generation_params(duration=total_dur, cfg_coef=1.0, use_sampling=True, top_k=250, temperature=1.0)
-        attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
+    for b_sec, c_sec in [(0.1, 3.6), (0.2, 3.6), (0.5, 3.6), (1.2, 3.6), (1.8, 2.4)]:
+        gen_f = max(5, int(round(b_sec * FRAME_RATE)))
+        ctx_f = max(10, int(round(c_sec * FRAME_RATE)))
 
         if DEVICE.type == 'cuda':
             torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-        with torch.inference_mode():
-            with mg.autocast:
-                out_tokens = mg.lm.generate(prompt_tokens, attributes, max_gen_len=total_tokens, **mg.generation_params)
-
+        with torch.inference_mode(), mg.autocast:
+            diag_seq, codes, pfx = step_continuous_diagonal_stream(
+                mg.lm, diag_seq, attributes, gen_frames=gen_f, ctx_frames=ctx_f
+            )
             if DEVICE.type == 'cuda':
                 torch.cuda.synchronize()
             t_enc0 = time.perf_counter()
-            new_tokens = out_tokens[..., prompt_tokens.shape[-1]:]
-            tokens_to_decode = out_tokens[..., -(new_tokens.shape[-1] + 2):]
-            decoded_audio = mg.compression_model.decode(tokens_to_decode, None)
-            new_chunk = decoded_audio[..., 1280:]
+            decoded_audio = mg.compression_model.decode(codes, None)
+            new_chunk = decoded_audio[..., 1280:] if pfx >= 2 else decoded_audio
             if DEVICE.type == 'cuda':
                 torch.cuda.synchronize()
             enc_ms = (time.perf_counter() - t_enc0) * 1000.0
 
         total_s = time.perf_counter() - t0
-        audio_s = new_chunk.shape[-1] / float(SAMPLE_RATE)
+        audio_s = gen_f / float(FRAME_RATE)
         rtf = audio_s / total_s
 
         print(
-            f"Block {b_sec:3.1f}s / Ctx {c_sec:4.2f}s     | "
-            f"{ctx_tokens:<6d} | "
+            f"Block {b_sec:4.2f}s / Ctx {c_sec:4.2f}s    | "
+            f"{ctx_f:<6d} | "
             f"{LAST_PROFILE['steps_count']:<6d} | "
             f"{LAST_PROFILE['lm_loop_ms']:6.1f} ms | "
             f"{LAST_PROFILE['per_step_ms']:5.2f} ms | "
@@ -557,7 +589,7 @@ def run_startup_diagnostics(mg: MusicGen, dummy_t5: torch.Tensor):
             f"👉 {rtf:5.2f}x"
         )
 
-    print("=" * 88 + "\n", flush=True)
+    print("=" * 90 + "\n", flush=True)
 
 
 def main():
@@ -570,7 +602,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print(f"🎵 ИНИЦИАЛИЗАЦИЯ MUSICGEN НА {DEVICE} (FP16, 17.4ms/step, CLEAN T5)...")
+    print(f"🎵 ИНИЦИАЛИЗАЦИЯ MUSICGEN НА {DEVICE} (CONTINUOUS DIAGONAL STREAM)...")
     print("=" * 70)
 
     set_efficient_attention_backend('torch')
@@ -592,7 +624,6 @@ def main():
     t5_cond = mg.lm.condition_provider.conditioners['description']
     t5_mod = t5_cond.t5
     raw_emb = t5_mod.shared.weight.detach().to(torch.float32)
-    # Вычисляем естественную норму токенов T5 (~3.2) и главные оси словаря (32 128 токенов)
     mean_tok_norm = float(torch.norm(raw_emb, p=2, dim=-1).mean().item())
     norm_emb = raw_emb / (torch.norm(raw_emb, dim=-1, keepdim=True) + 1e-7)
     _, _, V_all = torch.pca_lowrank(norm_emb, q=120)
@@ -606,10 +637,10 @@ def main():
     if args.benchmark:
         run_startup_diagnostics(mg, empty_embed_t)
 
-    crossfader = AudioCrossfaderGPU(fade_len=512)
-    current_tokens = None
+    crossfader = AudioCrossfaderGPU(fade_len=640)
+    current_diag_seq = None
     current_speed = 1.0
-    current_block = 2.0
+    current_block = 1.2
 
     active_listener = Listener(('localhost', args.port), authkey=b'music')
     print(f"🚀 [MUSICGEN-SERVER] Слушаю порт {args.port}...")
@@ -619,7 +650,7 @@ def main():
         try:
             active_conn = active_listener.accept()
             print("🔗 [MUSICGEN-SERVER] Клиент подключен!")
-            current_tokens = None
+            current_diag_seq = None
             crossfader.overlap = None
 
             while True:
@@ -650,11 +681,10 @@ def main():
                 elif cmd == 'generate_step':
                     t0 = time.perf_counter()
                     embeds_np = msg.get('t5_embeds')
-                    user_max_block = float(msg.get('block_sec', 2.4))
-                    context_sec = float(msg.get('context_sec', 0.6))
+                    user_target_block = float(msg.get('block_sec', 1.2))
+                    context_sec = float(msg.get('context_sec', 3.6))
                     temp = float(msg.get('temp', 1.0))
                     top_k = int(msg.get('top_k', 250))
-                    cfg_coef = float(msg.get('cfg_coef', 1.0))
                     safety_factor = float(msg.get('safety_factor', 1.0))
                     queue_sec = float(msg.get('queue_sec', 0.8))
                     is_reset = bool(msg.get('is_reset', False))
@@ -662,74 +692,42 @@ def main():
                     if embeds_np is not None:
                         ACTIVE_T5_EMBEDS = torch.from_numpy(embeds_np).to(DEVICE)
 
-                    with torch.inference_mode():
-                        if is_reset or current_tokens is None:
-                            crossfader.overlap = None
-                            init_dur = max(1.8, current_block + 0.08)
-                            mg.set_generation_params(
-                                duration=init_dur, cfg_coef=cfg_coef,
-                                use_sampling=True, top_k=top_k, temperature=temp
-                            )
-                            _, raw_tokens = mg.generate([""], progress=False, return_tokens=True)
-                            # Отрезаем 3 краевых токена DelayPattern, где 0-й кодбук уже закрыт маской!
-                            current_tokens = raw_tokens[..., :-3] if raw_tokens.shape[-1] > 6 else raw_tokens
-                            with torch.no_grad():
-                                init_audio = mg.compression_model.decode(current_tokens, None)
-                            clean = crossfader.process(init_audio)
-                            pcm = clean[0, 0].cpu().float().numpy()
-                            gen_time = time.perf_counter() - t0
-                            raw_audio_len = len(pcm) / float(SAMPLE_RATE)
-                            real_rtf = raw_audio_len / max(gen_time, 1e-5)
-                        else:
-                            max_avail_ctx = current_tokens.shape[-1]
-                            ctx_tokens = max(5, min(max_avail_ctx, int(round(context_sec * FRAME_RATE))))
-                            prompt_tokens = current_tokens[..., -ctx_tokens:]
+                    if is_reset:
+                        current_diag_seq = None
+                        crossfader.overlap = None
 
-                            gen_tokens = max(25, int(round((current_block * FRAME_RATE) / 10.0)) * 10)
-                            # Генерируем +3 шага сверху и отрезаем их после revert_pattern_sequence,
-                            # чтобы в current_tokens и в декодере ВСЕ 4 кодбука были 100% заполнены!
-                            total_tokens = prompt_tokens.shape[-1] + gen_tokens + 3
-                            total_duration_sec = total_tokens / float(FRAME_RATE)
+                    attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
+                    gen_frames = max(5, int(round(current_block * FRAME_RATE)))
+                    ctx_frames = max(10, int(round(context_sec * FRAME_RATE)))
 
-                            mg.set_generation_params(
-                                duration=total_duration_sec, cfg_coef=cfg_coef,
-                                use_sampling=True, top_k=top_k, temperature=temp
-                            )
-                            attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
-                            with mg.autocast:
-                                out_tokens = mg.lm.generate(
-                                    prompt_tokens, attributes,
-                                    max_gen_len=total_tokens, **mg.generation_params
-                                )
+                    with torch.inference_mode(), mg.autocast:
+                        current_diag_seq, ready_codes, pfx = step_continuous_diagonal_stream(
+                            mg.lm, current_diag_seq, attributes,
+                            gen_frames=gen_frames, ctx_frames=ctx_frames,
+                            temp=temp, top_k=top_k
+                        )
 
-                            if DEVICE.type == 'cuda':
-                                torch.cuda.synchronize()
-                            t_enc = time.perf_counter()
+                        if DEVICE.type == 'cuda':
+                            torch.cuda.synchronize()
+                        t_enc = time.perf_counter()
+                        decoded_audio = mg.compression_model.decode(ready_codes, None)
+                        # Отрезаем 2 токена (1280 сэмплов) левого прогрева рецептивного поля EnCodec,
+                        # оставляя ровно 1 токен (640 сэмплов) для фазово-точного кроссфейда!
+                        new_chunk = decoded_audio[..., 1280:] if pfx >= 2 else decoded_audio
+                        if DEVICE.type == 'cuda':
+                            torch.cuda.synchronize()
+                        LAST_PROFILE["encodec_ms"] = (time.perf_counter() - t_enc) * 1000.0
 
-                            # Отсекаем 3 неполных краевых токена DelayPattern справа!
-                            valid_out_tokens = out_tokens[..., :-3]
-                            current_tokens = valid_out_tokens[..., -400:]
-                            new_tokens = valid_out_tokens[..., prompt_tokens.shape[-1]:]
-                            tokens_to_decode = valid_out_tokens[..., -(new_tokens.shape[-1] + 2):]
+                        raw_audio_len = gen_frames / float(FRAME_RATE)
+                        gen_time = time.perf_counter() - t0
 
-                            with torch.no_grad():
-                                decoded_audio = mg.compression_model.decode(tokens_to_decode, None)
-
-                            new_chunk = decoded_audio[..., 1280:]
-                            if DEVICE.type == 'cuda':
-                                torch.cuda.synchronize()
-                            LAST_PROFILE["encodec_ms"] = (time.perf_counter() - t_enc) * 1000.0
-
-                            raw_audio_len = new_chunk.shape[-1] / float(SAMPLE_RATE)
-                            gen_time = time.perf_counter() - t0
-
-                            current_speed, current_block, real_rtf = adapt_system(
-                                gen_time, raw_audio_len, current_speed, current_block,
-                                user_max_block, safety_factor, queue_sec
-                            )
-                            processed_gpu = resample_chunk_gpu(new_chunk, current_speed)
-                            clean = crossfader.process(processed_gpu)
-                            pcm = clean[0, 0].cpu().float().numpy()
+                        current_speed, current_block, real_rtf = adapt_system(
+                            gen_time, raw_audio_len, current_speed, current_block,
+                            user_target_block, safety_factor, queue_sec
+                        )
+                        processed_gpu = resample_chunk_gpu(new_chunk, current_speed)
+                        clean = crossfader.process(processed_gpu)
+                        pcm = clean[0, 0].cpu().float().numpy()
 
                     chunk_idx += 1
                     if not args.quiet_step:
@@ -737,7 +735,7 @@ def main():
                         actual_ctx_s = LAST_PROFILE.get('ctx_tokens', 0) / float(FRAME_RATE)
                         print(
                             f"⏱️ [Чанк #{chunk_idx:03d}] RTF: {real_rtf:4.2f}x | Speed: {current_speed:4.2f}x | "
-                            f"AutoBlock: {current_block:.2f}s (Ctx:{actual_ctx_s:.2f}s, Buf:{queue_sec:.1f}s) | "
+                            f"AutoBlock: {current_block:.2f}s (Target:{user_target_block:.2f}s, Ctx:{actual_ctx_s:.2f}s, Buf:{queue_sec:.1f}s) | "
                             f"Шагов: {LAST_PROFILE['steps_count']} ({LAST_PROFILE['per_step_ms']:.2f} мс/шаг) | "
                             f"LM: {LAST_PROFILE['lm_loop_ms']:.0f}мс | EnCodec: {LAST_PROFILE['encodec_ms']:.0f}мс | FreeVRAM: {free_mb:.0f}МБ",
                             flush=True
@@ -753,7 +751,7 @@ def main():
                     })
 
                 elif cmd == 'flush':
-                    current_tokens = None
+                    current_diag_seq = None
                     crossfader.overlap = None
                     active_conn.send({'status': 'ok'})
 

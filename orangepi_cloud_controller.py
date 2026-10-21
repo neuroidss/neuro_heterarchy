@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS ORANGE PI HTTPS CLOUD ORCHESTRATOR v3.1 (WITH SESSION MANAGER & VIEWER)
+NEUROCANVAS ORANGE PI HTTPS CLOUD ORCHESTRATOR v3.2 (3-MODE GPU WORKLOAD SWITCHER)
 ===================================================================================
-- Исправлен таймаут SSH (фон запускается через nohup ... </dev/null >/dev/null 2>&1 &
-  и возвращает управление за 0.15 сек).
+- 3 НЕЗАВИСИМЫХ РЕЖИМА НАГРУЗКИ RTX 4090 (Переключаются на лету за 2 сек по SSH):
+  1) 'vision' (ПО УМОЛЧАНИЮ): Только Диффузия (brain-server + neuro-canvas + web-gateway).
+     MusicGen полностью остановлен и занимает 0 МБ VRAM и 0% GPU.
+  2) 'music'  (ТОЛЬКО МУЗЫКА): Диффузия полностью остановлена (0 МБ VRAM), работают
+     только musicgen-server + neuro-musicgen + web-gateway. 100% RTX 4090 отдается
+     под генерацию звука с блоком 0.1с и контекстом 3.6с!
+  3) 'both'   (ДИФФУЗИЯ + МУЗЫКА ВМЕСТЕ): Работают все 5 контейнеров синхронно.
+- Исправлен таймаут SSH (фон запускается через nohup ... </dev/null >/dev/null 2>&1 &).
 - Полноценный МЕНЕДЖЕР СЕССИЙ на Orange Pi (./downloaded_sessions/):
-  * Скачивает каждую сессию отдельно (video_timeline.mp4, eeg_raw.npz, events.csv,
-    manifest.json — БЕЗ тысяч мелких картинок frames/*.jpg).
-  * Автоматически запускает analyze_session.py и строит график синхронизации ЭЭГ.
-  * Позволяет прямо в браузере (даже когда облако полностью удалено в 0 ₽/ч!)
-    смотреть видео сессии, график ЭЭГ и скачивать .tar.gz любой выбранной сессии.
+  скачивает видео 1:1, ЭЭГ, WAV-дорожку музыки и CSV без папки frames/.
 ===================================================================================
 """
 
@@ -104,6 +106,7 @@ DEPLOY_SHELL_COMMANDS = """#!/bin/bash
 exec > /var/log/neuro_deploy.log 2>&1
 set -x
 export DEBIAN_FRONTEND=noninteractive
+WORKLOAD_MODE="__WORKLOAD_MODE__"
 
 echo "=== [1/5] Проверка Docker и NVIDIA Container Runtime ==="
 if ! command -v docker &> /dev/null; then
@@ -148,20 +151,32 @@ if [ ! -f "cert.pem" ] || [ ! -f "key.pem" ]; then
     openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=neurocanvas.cloud"
 fi
 
-echo "=== [4/5] Проверка готового образа neuroidss/neuro_heterarchy_diffusion:latest ==="
+echo "=== [4/5] Проверка Docker-образов для режима: $WORKLOAD_MODE ==="
 if ! docker image inspect neuroidss/neuro_heterarchy_diffusion:latest &> /dev/null; then
     docker pull neuroidss/neuro_heterarchy_diffusion:latest
-else
-    echo "Образ уже сохранен на SSD-диске!"
 fi
 
-echo "=== [5/5] Очистка старых контейнеров и чистый запуск docker-compose.yml (--no-build) ==="
-docker compose -f docker-compose.yml down --remove-orphans || true
+if [ "$WORKLOAD_MODE" = "music" ] || [ "$WORKLOAD_MODE" = "both" ]; then
+    if ! docker image inspect neuroidss/neuro_heterarchy_musicgen:latest &> /dev/null; then
+        docker pull neuroidss/neuro_heterarchy_musicgen:latest
+    fi
+fi
+
+echo "=== [5/5] Запуск контейнеров в режиме [$WORKLOAD_MODE] ==="
+docker compose -f docker-compose.yml --profile vision --profile music down --remove-orphans || true
 docker rm -f neuro_brain_server neuro_web_gateway neuro_canvas_engine neuro_musicgen_server neuro_musicgen_engine 2>/dev/null || true
 
-cat << 'EOF' > /etc/systemd/system/neuro-heterarchy.service
+if [ "$WORKLOAD_MODE" = "music" ]; then
+    START_CMD="/usr/bin/docker compose -f docker-compose.yml --profile music up -d --no-build --no-deps web-gateway musicgen-server neuro-musicgen"
+elif [ "$WORKLOAD_MODE" = "both" ]; then
+    START_CMD="/usr/bin/docker compose -f docker-compose.yml --profile vision --profile music up -d --no-build --remove-orphans"
+else
+    START_CMD="/usr/bin/docker compose -f docker-compose.yml --profile vision up -d --no-build --no-deps web-gateway brain-server neuro-canvas"
+fi
+
+cat << EOF > /etc/systemd/system/neuro-heterarchy.service
 [Unit]
-Description=NeuroCanvas RTX 4090 Heterarchy Stack (Zero-Build Direct Mount)
+Description=NeuroCanvas RTX 4090 Heterarchy Stack (Mode: $WORKLOAD_MODE)
 After=docker.service network-online.target
 Requires=docker.service
 
@@ -172,9 +187,9 @@ WorkingDirectory=/opt/neuro_heterarchy
 ExecStartPre=-/usr/bin/git fetch --all
 ExecStartPre=-/usr/bin/git reset --hard origin/HEAD
 ExecStartPre=-/bin/sed -i 's|hf_cache:/root/.cache/huggingface|/opt/hf_cache:/root/.cache/huggingface|g' docker-compose.yml
-ExecStartPre=-/usr/bin/docker rm -f neuro_brain_server neuro_web_gateway neuro_canvas_engine
-ExecStart=/usr/bin/docker compose -f docker-compose.yml up -d --no-build --remove-orphans
-ExecStop=/usr/bin/docker compose -f docker-compose.yml stop
+ExecStartPre=-/usr/bin/docker rm -f neuro_brain_server neuro_web_gateway neuro_canvas_engine neuro_musicgen_server neuro_musicgen_engine
+ExecStart=$START_CMD
+ExecStop=/usr/bin/docker compose -f docker-compose.yml --profile vision --profile music stop
 ExecStopPost=/bin/sync
 TimeoutStartSec=0
 
@@ -184,14 +199,14 @@ EOF
 
 systemctl daemon-reload
 systemctl enable neuro-heterarchy.service
-docker compose -f docker-compose.yml up -d --no-build --remove-orphans
+eval "$START_CMD"
 sync
-echo "=== [ГОТОВО] ВСЕ КОНТЕЙНЕРЫ ЗАПУЩЕНЫ БЕЗ БИЛДА! ==="
+echo "=== [ГОТОВО] СТЕК ЗАПУЩЕН В РЕЖИМЕ [$WORKLOAD_MODE]! ==="
 """
 
 
-def build_cloud_init_script(ssh_pub_key: str, git_repo: str) -> str:
-    body = DEPLOY_SHELL_COMMANDS.replace("__GIT_REPO__", git_repo)
+def build_cloud_init_script(ssh_pub_key: str, git_repo: str, workload_mode: str = "vision") -> str:
+    body = DEPLOY_SHELL_COMMANDS.replace("__GIT_REPO__", git_repo).replace("__WORKLOAD_MODE__", workload_mode)
     script = f"""#!/bin/bash
 if [ -d "/home/ubuntu" ]; then
     mkdir -p /home/ubuntu/.ssh
@@ -257,24 +272,23 @@ class CustomPipelineRunner:
         elif self.override_mode == "always_add":
             mode = "add"
 
+        w_mode = self.mgr.workload_mode
         if mode == "set":
-            res = self._vm_api("/api/world/concepts/set", "POST", {"concepts": target_concepts})
-            if not res:
-                current_pool = self._vm_api("/api/world/concepts", "GET").get("concepts", [])
-                for c in current_pool:
-                    if c not in target_concepts:
-                        self._vm_api("/api/world/concepts/remove", "POST", {"concept": c})
-                        time.sleep(0.04)
-                for c in target_concepts:
-                    if c not in current_pool:
-                        self._vm_api("/api/world/concepts/add", "POST", {"concept": c})
-                        time.sleep(0.04)
+            if w_mode in ("vision", "both"):
+                self._vm_api("/api/world/concepts/set", "POST", {"concepts": target_concepts})
+            if w_mode in ("music", "both"):
+                self._vm_api("/api/music/concepts/set", "POST", {"concepts": target_concepts})
         else:
-            current_pool = self._vm_api("/api/world/concepts", "GET").get("concepts", [])
-            for c in target_concepts:
-                if c not in current_pool:
-                    self._vm_api("/api/world/concepts/add", "POST", {"concept": c})
-                    time.sleep(0.04)
+            if w_mode in ("vision", "both"):
+                cur_v = self._vm_api("/api/world/concepts", "GET").get("concepts", [])
+                for c in target_concepts:
+                    if c not in cur_v:
+                        self._vm_api("/api/world/concepts/add", "POST", {"concept": c})
+            if w_mode in ("music", "both"):
+                cur_m = self._vm_api("/api/music/concepts", "GET").get("concepts", [])
+                for c in target_concepts:
+                    if c not in cur_m:
+                        self._vm_api("/api/music/concepts/add", "POST", {"concept": c})
 
         self.status_text = f"Активна [{stage.get('name', 'Фаза')}]: {', '.join(target_concepts[:4])}"
 
@@ -352,6 +366,11 @@ class OpenStackNeuroManager:
         self.net_substr = NETWORK_SUBSTR
         self.vol_type_substr = VOL_TYPE_SUBSTR
 
+        # Режим нагрузки RTX 4090 по умолчанию: 'vision' (только Диффузия, MusicGen выключен)
+        self.workload_mode = os.environ.get("NEURO_WORKLOAD", "vision").strip().lower()
+        if self.workload_mode not in ("vision", "music", "both"):
+            self.workload_mode = "vision"
+
         self.status_msg = "Инициализация..."
         self.vm_ip = None
         self.vm_status = "UNKNOWN"
@@ -368,7 +387,6 @@ class OpenStackNeuroManager:
         threading.Thread(target=self._poll_ssh_logs_loop, daemon=True).start()
 
     def get_local_sessions_catalog(self) -> list[dict]:
-        """Возвращает список всех скачанных на Orange Pi сессий с их метаданными для Менеджера Сессий"""
         catalog = []
         for d in sorted(LOCAL_SESSIONS.iterdir(), reverse=True):
             if d.is_dir() and (d / "manifest.json").exists():
@@ -379,6 +397,7 @@ class OpenStackNeuroManager:
                     has_tar = (LOCAL_SESSIONS / tar_name).exists()
                     has_plot = (d / "verified_sync_alignment.png").exists()
                     has_vid = (d / "video_timeline.mp4").exists()
+                    has_wav = (d / "music_timeline.wav").exists()
                     catalog.append({
                         "name": d.name,
                         "duration_sec": round(float(man.get("duration_seconds", 0.0)), 1),
@@ -388,7 +407,8 @@ class OpenStackNeuroManager:
                         "created_at": man.get("created_at", ""),
                         "tar_file": tar_name if has_tar else "",
                         "has_plot": has_plot,
-                        "has_video": has_vid
+                        "has_video": has_vid,
+                        "has_audio": has_wav
                     })
                 except Exception:
                     pass
@@ -448,19 +468,6 @@ class OpenStackNeuroManager:
             region_name=self.region,
             verify=False
         )
-
-    def set_credentials(self, username: str, password: str, net_substr: str = "", vol_type: str = ""):
-        if username.strip():
-            self.username = username.strip()
-        if password.strip():
-            self.password = password.strip()
-            self.project_id = ""
-        if net_substr.strip():
-            self.net_substr = net_substr.strip()
-        if vol_type.strip():
-            self.vol_type_substr = vol_type.strip()
-        self.auth_ok = False
-        self.status_msg = "🔄 Применение новых настроек..."
 
     def _extract_ips(self, server) -> tuple[str | None, str | None]:
         pub_ip, priv_ip = None, None
@@ -600,9 +607,9 @@ class OpenStackNeuroManager:
                     if srv.status in ("SHELVED", "SHELVED_OFFLOADED"):
                         self.vm_status = f"❄️ В ПАУЗЕ ({srv.status} — GPU 0 ₽/ч)"
                     elif gw_ok:
-                        self.vm_status = "🟢 ГОТОВА К РАБОТЕ (RTX 4090 АКТИВНА)"
+                        self.vm_status = f"🟢 ГОТОВА К РАБОТЕ (RTX 4090 | Режим: {self.workload_mode.upper()})"
                         if not self.is_busy:
-                            self.status_msg = f"🟢 Студия активна: https://{self.vm_ip}:8080"
+                            self.status_msg = f"🟢 Студия активна [{self.workload_mode.upper()}]: https://{self.vm_ip}:8080"
                     else:
                         ip_tag = f"Белый IP: {pub_ip}" if pub_ip else f"Серый IP: {priv_ip}"
                         self.vm_status = f"⏳ СТАРТ КОНТЕЙНЕРОВ ({srv.status}) | {ip_tag}"
@@ -626,16 +633,15 @@ class OpenStackNeuroManager:
             ip = self.vm_ip
             if ip and not is_private_ip(ip) and "SHELVED" not in self.vm_status:
                 ssh_cmd = (
-                    "echo '=== 1. КОНТЕЙНЕРЫ DOCKER & ЗАПИСАННЫЕ СЕССИИ НА VM ==='; "
+                    "echo '=== 1. АКТИВНЫЕ КОНТЕЙНЕРЫ DOCKER & СЕССИИ НА RTX 4090 ==='; "
                     "sudo docker ps -a --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null || echo 'Docker еще устанавливается...'; "
                     "echo 'Папка сессий на VM:'; ls -lh /opt/neuro_heterarchy/sessions 2>/dev/null || echo 'Пусто'; "
-                    "echo 'Кэш весов (/opt/hf_cache):'; sudo du -sh /opt/hf_cache 2>/dev/null || true; "
-                    "echo ''; echo '=== 2. GPU NVIDIA-SMI ==='; "
+                    "echo ''; echo '=== 2. GPU NVIDIA-SMI (ПАМЯТЬ И ЗАГРУЗКА) ==='; "
                     "nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || echo 'GPU инициализируется...'; "
-                    "echo ''; echo '=== 3. ЛОГИ КОНТЕЙНЕРОВ (ПОСЛЕДНИЕ СТРОКИ) ==='; "
-                    "cd /opt/neuro_heterarchy 2>/dev/null && sudo docker compose -f docker-compose.yml logs --tail=12 2>/dev/null || echo 'Контейнеры еще не запущены'; "
-                    "echo ''; echo '=== 4. ЖИВОЙ ЛОГ УСТАНОВКИ (/var/log/neuro_deploy.log) ==='; "
-                    "sudo tail -n 16 /var/log/neuro_deploy.log 2>/dev/null || echo 'Ожидание лога...'"
+                    "echo ''; echo '=== 3. ЛОГИ АКТИВНЫХ КОНТЕЙНЕРОВ ==='; "
+                    "cd /opt/neuro_heterarchy 2>/dev/null && sudo docker compose --profile vision --profile music logs --tail=12 2>/dev/null || echo 'Контейнеры еще не запущены'; "
+                    "echo ''; echo '=== 4. ЖИВОЙ ЛОГ ОРКЕСТРАЦИИ (/var/log/neuro_deploy.log) ==='; "
+                    "sudo tail -n 15 /var/log/neuro_deploy.log 2>/dev/null || echo 'Ожидание лога...'"
                 )
                 ok, out = self._run_ssh_ubuntu(ip, ssh_cmd, timeout=8)
                 self.endpoints_status["ssh_22"] = ok
@@ -646,16 +652,31 @@ class OpenStackNeuroManager:
                 self.remote_logs = "Виртуалка выключена или в паузе Shelve (SSH недоступен, когда VM на паузе)..."
             time.sleep(3.5)
 
+    def switch_workload_mode(self, mode: str):
+        """
+        Переключает режим нагрузки RTX 4090 ('vision' | 'music' | 'both'):
+        - 'vision': гасит MusicGen (0 МБ VRAM), оставляет только Диффузию + Web-шлюз;
+        - 'music' : гасит Диффузию (0 МБ VRAM), отдает 100% RTX 4090 под MusicGen + Web-шлюз;
+        - 'both'  : запускает и Диффузию, и MusicGen параллельно.
+        """
+        if mode not in ("vision", "music", "both"):
+            return
+        self.workload_mode = mode
+        if not self.vm_ip or is_private_ip(self.vm_ip) or "SHELVED" in self.vm_status:
+            self.status_msg = f"🎛️ Выбран режим [{mode.upper()}]. Он будет применен при запуске RTX 4090!"
+            return
+        self.repair_or_git_pull_on_live_vm()
+
     def repair_or_git_pull_on_live_vm(self):
-        """
-        Отправляет скрипт на VM и запускает его через nohup с закрытием дескрипторов
-        (</dev/null >/dev/null 2>&1 &), чтобы SSH возвращался мгновенно за 0.15 сек без таймаута!
-        """
         if not self.vm_ip or is_private_ip(self.vm_ip) or "SHELVED" in self.vm_status:
             self.status_msg = "❌ Сначала разбудите виртуалку (в режиме Shelve SSH выключен)!"
             return
-        self.status_msg = f"🔄 Обновление с GitHub (git pull) и чистый перезапуск контейнеров на {self.vm_ip}..."
-        remote_script = DEPLOY_SHELL_COMMANDS.replace("__GIT_REPO__", GIT_REPO_URL)
+        self.status_msg = f"🔄 Применение режима [{self.workload_mode.upper()}] и git pull на {self.vm_ip}..."
+        remote_script = (
+            DEPLOY_SHELL_COMMANDS
+            .replace("__GIT_REPO__", GIT_REPO_URL)
+            .replace("__WORKLOAD_MODE__", self.workload_mode)
+        )
         b64_cmd = base64.b64encode(remote_script.encode("utf-8")).decode("utf-8")
 
         launch_cmd = (
@@ -665,20 +686,16 @@ class OpenStackNeuroManager:
         )
         ok, err = self._run_ssh_ubuntu(self.vm_ip, launch_cmd, timeout=10)
         if ok:
-            self.status_msg = f"✅ Код с GitHub обновлен на {self.vm_ip} (без билда)! Смотрите лог ниже..."
+            self.status_msg = f"✅ Режим [{self.workload_mode.upper()}] активирован на {self.vm_ip}! Смотрите лог контейнеров ниже..."
         else:
             self.status_msg = f"⚠️ Ошибка SSH к ubuntu@{self.vm_ip}: {err}"
 
     def sync_sessions_from_vm(self) -> bool:
-        """
-        Скачивает все сессии с 4090 на Orange Pi (./downloaded_sessions/),
-        создает по-сессионные архивы .tar.gz (без папки frames/) и строит график analyze_session.py!
-        """
         if not self.vm_ip or is_private_ip(self.vm_ip):
             self.status_msg = "❌ Нет активного белого IP у виртуалки для скачивания"
             return False
         if "SHELVED" in self.vm_status:
-            self.status_msg = "❌ Виртуалка сейчас в паузе Shelve! Сначала разбудите её кнопкой '1. Запустить', чтобы забрать файлы."
+            self.status_msg = "❌ Виртуалка сейчас в паузе Shelve! Сначала разбудите её кнопкой '1. Запустить'."
             return False
 
         self.status_msg = f"🔍 Поиск записанных сессий на ubuntu@{self.vm_ip}..."
@@ -688,7 +705,7 @@ class OpenStackNeuroManager:
             self.status_msg = f"❌ Ошибка SSH при проверке сессий: {out}"
             return False
 
-        session_names = [line.strip() for line in out.splitlines() if line.strip().startswith("session") or line.strip()]
+        session_names = [line.strip() for line in out.splitlines() if line.strip()]
         if not session_names:
             self.status_msg = "ℹ️ Папка /opt/neuro_heterarchy/sessions на VM пуста."
             return False
@@ -697,7 +714,7 @@ class OpenStackNeuroManager:
         for s_name in session_names:
             remote_tar = f"/tmp/{s_name}.tar.gz"
             local_tar = LOCAL_SESSIONS / f"{s_name}.tar.gz"
-            self.status_msg = f"📥 Упаковка и скачивание сессии '{s_name}' (без картинок frames/)..."
+            self.status_msg = f"📥 Упаковка и скачивание сессии '{s_name}' (Видео + WAV + ЭЭГ + CSV)..."
 
             pack_one = (
                 f"sudo tar --exclude='frames' --exclude='*.jpg' -czf {remote_tar} -C /opt/neuro_heterarchy/sessions {s_name} && "
@@ -719,13 +736,12 @@ class OpenStackNeuroManager:
             r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60)
             if r.returncode == 0 and local_tar.exists():
                 subprocess.run(["tar", "-xzf", str(local_tar), "-C", str(LOCAL_SESSIONS)], check=False)
-                # Автоматически запускаем analyze_session.py для генерации графика синхронизации ЭЭГ и видео!
                 s_dir = LOCAL_SESSIONS / s_name
                 if s_dir.exists() and Path("analyze_session.py").exists():
                     subprocess.run([sys.executable, "analyze_session.py", str(s_dir)], check=False)
                 downloaded_now += 1
 
-        self.status_msg = f"✅ Синхронизировано сессий на Orange Pi: {downloaded_now} шт. Доступны в Менеджере Сессий ниже!"
+        self.status_msg = f"✅ Синхронизировано сессий на Orange Pi: {downloaded_now} шт."
         return downloaded_now > 0
 
     def _safe_flush_vm_before_stop(self):
@@ -733,7 +749,7 @@ class OpenStackNeuroManager:
             self.status_msg = "💾 Остановка контейнеров и сброс кэша весов на SSD (sync)..."
             self._run_ssh_ubuntu(
                 self.vm_ip,
-                "cd /opt/neuro_heterarchy && sudo docker compose -f docker-compose.yml stop && sudo sync",
+                "cd /opt/neuro_heterarchy && sudo docker compose --profile vision --profile music stop && sudo sync",
                 timeout=20
             )
 
@@ -751,12 +767,12 @@ class OpenStackNeuroManager:
 
             srv = conn.compute.find_server(SERVER_NAME, ignore_missing=True)
             if srv and srv.status in ("SHELVED", "SHELVED_OFFLOADED"):
-                self.status_msg = "🚀 Пробуждение RTX 4090 из паузы Shelve..."
+                self.status_msg = f"🚀 Пробуждение RTX 4090 из паузы Shelve (Режим: {self.workload_mode.upper()})..."
                 conn.compute.unshelve_server(srv)
                 srv = conn.compute.wait_for_server(srv, status="ACTIVE", interval=3, wait=300)
                 pub_ip, priv_ip = self._extract_ips(srv)
                 self.vm_ip = pub_ip or priv_ip
-                self.status_msg = f"🟢 Сервер разбужен ({self.vm_ip})! Ждем SSH и обновляем с GitHub..."
+                self.status_msg = f"🟢 Сервер разбужен ({self.vm_ip})! Ждем SSH и запускаем режим [{self.workload_mode.upper()}]..."
                 for _ in range(25):
                     time.sleep(3.0)
                     ok, _ = self._run_ssh_ubuntu(self.vm_ip, "echo READY", timeout=4)
@@ -794,11 +810,11 @@ class OpenStackNeuroManager:
 
                 vol = conn.block_storage.create_volume(**vol_kwargs)
                 conn.block_storage.wait_for_status(vol, status="available", failures=["error"], interval=2, wait=600)
-                self.status_msg = f"✅ SSD-том создан! Запускаем RTX 4090 в сети '{net.name}'..."
+                self.status_msg = f"✅ SSD-том создан! Запускаем RTX 4090 в режиме [{self.workload_mode.upper()}]..."
             else:
-                self.status_msg = f"🚀 Быстрый старт (Warm Boot) из готового SSD-тома в сети '{net.name}'..."
+                self.status_msg = f"🚀 Быстрый старт (Warm Boot) из готового SSD-тома (Режим: {self.workload_mode.upper()})..."
 
-            user_data_b64 = build_cloud_init_script(pub_key, GIT_REPO_URL)
+            user_data_b64 = build_cloud_init_script(pub_key, GIT_REPO_URL, self.workload_mode)
             bdm = [{
                 "uuid": vol.id,
                 "source_type": "volume",
@@ -819,7 +835,7 @@ class OpenStackNeuroManager:
 
             pub_ip, priv_ip = self._extract_ips(srv)
             self.vm_ip = pub_ip or priv_ip
-            self.status_msg = f"🟢 VM запущена ({self.vm_ip})! Ждем SSH и запускаем контейнеры..."
+            self.status_msg = f"🟢 VM запущена ({self.vm_ip})! Ждем SSH и поднимаем режим [{self.workload_mode.upper()}]..."
 
             for _ in range(25):
                 time.sleep(3.0)
@@ -956,6 +972,8 @@ DASHBOARD_HTML = """
         .btn-pause  { background: #d97706; color: #fff; }
         .btn-nuke   { background: #e11d48; color: #fff; }
         .btn-panic  { background: #991b1b; color: #fef08a; border: 2px solid #ef4444; }
+        .mode-btn   { flex: 1; padding: 10px; font-size: 12px; font-weight: bold; border: 2px solid #334155; border-radius: 6px; background: #1e293b; color: #94a3b8; cursor: pointer; font-family: monospace; }
+        .mode-btn.active { background: #059669; color: #fff; border-color: #00ffc8; }
         .log-box { background: #020617; color: #38bdf8; padding: 10px; border-radius: 6px; border: 1px solid #1e293b; font-size: 11px; white-space: pre-wrap; max-height: 280px; overflow-y: auto; }
         .inv-row { display: flex; justify-content: space-between; align-items: center; background: #131d2e; padding: 8px 10px; border-radius: 4px; margin: 5px 0; font-size: 12px; gap: 8px; }
         .btn-sm { background: #0284c7; color: #fff; border: none; padding: 5px 9px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 11px; text-decoration: none; }
@@ -983,7 +1001,25 @@ DASHBOARD_HTML = """
     </div>
 
     <div class="card">
-        <h2>🎬 Авто-Пилот Протокола Сессии (С Авто-Записью Видео 1:1 и ЭЭГ)</h2>
+        <h2>🎛️ Режим нагрузки RTX 4090 (Переключается на лету за 2 сек без перезапуска VM)</h2>
+        <div style="font-size:11px; color:#94a3b8; margin-bottom:8px;">
+            Выберите, какие генераторы должны работать на GPU (чтобы не тратить ресурсы 4090 на неиспользуемую модель):
+        </div>
+        <div style="display:flex; gap:8px;">
+            <button id="mBtn_vision" class="mode-btn" onclick="setWorkload('vision')">
+                🎨 ТОЛЬКО ДИФФУЗИЯ<br><span style="font-size:10px; font-weight:normal;">(100% GPU на картинки, Музыка выкл)</span>
+            </button>
+            <button id="mBtn_music" class="mode-btn" onclick="setWorkload('music')">
+                🎵 ТОЛЬКО МУЗЫКА (0.1с)<br><span style="font-size:10px; font-weight:normal;">(100% GPU на звук, Диффузия выкл)</span>
+            </button>
+            <button id="mBtn_both" class="mode-btn" onclick="setWorkload('both')">
+                🎨+🎵 ВИЗУАЛ + МУЗЫКА<br><span style="font-size:10px; font-weight:normal;">(Оба генератора параллельно)</span>
+            </button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>🎬 Авто-Пилот Протокола Сессии (С Авто-Записью Видео 1:1, Музыки и ЭЭГ)</h2>
         <div class="stat" style="color:#00ffc8;" id="pipeStat">Протокол не запущен</div>
         <div class="pipe-grid">
             <div>
@@ -1023,11 +1059,15 @@ DASHBOARD_HTML = """
     <div class="card">
         <h2>📂 Менеджер Сессий на Orange Pi (Доступны даже после удаления облака!)</h2>
         <button class="btn btn-sync" onclick="apiPost('/cloud/sync')">
-            📥 СИНХРОНИЗИРОВАТЬ НОВЫЕ СЕССИИ С 4090 НА ORANGE PI СЕЙЧАС (Видео + ЭЭГ + CSV, без картинок)
+            📥 СИНХРОНИЗИРОВАТЬ НОВЫЕ СЕССИИ С 4090 НА ORANGE PI СЕЙЧАС (Видео + WAV + ЭЭГ + CSV)
         </button>
         <div id="sessionsCatalog">Загрузка списка сохраненных сессий...</div>
         <div id="sessionViewerBox" style="display:none; margin-top:12px; background:#020617; padding:12px; border-radius:8px; border:1px solid #38bdf8;">
             <h3 id="viewerTitle" style="margin-top:0; color:#00ffc8;">Просмотр сессии</h3>
+            <div style="margin-bottom:8px;">
+                <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">Записанная аудио-дорожка сессии (music_timeline.wav):</div>
+                <audio id="viewerAudio" controls style="width:100%;"></audio>
+            </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
                 <div>
                     <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">Видео таймлайн 1:1 (video_timeline.mp4):</div>
@@ -1035,7 +1075,7 @@ DASHBOARD_HTML = """
                 </div>
                 <div>
                     <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">Синхронизация ЭЭГ и кадров (analyze_session.py):</div>
-                    <img id="viewerPlot" style="width:100%; border-radius:6px; background:#111;" alt="График ЭЭГ строится...">
+                    <img id="viewerPlot" style="width:100%; border-radius:6px; background:#111;" alt="График ЭЭГ">
                 </div>
             </div>
         </div>
@@ -1054,7 +1094,7 @@ DASHBOARD_HTML = """
     <div class="card">
         <h2>⚡ Управление жизненным циклом и GitHub</h2>
         <button class="btn btn-start" onclick="apiPost('/cloud/start')">
-            🚀 1. ЗАПУСТИТЬ / РАЗБУДИТЬ RTX 4090 (Сеть 'immers' + Быстрый SSD Том + Кэш Весов)
+            🚀 1. ЗАПУСТИТЬ / РАЗБУДИТЬ RTX 4090 (В выбранном режиме: Диффузия / Музыка / Оба)
         </button>
         <button class="btn btn-repair" onclick="apiPost('/cloud/repair_docker')">
             🔄 ОБНОВИТЬ КОД С GITHUB (git pull + перезапуск за 3 сек БЕЗ docker build и без потери весов!)
@@ -1078,6 +1118,9 @@ DASHBOARD_HTML = """
             await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
             pollStatus();
         }
+        async function setWorkload(mode) {
+            await apiPost('/cloud/workload', {mode: mode});
+        }
         async function startPipeline() {
             await apiPost('/pipeline/start', {
                 name: document.getElementById('pName').value,
@@ -1091,6 +1134,7 @@ DASHBOARD_HTML = """
             box.style.display = 'block';
             document.getElementById('viewerTitle').textContent = '📊 Просмотр сессии: ' + sName;
             document.getElementById('viewerVideo').src = `/session_file/${sName}/video_timeline.mp4?t=` + Date.now();
+            document.getElementById('viewerAudio').src = `/session_file/${sName}/music_timeline.wav?t=` + Date.now();
             document.getElementById('viewerPlot').src = `/session_file/${sName}/verified_sync_alignment.png?t=` + Date.now();
         }
         async function delLocalSession(sName) {
@@ -1112,6 +1156,13 @@ DASHBOARD_HTML = """
                 document.getElementById('logBox').textContent = d.remote_logs;
                 document.getElementById('pipeStat').textContent = d.pipeline_status;
 
+                ['vision', 'music', 'both'].forEach(m => {
+                    const btn = document.getElementById('mBtn_' + m);
+                    if (btn) {
+                        btn.className = 'mode-btn' + (d.workload_mode === m ? ' active' : '');
+                    }
+                });
+
                 const epSsh = document.getElementById('epSsh');
                 epSsh.className = 'badge ' + (d.endpoints.ssh_22 ? 'b-ok' : 'b-wait');
                 epSsh.textContent = 'SSH :22 ' + (d.endpoints.ssh_22 ? '🟢 OK' : '⏳');
@@ -1127,10 +1178,10 @@ DASHBOARD_HTML = """
                     cat.innerHTML = d.sessions_catalog.map(s => `
                         <div class="inv-row">
                             <span>
-                                <b>${s.name}</b> | Видео: ${s.video_sec}с | ЭЭГ: ${s.eeg_samples} сэмплов | Кадров: ${s.frames}
+                                <b>${s.name}</b> | Длит: ${s.duration_sec}с | ЭЭГ: ${s.eeg_samples} сэмплов | Кадров: ${s.frames} ${s.has_audio ? '| 🎵 WAV' : ''}
                             </span>
                             <div style="display:flex; gap:6px;">
-                                <button class="btn-sm" onclick="openSessionViewer('${s.name}')">🎬 Видео + ЭЭГ</button>
+                                <button class="btn-sm" onclick="openSessionViewer('${s.name}')">🎬 Плеер + ЭЭГ</button>
                                 ${s.tar_file ? `<a class="btn-sm" style="background:#059669;" href="/downloads/${s.tar_file}">⬇️ .tar.gz</a>` : ''}
                                 <button class="btn-del-sm" onclick="delLocalSession('${s.name}')">🗑️</button>
                             </div>
@@ -1162,6 +1213,48 @@ DASHBOARD_HTML = """
 @app.route("/")
 def index():
     return render_template_string(DASHBOARD_HTML)
+
+
+@app.route("/projector")
+def projector_kiosk():
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"><title>NeuroCanvas Projector</title>
+    <style>body{margin:0;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;height:100vh;}img{width:100vw;height:100vh;object-fit:contain;}</style>
+    </head>
+    <body>
+    <img id="feed" src="" alt="">
+    <script>
+    async function check() {
+        try {
+            const r = await fetch('/cloud/status');
+            const d = await r.json();
+            const img = document.getElementById('feed');
+            if (d.vm_ip && d.endpoints.gateway_8080) {
+                const target = `https://${d.vm_ip}:8080/stream.mjpg`;
+                if (!img.src.startsWith(target)) img.src = target;
+            }
+        } catch(e) {}
+    }
+    setInterval(check, 2500);
+    check();
+    </script>
+    </body></html>
+    """
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/api/eeg_push", methods=["POST"])
+def proxy_eeg_push():
+    if not manager.vm_ip:
+        return jsonify({"status": "offline"}), 503
+    try:
+        data = request.get_json(force=True)
+        requests.post(f"https://{manager.vm_ip}:8080/api/eeg_push", json=data, verify=False, timeout=0.6)
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)}), 502
 
 
 @app.route("/downloads/<path:filename>")
@@ -1203,6 +1296,7 @@ def cloud_status():
         "vm_ip": manager.vm_ip,
         "vm_status": manager.vm_status,
         "vol_status": manager.vol_status,
+        "workload_mode": manager.workload_mode,
         "status_msg": manager.status_msg,
         "remote_logs": manager.remote_logs,
         "endpoints": manager.endpoints_status,
@@ -1210,6 +1304,14 @@ def cloud_status():
         "sessions_catalog": manager.get_local_sessions_catalog(),
         "pipeline_status": pipe_str
     })
+
+
+@app.route("/cloud/workload", methods=["POST"])
+def cloud_set_workload():
+    data = request.get_json(force=True)
+    mode = str(data.get("mode", "vision")).strip().lower()
+    threading.Thread(target=manager.switch_workload_mode, args=(mode,), daemon=True).start()
+    return jsonify({"status": "switching", "workload_mode": mode})
 
 
 @app.route("/pipeline/start", methods=["POST"])
@@ -1295,6 +1397,7 @@ def cloud_delete_item():
 if __name__ == "__main__":
     cert_f, key_f = ensure_https_certificates()
     print("=" * 70)
-    print("🔒 HTTPS Оркестратор v3.1 запущен: https://0.0.0.0:5000")
+    print("🔒 HTTPS Оркестратор v3.2 запущен: https://0.0.0.0:5000")
     print("=" * 70)
     app.run(host="0.0.0.0", port=5000, ssl_context=(cert_f, key_f), threaded=True)
+

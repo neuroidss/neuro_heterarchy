@@ -3,17 +3,13 @@
 ===================================================================================
 NEUROCANVAS: FULL-DIMENSIONAL [64 x 768] MONTY SDR HETERARCHY FOR MUSICGEN
 ===================================================================================
-- 100% ПАРИТЕТ С ДИФФУЗИЕЙ (neuro_genesis_engine.py):
-  Все 64 токена T5 распределены по 5 кортикальным регионам без снижения размерности:
-  * Tokens [0:4]   : Fpz (Колесо Эпох / Смена правил)
-  * Tokens [4:20]  : AFz (Композиционный граф 89.5 Гц рипплов A ⊃ B, [16 × 768])
-  * Tokens [20:36] : F3  (Структурное ON-подпространство z_on_16x768, [16 × 768])
-  * Tokens [36:52] : F4  (Контекстное OFF-подпространство + Темпоральная асимметрия, [16 × 768])
-  * Tokens [42:58] : FCz (Семантические действия вдоль SVD-аффордансов V_aff, [16 × 768])
-  * Tokens [57:64] : Глобальный консенсус L2/3 Monty SDR (sdr_tokens_7x768, [7 × 768])
-- КАЛИБРОВКА НОРМЫ ПОД T5 (_scale_to_t5):
-  Каждый 768-мерный вектор мозга нормируется строго к естественной норме токенов T5
-  (clean_norms ~ 3.2), исключая перегрузку кондиционера и сохраняя 100% чистоту музыки!
+- ЧИСТАЯ МУЗЫКАЛЬНОСТЬ ПРИ ЛЮБОМ ЧИСЛЕ РАЗНОРОДНЫХ КОНЦЕПТОВ В ЛОРЕ:
+  1) Фокусированная диада/триада (1 ведущий концепт ритма/тональности Root +
+     1 ортогонально вложенный дочерний концепт тембра Child A ⊃ B) вместо
+     одновременного смешивания 16 несовместимых жанров в кашу.
+  2) Тангенциальная SVD-проекция всех 5 регионов Монти ([64 × 768]):
+     волны F3, F4, FCz и SDR проецируются на собственное 16×768 SVD-подпространство
+     V_aff активного концепта и нормируются через _scale_to_t5.
 ===================================================================================
 """
 
@@ -39,13 +35,20 @@ from neuro_genesis_engine import (
 
 
 def _scale_to_t5(delta: torch.Tensor, ref_norms: torch.Tensor) -> torch.Tensor:
-    """
-    Приводит любой 768-мерный тензор коры к точному масштабу нормы токенов T5,
-    сохраняя 100% направления и относительной амплитуды мысли без перегруза T5!
-    """
     d_norm = torch.norm(delta, p=2, dim=-1, keepdim=True)
     gate = torch.tanh(d_norm / 2.5)
     return F.normalize(delta, p=2, dim=-1) * ref_norms * gate
+
+
+def _project_into_svd_manifold(wave_Nx768: torch.Tensor, v_aff_16x768: torch.Tensor, ref_norms: torch.Tensor) -> torch.Tensor:
+    """
+    Проецирует полноразмерную 768-D волну региона на ортонормированный SVD-базис V_aff
+    текущего музыкального концепта (или глобального словаря T5), чтобы модуляция
+    меняла тембр, ритм и гармонию, но НИКОГДА не разрушала музыкальность!
+    """
+    coords = torch.matmul(wave_Nx768, v_aff_16x768.T)
+    projected = torch.matmul(coords, v_aff_16x768)
+    return _scale_to_t5(projected, ref_norms)
 
 
 class UniversalMusicSemanticSpace:
@@ -96,7 +99,7 @@ class UniversalMusicSemanticSpace:
                 self.norm_vocab = F.normalize((raw - mu) / std, p=2, dim=-1)
             self.affordance_cache.clear()
 
-    def get_concept_affordances_svd(self, concept_idx: int, k_neighbors: int = 16, max_bases: int = 16) -> torch.Tensor:
+    def get_concept_affordances_svd(self, concept_idx: int, k_neighbors: int = 8, max_bases: int = 16) -> torch.Tensor:
         with self.lock:
             n_items = len(self.c_bases)
             if n_items == 0:
@@ -113,8 +116,8 @@ class UniversalMusicSemanticSpace:
                 target = self.norm_vocab[safe_idx:safe_idx + 1]
                 sims = torch.mm(target, self.norm_vocab.T).squeeze(0)
                 _, topk = torch.topk(sims, min(k_neighbors, n_items))
-                neighbors_centered = (self.norm_vocab[topk] - target) * 3.0
-                combined_manifold = torch.cat([neighbors_centered, F.normalize(tokens_centered, p=2, dim=-1)], dim=0)
+                neighbors_centered = (self.norm_vocab[topk] - target) * 2.0
+                combined_manifold = torch.cat([F.normalize(tokens_centered, p=2, dim=-1), neighbors_centered], dim=0)
             else:
                 combined_manifold = F.normalize(tokens_centered, p=2, dim=-1)
 
@@ -139,7 +142,8 @@ class UniversalMusicSemanticSpace:
             top = torch.argmax(sims, dim=-1)
             names = [self.words[int(i) % w_len].upper() for i in top]
             indices = [int(i) % w_len for i in top]
-            return sims, torch.softmax(sims / 0.12, dim=-1), names, indices
+            # Острый softmax (температура 0.04 вместо 0.12), чтобы не смешивать далекие жанры в серую кашу!
+            return sims, torch.softmax(sims / 0.04, dim=-1), names, indices
 
 
 class MusicColumnProcessor:
@@ -226,47 +230,48 @@ class MusicColumnProcessor:
                 base_ref = self.semantic.last_active_embed
                 ref_norms = torch.norm(base_ref, p=2, dim=-1, keepdim=True).clamp(min=1.0)
                 tree_64.copy_(base_ref)
-                tree_64[4:20].add_(_scale_to_t5(monty_out["z_on_16x768"], ref_norms[4:20]), alpha=0.35)
+                v_global = self.semantic.global_svd_bases[:16]
+                tree_64[4:20].add_(
+                    _project_into_svd_manifold(monty_out["z_on_16x768"], v_global, ref_norms[4:20]),
+                    alpha=0.40
+                )
                 dag_parts = ["СВОБОДНЫЙ_ДРЕЙФ"]
             elif n_bases == 1:
                 tree_64.copy_(c_bases_copy[0])
                 dag_parts = [words_copy[0].upper()]
             else:
-                k_choices = min(16, soft_w.shape[-1], n_bases)
-                top_w, top_i = torch.topk(soft_w[root_s, :n_bases], k_choices)
-                top_w = top_w / (top_w.sum() + 1e-6)
-                for i in range(top_w.shape[0]):
-                    tree_64.add_(c_bases_copy[int(top_i[i]) % n_bases], alpha=top_w[i])
-
+                # ФОКУСИРОВАННАЯ МУЗЫКАЛЬНАЯ КОМПОЗИЦИЯ (Root + 1 ортогональный Child A ⊃ B):
+                # Не складываем 16 жанров в серый суп, а берем чистый ведущий концепт Root
+                # и встраиваем в него 1 сильнейший дочерний концепт Child!
+                root_c_idx = indices[root_s] % n_bases
+                tree_64.copy_(c_bases_copy[root_c_idx])
                 ref_norms = torch.norm(tree_64, p=2, dim=-1, keepdim=True).clamp(min=1.0)
-                accum = tree_64.clone()
                 dag_parts = [names[root_s]]
-                sec_w = (2.0 * math.pi) / float(n_sec)
                 root_leads = c_flow_np[root_s, :n_sec]
 
-                for s in order[1:]:
-                    child_w = names[s]
-                    t_child = c_bases_copy[indices[s] % n_bases].clone()
-                    slot_mod = _scale_to_t5(z_slots[s:s + 1].expand(64, 768), ref_norms)
-                    t_child.add_(slot_mod, alpha=0.20)
-                    center = -math.pi * 0.5 + (s + 0.5) * sec_w
-                    focus = 0.5 * (1.0 + math.cos(dl_phase - center))
-                    is_seal = self.seals.mask[s]
-                    w_slot = (0.25 + 0.55 * self.stabs[s]) * (0.4 + 0.6 * focus) * (1.3 if is_seal else 1.0)
+                # Находим главный дочерний слот с другим концептом
+                child_s = next((int(s) for s in order[1:] if (indices[int(s)] % n_bases) != root_c_idx), int(order[1]) if len(order) > 1 else root_s)
+                if child_s != root_s:
+                    child_c_idx = indices[child_s] % n_bases
+                    child_w = names[child_s]
+                    t_child = c_bases_copy[child_c_idx].clone()
+                    is_seal = self.seals.mask[child_s]
+                    w_slot = (0.20 + 0.45 * self.stabs[child_s]) * (1.25 if is_seal else 1.0)
 
-                    if float(root_leads[s]) >= 0.03:
-                        dot = torch.sum(t_child * accum, dim=-1, keepdim=True) / (torch.sum(accum ** 2, dim=-1, keepdim=True) + 1e-7)
-                        ortho = t_child - dot * accum
-                        no, nc = torch.norm(ortho, dim=-1, keepdim=True), torch.norm(t_child, dim=-1, keepdim=True)
-                        ortho_n = (ortho / (no + 1e-6)) * nc * (no > (0.05 * nc)).float()
-                        tree_64.add_(ortho_n, alpha=w_slot * 0.30)
-                        accum.add_(ortho_n, alpha=0.15)
+                    if float(root_leads[child_s]) >= 0.03:
+                        # A ⊃ B: ортогональная встройка тембра Child внутрь ритма и тональности Root
+                        dot = torch.sum(t_child * tree_64, dim=-1, keepdim=True) / (torch.sum(tree_64 ** 2, dim=-1, keepdim=True) + 1e-7)
+                        ortho = t_child - dot * tree_64
+                        no = torch.norm(ortho, dim=-1, keepdim=True)
+                        ortho_n = (ortho / (no + 1e-6)) * ref_norms
+                        tree_64[4:20].add_(ortho_n[4:20], alpha=w_slot * 0.35)
                         dag_parts.append(f"⊃ {child_w}")
                     else:
+                        # A ∥ B: разделение подпространств только в окне AFz [4:20]
                         half_d = 768 // 2
-                        nb = torch.norm(tree_64[:, :half_d], dim=-1, keepdim=True) + 1e-7
-                        np_n = torch.norm(t_child[:, half_d:], dim=-1, keepdim=True) + 1e-7
-                        tree_64[:, half_d:].mul_(0.8).add_((t_child[:, half_d:] / np_n * nb), alpha=0.22)
+                        nb = torch.norm(tree_64[4:20, :half_d], dim=-1, keepdim=True) + 1e-7
+                        np_n = torch.norm(t_child[4:20, half_d:], dim=-1, keepdim=True) + 1e-7
+                        tree_64[4:20, half_d:].mul_(0.82).add_((t_child[4:20, half_d:] / np_n * nb), alpha=w_slot * 0.25)
                         dag_parts.append(f"∥ {child_w}")
 
             if is_tick:
@@ -300,7 +305,7 @@ class MusicColumnProcessor:
 
 class MusicHeterarchyDeltaProcessor:
     def __init__(self, semantic: UniversalMusicSemanticSpace, router,
-                 strength_low: float = 0.25, strength_high: float = 0.80,
+                 strength_low: float = 0.25, strength_high: float = 0.75,
                  burst_duration: float = 1.2, seal_thresh: float = 0.68):
         self.lock = threading.RLock()
         self.semantic = semantic
@@ -316,7 +321,7 @@ class MusicHeterarchyDeltaProcessor:
         self.burst_timer = 0.0
 
     def step(self, frame, dt: float, mode: str = "semantic", target_block: float = 2.0,
-             target_context: float = 0.6, base_temp: float = 1.0, base_top_k: int = 250,
+             target_context: float = 1.2, base_temp: float = 1.0, base_top_k: int = 250,
              cfg_coef: float = 1.0, strength_low: Optional[float] = None,
              strength_high: Optional[float] = None):
         with self.lock, self.semantic.lock:
@@ -377,7 +382,7 @@ class MusicHeterarchyDeltaProcessor:
 
             anom_fcz = self.engines["FCz"].monty.upward_sdr_anomaly
             anom_f34 = 0.5 * (self.engines["F3"].monty.upward_sdr_anomaly + self.engines["F4"].monty.upward_sdr_anomaly)
-            anom_afz = self.engines["AFz"].monty.upward_sdr_anomaly
+            anom_afz = self.engines["AFz"].upward_sdr_anomaly if hasattr(self.engines["AFz"], "upward_sdr_anomaly") else self.engines["AFz"].monty.upward_sdr_anomaly
 
             parent_sdr_map = {
                 "FCz": 0.5 * (sdr_f3 + sdr_f4),
@@ -419,16 +424,12 @@ class MusicHeterarchyDeltaProcessor:
             apex = next((r for r in hierarchy if r in real_iplv), "AFz")
             primary = res[apex]
 
-            # -----------------------------------------------------------------
-            # ПОЛНОРАЗМЕРНАЯ СБОРКА [64 x 768] ПО ВСЕМ 5 РЕГИОНАМ (1:1 С ДИФФУЗИЕЙ)
-            # С НОРМИРОВКОЙ КАЖДОГО ВЕКТОРА К МАСШТАБУ T5 (_scale_to_t5)
-            # -----------------------------------------------------------------
             target_64 = primary["tree_64"].clone()
             root_c_idx = primary["indices"][primary["root_s"]] % max(1, n_bases)
             clean_emb = self.semantic.last_active_embed if n_bases == 0 else c_bases_copy[root_c_idx]
             clean_norms = torch.norm(clean_emb, p=2, dim=-1, keepdim=True).clamp(min=1.0)
 
-            # 1. FCz: Семантическое действие [16 x 768] вдоль SVD-аффордансов V_aff
+            # Извлекаем 16x768 SVD-базис музыкальных аффордансов текущего ведущего концепта
             v_aff_16x768 = self.semantic.get_concept_affordances_svd(root_c_idx, max_bases=16)
             raw_fcz_wave = res["FCz"]["monty"]["sagitta_16x768"] + res["FCz"]["monty"]["z_on_16x768"] * 0.5
             sem_action_16x768, fcz_persistence, _ = self.engines["FCz"].monty.action_integrator.step(
@@ -438,7 +439,6 @@ class MusicHeterarchyDeltaProcessor:
             max_surprise = max(res[r]["monty"]["surprise"] for r in self.router.ALL_ROLES)
             fpz_tension = float(np.clip(max_surprise * 0.55 + abs(res["Fpz"]["temporal_asymmetry"]) * 0.45, 0.0, 1.0))
 
-            # Вычисляем мгновенную силу рабочей памяти от мозга (Persistence + Surprise)
             active_drive = float(np.clip(fcz_persistence * 0.70 + min(1.0, max_surprise) * 0.30, 0.0, 1.0))
             dyn_str = float(np.clip(
                 self.strength_low + (self.strength_high - self.strength_low) * active_drive,
@@ -454,47 +454,37 @@ class MusicHeterarchyDeltaProcessor:
             if (t_now - self.burst_timer) < self.burst_duration:
                 dyn_str = max(dyn_str, self.strength_high)
 
-            # Масштабируем каждую 16x768 проекцию регионов к норме токенов T5 и вкладываем с весом dyn_str:
+            # 1. FCz [42:58]: Семантические действия вдоль V_aff
             target_64[42:58].add_(_scale_to_t5(sem_action_16x768, clean_norms[42:58]), alpha=0.40 * dyn_str)
 
-            # Геодезический шаг к соседнему концепту при высокой настойчивости (как в диффузии)
-            if fcz_persistence > 0.65 and n_bases > 1:
-                act_dir = F.normalize(sem_action_16x768.mean(dim=0, keepdim=True), p=2, dim=-1)
-                cur_vec = self.semantic.norm_vocab[root_c_idx:root_c_idx + 1]
-                shifted = F.normalize(cur_vec + act_dir * 0.50, p=2, dim=-1)
-                best_nb = int(torch.argmax(torch.mm(shifted, self.semantic.norm_vocab[:n_bases].T).squeeze(0)).item())
-                if best_nb != root_c_idx and best_nb < n_bases:
-                    nb_emb = c_bases_copy[best_nb]
-                    target_64.mul_(1.0 - 0.35 * dyn_str).add_(nb_emb, alpha=0.35 * dyn_str)
+            # 2. F3 [16:32] и F4 [32:48]: проецируются в SVD-многообразие V_aff, чтобы сохранять музыкальный строй!
+            f3_ musical = _project_into_svd_manifold(res["F3"]["monty"]["z_on_16x768"], v_aff_16x768, clean_norms[16:32])
+            target_64[16:32].add_(f3_musical, alpha=0.30 * dyn_str)
 
-            # 2. F3: Структурное ON-подпространство [16 x 768]
-            target_64[16:32].add_(_scale_to_t5(res["F3"]["monty"]["z_on_16x768"], clean_norms[16:32]), alpha=0.30 * dyn_str)
-
-            # 3. F4: Контекстное OFF-подпространство + Темпоральная асимметрия [16 x 768]
             f4_ctx = res["F4"]["monty"]["z_off_16x768"] * 0.6 + res["F4"]["monty"]["temp_asym_16x768"] * 0.4
-            target_64[32:48].add_(_scale_to_t5(f4_ctx, clean_norms[32:48]), alpha=0.30 * dyn_str)
+            f4_musical = _project_into_svd_manifold(f4_ctx, v_aff_16x768, clean_norms[32:48])
+            target_64[32:48].add_(f4_musical, alpha=0.30 * dyn_str)
 
-            # 4. Fpz: Колесо Эпох [0:4]
-            if n_bases > 1:
-                if max_surprise > 0.55:
-                    self.epoch_wheel_phase = (self.epoch_wheel_phase + dt * (0.35 + max_surprise * 0.45)) % float(n_bases)
+            # 3. Fpz [0:4]: Колесо Эпох (включается только при высоком удивлении surprise > 0.65)
+            if n_bases > 1 and max_surprise > 0.65:
+                self.epoch_wheel_phase = (self.epoch_wheel_phase + dt * 0.25) % float(n_bases)
                 ep_a = int(math.floor(self.epoch_wheel_phase)) % n_bases
                 ep_b = (ep_a + 1) % n_bases
                 ep_alpha = 0.5 * (1.0 - math.cos((self.epoch_wheel_phase - math.floor(self.epoch_wheel_phase)) * math.pi))
                 emb_a = c_bases_copy[ep_a]
                 emb_b = c_bases_copy[ep_b]
-                target_64[0:4].mul_(1.0 - 0.40 * dyn_str).add_(
-                    emb_a[0:4] * (1.0 - ep_alpha) + emb_b[0:4] * ep_alpha, alpha=0.40 * dyn_str
+                target_64[0:4].mul_(1.0 - 0.35 * dyn_str).add_(
+                    emb_a[0:4] * (1.0 - ep_alpha) + emb_b[0:4] * ep_alpha, alpha=0.35 * dyn_str
                 )
 
-            # 5. L2/3 Monty SDR консенсус [57:64]
-            target_64[57:64].add_(_scale_to_t5(primary["monty"]["sdr_tokens_7x768"], clean_norms[57:64]), alpha=0.25 * dyn_str)
+            # 4. L2/3 Monty SDR консенсус [57:64]
+            sdr_musical = _project_into_svd_manifold(primary["monty"]["sdr_tokens_7x768"], v_aff_16x768, clean_norms[57:64])
+            target_64[57:64].add_(sdr_musical, alpha=0.25 * dyn_str)
 
-            # Итоговый баланс между чистым якорем концепта и полноразмерной модуляцией по dyn_str
             final_64 = clean_emb * (1.0 - dyn_str) + target_64 * dyn_str
             final_64 = F.normalize(final_64, p=2, dim=-1) * clean_norms
 
-            temp = float(np.clip(base_temp * (0.85 + 0.30 * dyn_str), 0.3, 1.8))
+            temp = float(np.clip(base_temp * (0.88 + 0.25 * dyn_str), 0.3, 1.8))
             top_k = int(np.clip(base_top_k + int((dyn_str - 0.4) * 100), 30, 450))
             kin = res["FCz"]["kinematics"]
 
