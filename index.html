@@ -9,122 +9,183 @@
         .card { background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 16px; max-width: 900px; margin: 0 auto 16px auto; }
         h2 { margin-top: 0; color: #00ffc8; font-size: 16px; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }
         .row { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
-        .btn { padding: 10px; font-size: 12px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; text-align: center; flex-grow: 1; color: #fff; }
+        .btn { padding: 10px; font-size: 12px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; text-align: center; flex-grow: 1; color: #fff; transition: 0.2s;}
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn:hover { filter: brightness(1.1); }
         .btn-green  { background: #059669; }
         .btn-blue   { background: #0284c7; }
         .btn-orange { background: #d97706; }
         .btn-red    { background: #e11d48; }
+        .btn-gray   { background: #334155; }
         input, select { padding: 8px; background: #030712; border: 1px solid #334155; color: #fff; border-radius: 4px; font-family: monospace; font-size: 12px; width: 100%; box-sizing: border-box; }
         .pod-row { display: flex; justify-content: space-between; align-items: center; background: #131d2e; padding: 12px; border-radius: 6px; margin: 8px 0; border: 1px solid #334155; flex-wrap: wrap; gap: 10px;}
-        .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; display: inline-block;}
         .b-run { background: #059669; color: #fff; }
         .b-stop { background: #d97706; color: #fff; }
         label { font-size: 11px; color: #94a3b8; display: block; margin-bottom: 4px; }
-        #statusMsg { color: #fbbf24; font-size: 13px; margin-top: 10px; font-weight: bold;}
+        #statusMsg { color: #fbbf24; font-size: 13px; margin-top: 10px; font-weight: bold; text-align: center;}
+        
+        /* Экран настроек */
+        #settingsScreen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #06090e; display: flex; justify-content: center; align-items: center; z-index: 1000; padding: 20px; box-sizing: border-box;}
+        .settings-box { background: #0f172a; padding: 30px; border-radius: 10px; border: 1px solid #38bdf8; width: 100%; max-width: 500px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);}
+        .settings-box input { font-size: 14px; padding: 12px; margin-bottom: 15px;}
+        .hint { font-size: 11px; color: #64748b; margin-top: -10px; margin-bottom: 15px; display: block;}
     </style>
 </head>
 <body>
 
-    <div class="card">
-        <h2>🔑 Настройки RunPod API (Сохраняется в браузере)</h2>
-        <div class="row">
-            <input type="password" id="apiKey" placeholder="Введите ваш RUNPOD_API_KEY (начинается с rpa_...)" style="flex: 3;">
-            <button class="btn btn-blue" style="flex: 1;" onclick="saveKey()">Сохранить ключ</button>
+    <!-- ЭКРАН НАСТРОЕК (Показывается при входе) -->
+    <div id="settingsScreen">
+        <div class="settings-box">
+            <h2 style="font-size: 18px; text-align: center; border: none;">Настройки Подключения</h2>
+            
+            <label>RunPod API Key:</label>
+            <input type="password" id="apiKey" placeholder="rpa_...">
+            <span class="hint">Ключ сохраняется только в вашем браузере (localStorage).</span>
+
+            <label>CORS Proxy URL (Cloudflare Worker):</label>
+            <input type="text" id="proxyUrl" value="https://runpod-cors-proxy.dmitry-sukhoruchkin.workers.dev">
+            <span class="hint">Необходим для обхода защиты браузера. Оставьте по умолчанию или укажите свой.</span>
+
+            <button class="btn btn-green" style="width: 100%; padding: 12px; font-size: 14px;" onclick="saveSettings()">Сохранить и Войти</button>
+            <p id="connectError" style="color: #ef4444; font-size: 12px; margin-top: 15px; text-align: center;"></p>
         </div>
-        <div id="statusMsg">Готов к работе. Введите API ключ.</div>
     </div>
 
-    <div class="card" id="createSection" style="display: none;">
-        <h2>➕ Создать НОВЫЙ Pod (NeuroCanvas)</h2>
-        <div class="row">
-            <div style="flex: 1; min-width: 200px;">
-                <label>Образ (Docker Image):</label>
-                <select id="createImage">
-                    <option value="neuroidss/neuro_heterarchy_all:latest" selected>🚀 All-in-One (Diffusion + MusicGen)</option>
-                    <option value="neuroidss/neuro_heterarchy_musicgen:latest">🎵 MusicGen Only</option>
-                    <option value="neuroidss/neuro_heterarchy_diffusion:latest">🎨 Diffusion Only</option>
-                </select>
-            </div>
-            <div style="flex: 1; min-width: 200px;">
-                <label>GPU (Видеокарта):</label>
-                <select id="createGpu">
-                    <option value="NVIDIA GeForce RTX 5090" selected>🚀 RTX 5090 (32GB)</option>
-                    <option value="NVIDIA GeForce RTX 4090">⚡ RTX 4090 (24GB)</option>
-                    <option value="RTX 6000 Ada generation">💎 RTX 6000 Ada (48GB)</option>
-                    <option value="NVIDIA L40S">⚙️ L40S (48GB)</option>
-                </select>
-            </div>
+    <!-- ОСНОВНОЙ ДАШБОРД -->
+    <div id="mainDashboard" style="display: none;">
+        
+        <div class="card" style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-weight: bold; color: #00ffc8; font-size: 16px;">🚀 Serverless RunPod Controller</div>
+            <button class="btn btn-gray" style="flex-grow: 0; padding: 6px 12px;" onclick="logout()">Настройки API</button>
         </div>
-        <button class="btn btn-green" style="margin-top: 15px; width: 100%;" onclick="createPod()">🚀 Арендовать и Запустить Pod</button>
-    </div>
 
-    <div class="card" id="podsSection" style="display: none;">
-        <h2>📦 Ваши активные поды в RunPod</h2>
-        <button class="btn btn-blue" style="width: 100%; margin-bottom: 15px;" onclick="loadPods()">🔄 Обновить список</button>
-        <div id="podList">Загрузка...</div>
+        <div id="statusMsg">Обновление статуса...</div>
+
+        <div class="card" style="margin-top: 16px;">
+            <h2>➕ Создать НОВЫЙ Pod (NeuroCanvas)</h2>
+            <div class="row">
+                <div style="flex: 1; min-width: 200px;">
+                    <label>Образ (Docker Image):</label>
+                    <select id="createImage">
+                        <option value="neuroidss/neuro_heterarchy_all:latest" selected>🚀 All-in-One (Diffusion + MusicGen)</option>
+                        <option value="neuroidss/neuro_heterarchy_musicgen:latest">🎵 MusicGen Only</option>
+                        <option value="neuroidss/neuro_heterarchy_diffusion:latest">🎨 Diffusion Only</option>
+                    </select>
+                </div>
+                <div style="flex: 1; min-width: 200px;">
+                    <label>GPU (Видеокарта):</label>
+                    <select id="createGpu">
+                        <option value="NVIDIA GeForce RTX 5090" selected>🚀 RTX 5090 (32GB)</option>
+                        <option value="NVIDIA GeForce RTX 4090">⚡ RTX 4090 (24GB)</option>
+                        <option value="RTX 6000 Ada generation">💎 RTX 6000 Ada (48GB)</option>
+                        <option value="NVIDIA L40S">⚙️ L40S (48GB)</option>
+                    </select>
+                </div>
+            </div>
+            <button class="btn btn-green" style="margin-top: 15px; width: 100%;" onclick="createPod()">🚀 Арендовать и Запустить Pod</button>
+        </div>
+
+        <div class="card">
+            <h2 style="display: flex; justify-content: space-between; align-items: center;">
+                <span>📦 Ваши активные поды в RunPod</span>
+                <button class="btn btn-blue" style="flex-grow: 0; padding: 4px 10px;" onclick="loadPods()">🔄 Обновить</button>
+            </h2>
+            <div id="podList">Загрузка...</div>
+        </div>
+
     </div>
 
     <script>
-        const GQL_URL = "https://api.runpod.io/graphql";
-
-        // Проверяем ключ при загрузке
+        // Инициализация при загрузке
         window.onload = () => {
             const savedKey = localStorage.getItem("runpod_api_key");
-            if (savedKey) {
-                document.getElementById("apiKey").value = savedKey;
-                showUI();
-                loadPods();
+            const savedProxy = localStorage.getItem("runpod_cors_proxy");
+            
+            if (savedKey) document.getElementById("apiKey").value = savedKey;
+            if (savedProxy) document.getElementById("proxyUrl").value = savedProxy;
+
+            if (savedKey && savedProxy) {
+                showDashboard();
             }
         };
 
-        function saveKey() {
+        // Сохранение настроек из стартового экрана
+        function saveSettings() {
             const key = document.getElementById("apiKey").value.trim();
-            if (key) {
-                localStorage.setItem("runpod_api_key", key);
-                logMsg("Ключ сохранен!");
-                showUI();
-                loadPods();
-            } else {
-                logMsg("Ошибка: Ключ не может быть пустым.");
+            let proxy = document.getElementById("proxyUrl").value.trim();
+            
+            if (!key || !proxy) {
+                document.getElementById("connectError").innerText = "Заполните оба поля!";
+                return;
             }
+
+            // Убираем слеш на конце прокси, если он есть
+            if (proxy.endsWith('/')) proxy = proxy.slice(0, -1);
+
+            localStorage.setItem("runpod_api_key", key);
+            localStorage.setItem("runpod_cors_proxy", proxy);
+            
+            document.getElementById("connectError").innerText = "";
+            showDashboard();
         }
 
-        function showUI() {
-            document.getElementById("createSection").style.display = "block";
-            document.getElementById("podsSection").style.display = "block";
+        function showDashboard() {
+            document.getElementById("settingsScreen").style.display = "none";
+            document.getElementById("mainDashboard").style.display = "block";
+            loadPods();
+        }
+
+        function logout() {
+            document.getElementById("settingsScreen").style.display = "flex";
+            document.getElementById("mainDashboard").style.display = "none";
         }
 
         function logMsg(msg) {
-            document.getElementById("statusMsg").innerText = msg;
+            const el = document.getElementById("statusMsg");
+            el.innerText = msg;
             console.log(msg);
         }
 
-        // Общая функция для запросов к GraphQL RunPod
+        // ==========================================
+        // ГЛАВНАЯ ФУНКЦИЯ ЗАПРОСОВ К RUNPOD (ЧЕРЕЗ ПРОКСИ)
+        // ==========================================
         async function runpodGQL(query, variables = {}) {
             const apiKey = localStorage.getItem("runpod_api_key");
-            if (!apiKey) {
-                logMsg("Нет API ключа!");
+            const proxy = localStorage.getItem("runpod_cors_proxy");
+            
+            if (!apiKey || !proxy) {
+                logout();
                 return null;
             }
+
+            // Запрос идет на ваш Cloudflare Worker, а он уже сам добавляет путь к RunPod
+            const fetchUrl = `${proxy}?api_key=${apiKey}`;
+
             try {
-                const res = await fetch(`${GQL_URL}?api_key=${apiKey}`, {
+                const res = await fetch(fetchUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ query, variables })
                 });
+                
+                if (!res.ok) throw new Error(`Ошибка HTTP: ${res.status}`);
+                
                 const data = await res.json();
                 if (data.errors) throw new Error(data.errors[0].message);
                 return data.data;
             } catch (err) {
-                logMsg("Ошибка API: " + err.message);
+                logMsg("❌ Ошибка API: " + err.message);
                 return null;
             }
         }
 
-        // Получить список подов
+        // ==========================================
+        // ЛОГИКА УПРАВЛЕНИЯ ПОДАМИ
+        // ==========================================
+
         async function loadPods() {
-            logMsg("Загрузка подов...");
+            logMsg("🔄 Загрузка списка подов...");
             const query = `query { myself { pods { id name desiredStatus costPerHr imageName runtime { ports { ip publicPort privatePort } } } } }`;
             const data = await runpodGQL(query);
             if (!data) return;
@@ -133,8 +194,8 @@
             const list = document.getElementById("podList");
             
             if (pods.length === 0) {
-                list.innerHTML = "<div style='color:#64748b;'>Нет активных подов.</div>";
-                logMsg("Список обновлен. Подов нет.");
+                list.innerHTML = "<div style='color:#64748b; padding: 10px 0;'>У вас нет активных подов.</div>";
+                logMsg("✅ Список обновлен. Подов нет.");
                 return;
             }
 
@@ -142,37 +203,43 @@
                 const isRun = p.desiredStatus === 'RUNNING';
                 const badge = isRun ? 'b-run' : 'b-stop';
                 
-                // Ищем открытый 8080 порт для Студии
-                let studioUrl = "";
-                if (isRun) studioUrl = `https://${p.id}-8080.proxy.runpod.net`;
+                // Ссылка на студию через прокси RunPod
+                let studioUrl = isRun ? `https://${p.id}-8080.proxy.runpod.net` : '#';
 
                 return `
                 <div class="pod-row">
                     <div style="flex: 2; min-width: 250px;">
-                        <b>${p.name || "Pod"}</b> (<code style="color:#38bdf8;">${p.id}</code>)<br>
-                        <span class="badge ${badge}" style="display:inline-block; margin-top:5px;">${p.desiredStatus}</span> 
-                        <b style="color:#10b981; margin-left: 10px;">$${p.costPerHr}/ч</b><br>
+                        <b style="font-size: 14px;">${p.name || "Pod"}</b> (<code style="color:#38bdf8;">${p.id}</code>)<br>
+                        <div style="margin-top: 8px;">
+                            <span class="badge ${badge}">${p.desiredStatus}</span> 
+                            <b style="color:#10b981; margin-left: 10px;">$${p.costPerHr}/ч</b>
+                        </div>
                         <div style="font-size: 10px; color: #64748b; margin-top: 5px;">${p.imageName}</div>
-                        ${isRun ? `<a href="${studioUrl}" target="_blank" style="color:#00ffc8; font-size: 12px; display:block; margin-top:5px;">🌐 Открыть Web Studio (8080)</a>` : ''}
-                        ${isRun ? `<a href="https://www.runpod.io/console/pods" target="_blank" style="color:#a7f3d0; font-size: 12px; display:block; margin-top:2px;">💻 Web Terminal (RunPod)</a>` : ''}
+                        
+                        ${isRun ? `
+                        <div style="margin-top: 10px; display: flex; gap: 10px;">
+                            <a href="${studioUrl}" target="_blank" style="color:#00ffc8; font-size: 12px; text-decoration: none;">🌐 Открыть Web Studio (8080)</a>
+                            <a href="https://www.runpod.io/console/pods" target="_blank" style="color:#a7f3d0; font-size: 12px; text-decoration: none;">💻 Web Terminal</a>
+                        </div>
+                        ` : ''}
                     </div>
-                    <div style="display:flex; gap:6px; flex: 1; min-width: 200px;">
+                    
+                    <div style="display:flex; flex-direction: column; gap:6px; flex: 1; min-width: 150px; justify-content: center;">
                         ${!isRun 
-                            ? `<button class="btn btn-green" onclick="resumePod('${p.id}')">▶️ Пуск</button>` 
-                            : `<button class="btn btn-orange" onclick="stopPod('${p.id}')">⏸️ Стоп</button>`}
-                        <button class="btn btn-red" onclick="terminatePod('${p.id}')">🗑️ Удалить</button>
+                            ? `<button class="btn btn-green" onclick="resumePod('${p.id}')">▶️ Запустить</button>` 
+                            : `<button class="btn btn-orange" onclick="stopPod('${p.id}')">⏸️ Остановить</button>`}
+                        <button class="btn btn-red" onclick="terminatePod('${p.id}')">🗑️ Удалить навсегда</button>
                     </div>
                 </div>`;
             }).join('');
-            logMsg("Список подов успешно загружен.");
+            logMsg("✅ Список подов успешно загружен.");
         }
 
-        // Создать Pod
         async function createPod() {
             const gpu = document.getElementById("createGpu").value;
             const image = document.getElementById("createImage").value;
             
-            // Скрипт, который автоматически выполнится при старте контейнера (запустит SSH и Gateway)
+            // Скрипт, который автоматически выполнится при старте контейнера
             const dockerArgs = `bash -c "mkdir -p /workspace/logs && /usr/sbin/sshd -D & python3 /app/web_cloud_gateway.py --port 8080"`;
 
             const query = `
@@ -197,34 +264,31 @@
                 }
             };
 
-            logMsg(`Создание пода с ${gpu}...`);
+            logMsg(`⏳ Создание пода с ${gpu.split(' ').pop()}...`);
             const data = await runpodGQL(query, variables);
             if (data) {
-                logMsg(`Успешно! Pod ID: ${data.podFindAndDeployOnDemand.id}. Загружаем список...`);
+                logMsg(`✅ Успешно! Pod ID: ${data.podFindAndDeployOnDemand.id}. Загружаем список...`);
                 setTimeout(loadPods, 2000);
             }
         }
 
-        // Запустить (Resume)
         async function resumePod(podId) {
-            logMsg(`Запуск пода ${podId}...`);
+            logMsg(`⏳ Запуск пода ${podId}...`);
             const query = `mutation { podResume(input: {podId: "${podId}", gpuCount: 1}) { id } }`;
             await runpodGQL(query);
             setTimeout(loadPods, 2000);
         }
 
-        // Остановить (Stop)
         async function stopPod(podId) {
-            logMsg(`Остановка пода ${podId}...`);
+            logMsg(`⏳ Остановка пода ${podId}...`);
             const query = `mutation { podStop(input: {podId: "${podId}"}) { id } }`;
             await runpodGQL(query);
             setTimeout(loadPods, 2000);
         }
 
-        // Удалить (Terminate)
         async function terminatePod(podId) {
-            if (!confirm(`Точно удалить под ${podId} навсегда? Данные на диске будут стерты!`)) return;
-            logMsg(`Удаление пода ${podId}...`);
+            if (!confirm(`Вы уверены, что хотите УДАЛИТЬ под ${podId} навсегда? Все данные на диске /workspace будут стерты!`)) return;
+            logMsg(`⏳ Удаление пода ${podId}...`);
             const query = `mutation { podTerminate(input: {podId: "${podId}"}) }`;
             await runpodGQL(query);
             setTimeout(loadPods, 2000);
