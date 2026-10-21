@@ -239,8 +239,16 @@
             const gpu = document.getElementById("createGpu").value;
             const image = document.getElementById("createImage").value;
             
-            // Скрипт, который автоматически выполнится при старте контейнера
-            const dockerArgs = `bash -c "mkdir -p /workspace/logs && /usr/sbin/sshd -D & python3 /app/web_cloud_gateway.py --port 8080"`;
+            // Формируем команду запуска в зависимости от выбранного образа
+            let runScripts = "";
+            if (image.includes("musicgen") || image.includes("all")) {
+                runScripts = `python3 /app/musicgen_server.py --port 6005 --model facebook/musicgen-small > /workspace/server.log 2>&1 & python3 /app/neuro_heterarchy_musicgen.py --headless --mode semantic --lore /app/lore/music_lore.txt --gateway-port 6003 > /workspace/engine.log 2>&1 & `;
+            } else if (image.includes("diffusion")) {
+                runScripts = `python3 /app/brain_server.py --mode lcm > /workspace/server.log 2>&1 & python3 /app/neuro_heterarchy_diffusion.py --headless --mode lcm --steps 2 --lore /app/lore/world_lore.txt > /workspace/engine.log 2>&1 & `;
+            }
+
+            // dockerArgs запустит SSH, Gateway и нужные нейросети при старте контейнера
+            const dockerArgs = `bash -c "mkdir -p /workspace/logs && /usr/sbin/sshd -D & python3 /app/web_cloud_gateway.py --port 8080 --music-lore /app/lore/music_lore.txt --lore /app/lore/world_lore.txt > /workspace/gateway.log 2>&1 & ${runScripts} wait"`;
 
             const query = `
             mutation($input: PodFindAndDeployOnDemandInput!) {
