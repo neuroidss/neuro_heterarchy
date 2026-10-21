@@ -25,7 +25,8 @@
         label { font-size: 11px; color: #94a3b8; display: block; margin-bottom: 4px; }
         #statusMsg { color: #fbbf24; font-size: 13px; margin-top: 10px; font-weight: bold; text-align: center;}
         
-        /* Экран настроек */
+        .log-box { background: #020617; color: #38bdf8; padding: 10px; border-radius: 6px; border: 1px solid #1e293b; font-size: 11px; white-space: pre-wrap; height: 350px; overflow-y: auto; font-family: 'Courier New', Courier, monospace;}
+        
         #settingsScreen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #06090e; display: flex; justify-content: center; align-items: center; z-index: 1000; padding: 20px; box-sizing: border-box;}
         .settings-box { background: #0f172a; padding: 30px; border-radius: 10px; border: 1px solid #38bdf8; width: 100%; max-width: 500px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);}
         .settings-box input { font-size: 14px; padding: 12px; margin-bottom: 15px;}
@@ -34,18 +35,16 @@
 </head>
 <body>
 
-    <!-- ЭКРАН НАСТРОЕК (Показывается при входе) -->
+    <!-- ЭКРАН НАСТРОЕК -->
     <div id="settingsScreen">
         <div class="settings-box">
             <h2 style="font-size: 18px; text-align: center; border: none;">Настройки Подключения</h2>
             
             <label>RunPod API Key:</label>
             <input type="password" id="apiKey" placeholder="rpa_...">
-            <span class="hint">Ключ сохраняется только в вашем браузере (localStorage).</span>
 
             <label>CORS Proxy URL (Cloudflare Worker):</label>
             <input type="text" id="proxyUrl" value="https://runpod-cors-proxy.dmitry-sukhoruchkin.workers.dev">
-            <span class="hint">Необходим для обхода защиты браузера. Оставьте по умолчанию или укажите свой.</span>
 
             <button class="btn btn-green" style="width: 100%; padding: 12px; font-size: 14px;" onclick="saveSettings()">Сохранить и Войти</button>
             <p id="connectError" style="color: #ef4444; font-size: 12px; margin-top: 15px; text-align: center;"></p>
@@ -68,16 +67,16 @@
                 <div style="flex: 1; min-width: 200px;">
                     <label>Образ (Docker Image):</label>
                     <select id="createImage">
-                        <option value="neuroidss/neuro_heterarchy_all:latest" selected>🚀 All-in-One (Diffusion + MusicGen)</option>
-                        <option value="neuroidss/neuro_heterarchy_musicgen:latest">🎵 MusicGen Only</option>
+                        <option value="neuroidss/neuro_heterarchy_musicgen:latest" selected>🎵 MusicGen Only</option>
+                        <option value="neuroidss/neuro_heterarchy_all:latest">🚀 All-in-One (Diffusion + MusicGen)</option>
                         <option value="neuroidss/neuro_heterarchy_diffusion:latest">🎨 Diffusion Only</option>
                     </select>
                 </div>
                 <div style="flex: 1; min-width: 200px;">
                     <label>GPU (Видеокарта):</label>
                     <select id="createGpu">
-                        <option value="NVIDIA GeForce RTX 5090" selected>🚀 RTX 5090 (32GB)</option>
-                        <option value="NVIDIA GeForce RTX 4090">⚡ RTX 4090 (24GB)</option>
+                        <option value="NVIDIA GeForce RTX 4090" selected>⚡ RTX 4090 (24GB)</option>
+                        <option value="NVIDIA GeForce RTX 5090">🚀 RTX 5090 (32GB)</option>
                         <option value="RTX 6000 Ada generation">💎 RTX 6000 Ada (48GB)</option>
                         <option value="NVIDIA L40S">⚙️ L40S (48GB)</option>
                     </select>
@@ -94,10 +93,15 @@
             <div id="podList">Загрузка...</div>
         </div>
 
+        <!-- БЛОК ЛОГОВ (ДИАГНОСТИКА) -->
+        <div class="card">
+            <h2>📜 Диагностика (Консоль контейнера)</h2>
+            <div class="log-box" id="liveLogs">Нажмите желтую кнопку "📋 Читать логи" в списке подов, чтобы увидеть консольный вывод...</div>
+        </div>
+
     </div>
 
     <script>
-        // Инициализация при загрузке
         window.onload = () => {
             const savedKey = localStorage.getItem("runpod_api_key");
             const savedProxy = localStorage.getItem("runpod_cors_proxy");
@@ -113,17 +117,10 @@
         function saveSettings() {
             const key = document.getElementById("apiKey").value.trim();
             let proxy = document.getElementById("proxyUrl").value.trim();
-            
-            if (!key || !proxy) {
-                document.getElementById("connectError").innerText = "Заполните оба поля!";
-                return;
-            }
-
+            if (!key || !proxy) return;
             if (proxy.endsWith('/')) proxy = proxy.slice(0, -1);
             localStorage.setItem("runpod_api_key", key);
             localStorage.setItem("runpod_cors_proxy", proxy);
-            
-            document.getElementById("connectError").innerText = "";
             showDashboard();
         }
 
@@ -139,8 +136,7 @@
         }
 
         function logMsg(msg) {
-            const el = document.getElementById("statusMsg");
-            el.innerText = msg;
+            document.getElementById("statusMsg").innerText = msg;
             console.log(msg);
         }
 
@@ -148,7 +144,6 @@
             const apiKey = localStorage.getItem("runpod_api_key");
             const proxy = localStorage.getItem("runpod_cors_proxy");
             if (!apiKey || !proxy) return null;
-
             const fetchUrl = `${proxy}?api_key=${apiKey}`;
 
             try {
@@ -199,9 +194,8 @@
                         
                         ${isRun ? `
                         <div style="margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;">
-                            <a href="${studioUrl}" target="_blank" style="color:#00ffc8; font-size: 12px; text-decoration: none;">🌐 Открыть Web Studio (8080)</a>
-                            <a href="https://www.runpod.io/console/pods" target="_blank" style="color:#a7f3d0; font-size: 12px; text-decoration: none;">💻 Web Terminal</a>
-                            <a href="javascript:void(0)" onclick="fetchPodLogs('${p.id}')" style="color:#fcd34d; font-size: 12px; text-decoration: none;">📋 Читать логи</a>
+                            <a href="${studioUrl}" target="_blank" style="color:#00ffc8; font-size: 12px; text-decoration: none;">🌐 Открыть Web Studio</a>
+                            <a href="javascript:void(0)" onclick="fetchPodLogs('${p.id}')" style="background:#fcd34d; color:#000; font-size: 11px; padding: 4px 8px; border-radius: 4px; text-decoration: none; font-weight: bold;">📋 Читать логи</a>
                         </div>
                         ` : ''}
                     </div>
@@ -210,54 +204,60 @@
                         ${!isRun 
                             ? `<button class="btn btn-green" onclick="resumePod('${p.id}')">▶️ Запустить</button>` 
                             : `<button class="btn btn-orange" onclick="stopPod('${p.id}')">⏸️ Остановить</button>`}
-                        <button class="btn btn-red" onclick="terminatePod('${p.id}')">🗑️ Удалить навсегда</button>
+                        <button class="btn btn-red" onclick="terminatePod('${p.id}')">🗑️ Удалить</button>
                     </div>
                 </div>`;
             }).join('');
             logMsg("✅ Список подов успешно загружен.");
         }
 
-        // Запрос логов контейнера (Диагностика крашей)
+        // ==========================================
+        // ЗАПРОС ЛОГОВ ИЗ КОНТЕЙНЕРА (ДИАГНОСТИКА)
+        // ==========================================
         async function fetchPodLogs(podId) {
             logMsg(`📡 Запрос логов из пода ${podId}...`);
+            const logBox = document.getElementById("liveLogs");
+            if (!logBox) return;
+
+            logBox.textContent = "Загрузка логов с сервера...";
+            
             const query = `query pod($id: String!) { pod(id: $id) { logs } }`;
             const data = await runpodGQL(query, { id: podId });
             
-            const logBox = document.getElementById("liveLogs");
             if (data && data.pod && data.pod.logs) {
-                logBox.textContent = data.pod.logs;
+                // Берем последние 5000 символов
+                logBox.textContent = data.pod.logs.slice(-5000) || "Логи пусты. Возможно, процессы еще не запустились.";
                 logBox.scrollTop = logBox.scrollHeight;
-                logMsg(`✅ Логи загружены! Смотрите панель ниже.`);
+                logMsg(`✅ Логи успешно получены! Смотрите панель "Диагностика".`);
             } else {
-                logBox.textContent = "Логи пусты или под еще не запустился.";
-                logMsg(`⚠️ Не удалось получить логи.`);
+                logBox.textContent = "Не удалось получить логи. Под еще инициализируется.";
+                logMsg(`⚠️ Ошибка получения логов.`);
             }
         }
 
+        // ==========================================
+        // СОЗДАНИЕ ПОДА (КОПИЯ ЛОГИКИ ORANGEPI_RUNPOD_REST.PY)
+        // ==========================================
         async function createPod() {
             const gpu = document.getElementById("createGpu").value;
             const image = document.getElementById("createImage").value;
             
+            // 1. Устанавливаем пути, папку для весов (HF_HOME) и выбор питона как в orangepi-версии
+            const bashPrefix = "export HF_HOME=/workspace/hf_cache; export PYTHONUNBUFFERED=1; mkdir -p /workspace/hf_cache /workspace/logs; if [ -f /opt/venv_musicgen/bin/python3 ]; then PY_MUSIC=\"/opt/venv_musicgen/bin/python3\"; else PY_MUSIC=\"python3\"; fi; ";
+            
             let runScripts = "";
             
-            // 1. Если образ "All-in-One" (Двойной) - запускаем всё вместе
-            // MusicGen из venv, Diffusion из системного Python
+            // 2. Diffusion не трогаем (чистый python3), MusicGen использует PY_MUSIC. 
+            // Без редиректов (>) чтобы весь лог летел в консоль контейнера для команды fetchPodLogs!
             if (image.includes("all")) {
-                const pyMusic = "/opt/venv_musicgen/bin/python3";
-                const pyVision = "python3";
-                runScripts = `${pyMusic} /app/musicgen_server.py --port 6005 --model facebook/musicgen-small & ${pyMusic} /app/neuro_heterarchy_musicgen.py --headless --mode semantic --lore /app/lore/music_lore.txt --gateway-port 6003 & ${pyVision} /app/brain_server.py --mode lcm & ${pyVision} /app/neuro_heterarchy_diffusion.py --headless --mode lcm --steps 2 --lore /app/lore/world_lore.txt & `;
-            } 
-            // 2. Если образ только MusicGen - используем системный python3
-            else if (image.includes("musicgen")) {
-                runScripts = `python3 /app/musicgen_server.py --port 6005 --model facebook/musicgen-small & python3 /app/neuro_heterarchy_musicgen.py --headless --mode semantic --lore /app/lore/music_lore.txt --gateway-port 6003 & `;
-            } 
-            // 3. Если образ только Diffusion - используем системный python3
-            else if (image.includes("diffusion")) {
-                runScripts = `python3 /app/brain_server.py --mode lcm & python3 /app/neuro_heterarchy_diffusion.py --headless --mode lcm --steps 2 --lore /app/lore/world_lore.txt & `;
+                runScripts = `$PY_MUSIC -u /app/musicgen_server.py --port 6005 --model facebook/musicgen-small & $PY_MUSIC -u /app/neuro_heterarchy_musicgen.py --headless --mode semantic --lore /app/lore/music_lore.txt --gateway-port 6003 & python3 -u /app/brain_server.py --mode lcm & python3 -u /app/neuro_heterarchy_diffusion.py --headless --mode lcm --steps 2 --lore /app/lore/world_lore.txt & `;
+            } else if (image.includes("musicgen")) {
+                runScripts = `$PY_MUSIC -u /app/musicgen_server.py --port 6005 --model facebook/musicgen-small & $PY_MUSIC -u /app/neuro_heterarchy_musicgen.py --headless --mode semantic --lore /app/lore/music_lore.txt --gateway-port 6003 & `;
+            } else if (image.includes("diffusion")) {
+                runScripts = `python3 -u /app/brain_server.py --mode lcm & python3 -u /app/neuro_heterarchy_diffusion.py --headless --mode lcm --steps 2 --lore /app/lore/world_lore.txt & `;
             }
 
-            // Команда старта контейнера (SSH + Нейросети + Web Gateway)
-            const dockerArgs = `bash -c "/usr/sbin/sshd -D & ${runScripts} python3 /app/web_cloud_gateway.py --port 8080 --music-lore /app/lore/music_lore.txt --lore /app/lore/world_lore.txt"`;
+            const dockerArgs = `bash -c "${bashPrefix} /usr/sbin/sshd -D & ${runScripts} python3 -u /app/web_cloud_gateway.py --port 8080 --music-lore /app/lore/music_lore.txt --lore /app/lore/world_lore.txt"`;
 
             const query = `
             mutation($input: PodFindAndDeployOnDemandInput!) {
