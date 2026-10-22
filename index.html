@@ -25,8 +25,6 @@
         label { font-size: 11px; color: #94a3b8; display: block; margin-bottom: 4px; }
         #statusMsg { color: #fbbf24; font-size: 13px; margin-top: 10px; font-weight: bold; text-align: center;}
         
-        .log-box { background: #020617; color: #38bdf8; padding: 10px; border-radius: 6px; border: 1px solid #1e293b; font-size: 11px; white-space: pre-wrap; height: 350px; overflow-y: auto; font-family: 'Courier New', Courier, monospace;}
-        
         #settingsScreen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #06090e; display: flex; justify-content: center; align-items: center; z-index: 1000; padding: 20px; box-sizing: border-box;}
         .settings-box { background: #0f172a; padding: 30px; border-radius: 10px; border: 1px solid #38bdf8; width: 100%; max-width: 500px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);}
         .settings-box input { font-size: 14px; padding: 12px; margin-bottom: 15px;}
@@ -91,12 +89,6 @@
                 <button class="btn btn-blue" style="flex-grow: 0; padding: 4px 10px;" onclick="loadPods()">🔄 Обновить</button>
             </h2>
             <div id="podList">Загрузка...</div>
-        </div>
-
-        <!-- БЛОК ЛОГОВ (ДИАГНОСТИКА) -->
-        <div class="card">
-            <h2>📜 Диагностика (Консоль контейнера)</h2>
-            <div class="log-box" id="liveLogs">Нажмите желтую кнопку "📋 Читать логи" в списке подов, чтобы увидеть консольный вывод...</div>
         </div>
 
     </div>
@@ -194,8 +186,8 @@
                         
                         ${isRun ? `
                         <div style="margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;">
-                            <a href="${studioUrl}" target="_blank" style="color:#00ffc8; font-size: 12px; text-decoration: none;">🌐 Открыть Web Studio</a>
-                            <a href="javascript:void(0)" onclick="fetchPodLogs('${p.id}')" style="background:#fcd34d; color:#000; font-size: 11px; padding: 4px 8px; border-radius: 4px; text-decoration: none; font-weight: bold;">📋 Читать логи</a>
+                            <a href="${studioUrl}" target="_blank" style="color:#00ffc8; font-size: 12px; text-decoration: none;">🌐 Открыть Web Studio (8080)</a>
+                            <a href="https://www.runpod.io/console/pods" target="_blank" style="color:#a7f3d0; font-size: 12px; text-decoration: none;">💻 Web Terminal / Логи</a>
                         </div>
                         ` : ''}
                     </div>
@@ -204,51 +196,22 @@
                         ${!isRun 
                             ? `<button class="btn btn-green" onclick="resumePod('${p.id}')">▶️ Запустить</button>` 
                             : `<button class="btn btn-orange" onclick="stopPod('${p.id}')">⏸️ Остановить</button>`}
-                        <button class="btn btn-red" onclick="terminatePod('${p.id}')">🗑️ Удалить</button>
+                        <button class="btn btn-red" onclick="terminatePod('${p.id}')">🗑️ Удалить навсегда</button>
                     </div>
                 </div>`;
             }).join('');
             logMsg("✅ Список подов успешно загружен.");
         }
 
-        // ==========================================
-        // ЗАПРОС ЛОГОВ ИЗ КОНТЕЙНЕРА (ДИАГНОСТИКА)
-        // ==========================================
-        async function fetchPodLogs(podId) {
-            logMsg(`📡 Запрос логов из пода ${podId}...`);
-            const logBox = document.getElementById("liveLogs");
-            if (!logBox) return;
-
-            logBox.textContent = "Загрузка логов с сервера...";
-            
-            const query = `query pod($id: String!) { pod(id: $id) { logs } }`;
-            const data = await runpodGQL(query, { id: podId });
-            
-            if (data && data.pod && data.pod.logs) {
-                // Берем последние 5000 символов
-                logBox.textContent = data.pod.logs.slice(-5000) || "Логи пусты. Возможно, процессы еще не запустились.";
-                logBox.scrollTop = logBox.scrollHeight;
-                logMsg(`✅ Логи успешно получены! Смотрите панель "Диагностика".`);
-            } else {
-                logBox.textContent = "Не удалось получить логи. Под еще инициализируется.";
-                logMsg(`⚠️ Ошибка получения логов.`);
-            }
-        }
-
-        // ==========================================
-        // СОЗДАНИЕ ПОДА (КОПИЯ ЛОГИКИ ORANGEPI_RUNPOD_REST.PY)
-        // ==========================================
         async function createPod() {
             const gpu = document.getElementById("createGpu").value;
             const image = document.getElementById("createImage").value;
             
-            // 1. Устанавливаем пути, папку для весов (HF_HOME) и выбор питона как в orangepi-версии
+            // Задаем правильное виртуальное окружение и создаем папки
             const bashPrefix = "export HF_HOME=/workspace/hf_cache; export PYTHONUNBUFFERED=1; mkdir -p /workspace/hf_cache /workspace/logs; if [ -f /opt/venv_musicgen/bin/python3 ]; then PY_MUSIC=\"/opt/venv_musicgen/bin/python3\"; else PY_MUSIC=\"python3\"; fi; ";
             
             let runScripts = "";
             
-            // 2. Diffusion не трогаем (чистый python3), MusicGen использует PY_MUSIC. 
-            // Без редиректов (>) чтобы весь лог летел в консоль контейнера для команды fetchPodLogs!
             if (image.includes("all")) {
                 runScripts = `$PY_MUSIC -u /app/musicgen_server.py --port 6005 --model facebook/musicgen-small & $PY_MUSIC -u /app/neuro_heterarchy_musicgen.py --headless --mode semantic --lore /app/lore/music_lore.txt --gateway-port 6003 & python3 -u /app/brain_server.py --mode lcm & python3 -u /app/neuro_heterarchy_diffusion.py --headless --mode lcm --steps 2 --lore /app/lore/world_lore.txt & `;
             } else if (image.includes("musicgen")) {
