@@ -670,8 +670,9 @@ class HeterarchyDeltaProcessor:
             print(f"🪜 [API ЛЕСТНИЦА РЕГИОНОВ]: Ступень {self.ladder_stage}/4 (Якорь: '{lock_word}')")
 
     def step(self, frame, dt: float) -> tuple[torch.Tensor, float, dict]:
-        with self.lock:
-            w_count = len(self.semantic.words)
+        with self.lock, self.semantic.lock:
+            words_copy = list(self.semantic.words)
+            w_count = len(words_copy)
             t_now = time.time()
 
             topo_lists = self.router.resolve(frame.nodes)
@@ -769,9 +770,10 @@ class HeterarchyDeltaProcessor:
 
             target_77 = res["AFz"]["tree_77"].clone()
             root_w = res["AFz"]["dag_parts"][0]
-            root_c_idx = res["AFz"]["indices"][res["AFz"]["root_s"]]
-            clean_emb = self.semantic.empty_embed if w_count == 0 else self.semantic.get_77_embedding_gpu(root_w)
-            clean_norms = torch.norm(clean_emb, p=2, dim=-1, keepdim=True)
+            raw_root_idx = res["AFz"]["indices"][res["AFz"]["root_s"]]
+            root_c_idx = (raw_root_idx % w_count) if w_count > 0 else 0
+            clean_emb = self.semantic.last_active_embed if w_count == 0 else self.semantic.get_77_embedding_gpu(root_w)
+            clean_norms = torch.norm(clean_emb, p=2, dim=-1, keepdim=True).clamp(min=1e-5)
 
             v_aff_16x768 = self.semantic.get_concept_affordances_svd(root_c_idx, max_bases=16)
             raw_fcz_wave = res["FCz"]["monty"]["sagitta_16x768"] + res["FCz"]["monty"]["z_on_16x768"] * 0.5
@@ -780,13 +782,14 @@ class HeterarchyDeltaProcessor:
             )
             target_77[53:69].add_(sem_action_16x768, alpha=0.40)
 
-            if fcz_persistence > 0.65 and w_count > 1 and self.region_configs["FCz"]["mode"] != "locked":
+            vocab_rows = self.semantic.norm_vocab.shape[0]
+            if fcz_persistence > 0.65 and w_count > 1 and vocab_rows >= w_count and self.region_configs["FCz"]["mode"] != "locked":
                 act_dir = F.normalize(sem_action_16x768.mean(dim=0, keepdim=True), p=2, dim=-1)
-                cur_vec = self.semantic.norm_vocab[root_c_idx:root_c_idx+1]
+                cur_vec = self.semantic.norm_vocab[root_c_idx:root_c_idx + 1]
                 shifted = F.normalize(cur_vec + act_dir * 0.50, p=2, dim=-1)
-                best_nb = int(torch.argmax(torch.mm(shifted, self.semantic.norm_vocab.T).squeeze(0)).item())
+                best_nb = int(torch.argmax(torch.mm(shifted, self.semantic.norm_vocab[:w_count].T).squeeze(0)).item()) % w_count
                 if best_nb != root_c_idx:
-                    nb_emb = self.semantic.get_77_embedding_gpu(self.semantic.words[best_nb])
+                    nb_emb = self.semantic.get_77_embedding_gpu(words_copy[best_nb])
                     target_77.mul_(0.65).add_(nb_emb, alpha=0.35)
 
             if self.region_configs["F3"]["mode"] != "locked":
@@ -799,13 +802,14 @@ class HeterarchyDeltaProcessor:
             fpz_tension = float(np.clip(max_surprise * 0.55 + abs(res["Fpz"]["temporal_asymmetry"]) * 0.45, 0.0, 1.0))
 
             if self.region_configs["Fpz"]["mode"] != "locked" and w_count > 1:
+                self.epoch_wheel_phase = self.epoch_wheel_phase % float(w_count)
                 if max_surprise > 0.55:
                     self.epoch_wheel_phase = (self.epoch_wheel_phase + dt * (0.35 + max_surprise * 0.45)) % float(w_count)
                 ep_a = int(math.floor(self.epoch_wheel_phase)) % w_count
                 ep_b = (ep_a + 1) % w_count
                 ep_alpha = 0.5 * (1.0 - math.cos((self.epoch_wheel_phase - math.floor(self.epoch_wheel_phase)) * math.pi))
-                emb_a = self.semantic.get_77_embedding_gpu(self.semantic.words[ep_a])
-                emb_b = self.semantic.get_77_embedding_gpu(self.semantic.words[ep_b])
+                emb_a = self.semantic.get_77_embedding_gpu(words_copy[ep_a])
+                emb_b = self.semantic.get_77_embedding_gpu(words_copy[ep_b])
                 target_77[1:5].mul_(0.60).add_(emb_a[1:5] * (1.0 - ep_alpha) + emb_b[1:5] * ep_alpha, alpha=0.40)
 
             target_77[69:76].add_(primary["monty"]["sdr_tokens_7x768"], alpha=0.25)

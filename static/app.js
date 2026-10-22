@@ -16,7 +16,21 @@ let audioAbortCtrl = null;
 const myClientId = "client_" + Math.random().toString(36).substring(2, 9);
 let isProbeMode = false;
 
+// Переменные высокоскоростного видео-стрима (Server-Push + Latest-Frame Mailbox)
+let videoStreamAbortCtrl = null;
+let latestJpegBytes = null;
+let latestFrameSeq = 0;
+let renderedFrameSeq = 0;
+let isImgDecoding = false;
+let currentBlobUrl = null;
+let clientRenderCount = 0;
+let clientScreenFps = 0.0;
+let clientDroppedFrames = 0;
+
 const dom = {
+    diffModel: document.getElementById('diffModel'),
+    musicModel: document.getElementById('musicModel'),
+
     videoStreamImg: document.getElementById('videoStreamImg'),
     canvasBox: document.getElementById('canvasBox'),
     fsToggleBtn: document.getElementById('fsToggleBtn'),
@@ -27,17 +41,21 @@ const dom = {
 
     ladderStageSelect: document.getElementById('ladderStageSelect'),
     montyStatusBar: document.getElementById('montyStatusBar'),
-    
+
+    diffLagStatus: document.getElementById('diffLagStatus'),
     visionConceptList: document.getElementById('visionConceptList'),
     newVisionInput: document.getElementById('newVisionInput'),
     btnAddVision: document.getElementById('btnAddVision'),
     diffPreset: document.getElementById('diffPreset'),
+    diffResolution: document.getElementById('diffResolution'),
+    diffTaesd: document.getElementById('diffTaesd'),
     diffSteps: document.getElementById('diffSteps'),
     diffCfg: document.getElementById('diffCfg'),
     diffStrLow: document.getElementById('diffStrLow'),
     diffStrHigh: document.getElementById('diffStrHigh'),
+    diffWorldContext: document.getElementById('diffWorldContext'),
     diffEmaSmooth: document.getElementById('diffEmaSmooth'),
-    
+
     btnAudio: document.getElementById('btnAudio'),
     neuroAudio: document.getElementById('neuroAudio'),
     musicLagStatus: document.getElementById('musicLagStatus'),
@@ -54,25 +72,158 @@ const dom = {
     mTemp: document.getElementById('mTemp'),
     mTopK: document.getElementById('mTopK'),
     mCfg: document.getElementById('mCfg'),
-    
+
     btnRecStart: document.getElementById('btnRecStart'),
     btnRecStop: document.getElementById('btnRecStop'),
     recStatusText: document.getElementById('recStatusText'),
     recBadge: document.getElementById('recBadge'),
-    
+
     deviceCardTemplate: document.getElementById('deviceCardTemplate'),
     conceptChipTemplate: document.getElementById('conceptChipTemplate')
 };
 
+// =============================================================================
+// HIGH-FPS SERVER-PUSH STREAMER С ПЕРЕЗАПИСЬЮ УСТАРЕВШИХ КАДРОВ В ОЗУ (ДО 60 FPS)
+// =============================================================================
+function paintLatestFrameFromRam() {
+    if (isProbeMode || isImgDecoding || latestFrameSeq === renderedFrameSeq || !latestJpegBytes) {
+        return;
+    }
+    isImgDecoding = true;
+    // Если за время декодирования(1.5 мс) прилетело >1 кадра, промежуточные сразу отбрасываются
+    const skipped = (latestFrameSeq - renderedFrameSeq) - 1;
+    if (skipped > 0) clientDroppedFrames += skipped;
+    renderedFrameSeq = latestFrameSeq;
+
+    const blob = new Blob([latestJpegBytes], { type: 'image/jpeg' });
+    const nextUrl = URL.createObjectURL(blob);
+
+    dom.videoStreamImg.onload = () => {
+        if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+        currentBlobUrl = nextUrl;
+        isImgDecoding = false;
+        clientRenderCount++;
+        // Если пока рисовали, из сокета уже прилетел новый кадр — рисуем мгновенно (0 мс ожидания)!
+        if (latestFrameSeq !== renderedFrameSeq) {
+            requestAnimationFrame(paintLatestFrameFromRam);
+        }
+    };
+
+    dom.videoStreamImg.onerror = () => {
+        URL.revokeObjectURL(nextUrl);
+        isImgDecoding = false;
+    };
+
+    dom.videoStreamImg.src = nextUrl;
+}
+
+async function startPushVideoStream() {
+    stopPushVideoStream();
+    if (isProbeMode || !dom.videoStreamImg) return;
+
+    videoStreamAbortCtrl = new AbortController();
+    const signal = videoStreamAbortCtrl.signal;
+
+    try {
+        const response = await fetch('/stream.mjpg?t=' + Date.now(), {
+            signal: signal,
+            cache: 'no-store'
+        });
+        if (!response.body) {
+            // Fallback если браузер не поддерживает ReadableStream
+            dom.videoStreamImg.src = '/stream.mjpg';
+            return;
+        }
+
+        const reader = response.body.getReader();
+        let buffer = new Uint8Array(0);
+
+        while (!isProbeMode && !signal.aborted) {
+            const { done, value } = await reader.read();
+            if (done || signal.aborted) break;
+            if (!value || value.byteLength === 0) continue;
+
+            // Доклеиваем прилетевший сетевой чанк в рабочий буфер
+            const merged = new Uint8Array(buffer.byteLength + value.byteLength);
+            merged.set(buffer, 0);
+            merged.set(value, buffer.byteLength);
+            buffer = merged;
+
+            // Ищем ВСЕ полные JPEG-кадры (от маркера SOI 0xFFD8 до EOI 0xFFD9) в буфере
+            let lastValidJpeg = null;
+            let lastEndPos = -1;
+            let framesInBurst = 0;
+            let searchPos = 0;
+
+            while (searchPos < buffer.byteLength - 1) {
+                // Ищем начало JPEG (0xFF 0xD8)
+                let soi = -1;
+                for (let i = searchPos; i < buffer.byteLength - 1; i++) {
+                    if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
+                        soi = i;
+                        break;
+                    }
+                }
+                if (soi === -1) break;
+
+                // Ищем конец JPEG (0xFF 0xD9)
+                let eoi = -1;
+                for (let i = soi + 2; i < buffer.byteLength - 1; i++) {
+                    if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9) {
+                        eoi = i + 2;
+                        break;
+                    }
+                }
+                if (eoi === -1) {
+                    // Кадр еще докачивается — оставляем хвост начиная с SOI
+                    if (soi > 0 && lastEndPos === -1) {
+                        buffer = buffer.slice(soi);
+                    }
+                    break;
+                }
+
+                // Полный кадр найден! Перезаписываем им более старый кадр из этой же пачки
+                lastValidJpeg = buffer.slice(soi, eoi);
+                lastEndPos = eoi;
+                searchPos = eoi;
+                framesInBurst++;
+            }
+
+            if (lastEndPos !== -1) {
+                buffer = buffer.slice(lastEndPos);
+                latestJpegBytes = lastValidJpeg;
+                latestFrameSeq += framesInBurst;
+                paintLatestFrameFromRam();
+            } else if (buffer.byteLength > 2 * 1024 * 1024) {
+                // Защита от переполнения при поврежденном пакете
+                buffer = new Uint8Array(0);
+            }
+        }
+    } catch (err) {
+        if (!signal.aborted && !isProbeMode) {
+            setTimeout(startPushVideoStream, 500);
+        }
+    }
+}
+
+function stopPushVideoStream() {
+    if (videoStreamAbortCtrl) {
+        try { videoStreamAbortCtrl.abort(); } catch (e) {}
+        videoStreamAbortCtrl = null;
+    }
+    isImgDecoding = false;
+}
+
 function toggleProbeMode(enabled) {
     isProbeMode = enabled;
     if (isProbeMode) {
+        stopPushVideoStream();
         dom.videoStreamImg.src = "";
         dom.videoStreamImg.style.display = "none";
         if (isAudioPlaying) toggleAudio();
     } else {
         dom.videoStreamImg.style.display = "block";
-        dom.videoStreamImg.src = "/stream.mjpg";
+        startPushVideoStream();
     }
 }
 
@@ -84,6 +235,9 @@ function toggleFullScreen() {
     }
 }
 
+// =============================================================================
+// ЧТЕНИЕ И ЗАПИСЬ РЕГИСТРОВ PGA ADS131M08
+// =============================================================================
 function readRegister(devObj, reg) {
     return new Promise((resolve) => {
         devObj.pendingReadReg = reg;
@@ -159,15 +313,18 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
     return false;
 }
 
+// =============================================================================
+// ПРЕСЕТЫ И НАСТРОЙКИ ДИФФУЗИИ И МУЗЫКИ
+// =============================================================================
 const PRESETS = {
-    meditation: { steps: 2, cfg: 1.0, strLow: 0.45, strHigh: 0.70, ema: 0.30 },
-    balanced:   { steps: 2, cfg: 1.0, strLow: 0.50, strHigh: 0.85, ema: 0.14 },
-    dynamic:    { steps: 3, cfg: 1.2, strLow: 0.60, strHigh: 0.92, EMA: 0.08 }
+    meditation: { steps: 0, cfg: 1.0, strLow: 0.45, strHigh: 0.70, ctx: 0.30, ema: 0.28 },
+    balanced:   { steps: 0, cfg: 1.0, strLow: 0.50, strHigh: 0.85, ctx: 0.18, ema: 0.12 },
+    dynamic:    { steps: 2, cfg: 1.1, strLow: 0.60, strHigh: 0.92, ctx: 0.05, ema: 0.05 }
 };
 
 const MUSIC_PRESETS = {
     meditation: { block: 0.0, ctx: 3.6, strLow: 0.12, strHigh: 0.45, ema: 0.35, temp: 0.95 },
-    balanced:   { block: 0.0, ctx: 3.6, strLow: 0.25, strHigh: 0.75, ema: 0.20, temp: 1.0 },
+    balanced:   { block: 0.0, ctx: 3.6, strLow: 0.25, strHigh: 0.75, ema: 0.20, temp: 1.00 },
     dynamic:    { block: 0.0, ctx: 2.4, strLow: 0.35, strHigh: 0.92, ema: 0.10, temp: 1.05 }
 };
 
@@ -179,8 +336,9 @@ function applyPreset(presetKey) {
     dom.diffCfg.value = p.cfg;
     dom.diffStrLow.value = p.strLow;
     dom.diffStrHigh.value = p.strHigh;
-    dom.diffEmaSmooth.value = p.ema || 0.08;
-    sendDiffConfig(p.steps, p.cfg, p.strLow, p.strHigh, p.ema || 0.08, presetKey);
+    if (dom.diffWorldContext) dom.diffWorldContext.value = p.ctx;
+    dom.diffEmaSmooth.value = p.ema;
+    onManualParamChange(presetKey);
 }
 
 function applyMusicPreset(presetKey) {
@@ -196,34 +354,45 @@ function applyMusicPreset(presetKey) {
     updateMusicConfig();
 }
 
-function onManualParamChange() {
-    dom.diffPreset.value = 'custom';
-    const steps = Math.max(1, Math.min(6, parseInt(dom.diffSteps.value) || 2));
+function onManualParamChange(presetOverride = 'custom') {
+    if (typeof presetOverride !== 'string') presetOverride = 'custom';
+    dom.diffPreset.value = presetOverride;
+
+    const rawSteps = parseInt(dom.diffSteps.value);
+    const steps = Number.isNaN(rawSteps) ? 0 : Math.max(0, Math.min(8, rawSteps));
     const cfg = Math.max(0.0, Math.min(3.0, parseFloat(dom.diffCfg.value) || 1.0));
-    let sLow = Math.max(0.35, Math.min(0.75, parseFloat(dom.diffStrLow.value) || 0.50));
+    let sLow = Math.max(0.30, Math.min(0.80, parseFloat(dom.diffStrLow.value) || 0.50));
     let sHigh = Math.max(sLow + 0.05, Math.min(0.95, parseFloat(dom.diffStrHigh.value) || 0.85));
-    const ema = Math.max(0.04, Math.min(0.50, parseFloat(dom.diffEmaSmooth.value) || 0.14));
+
+    const rawCtx = parseFloat(dom.diffWorldContext ? dom.diffWorldContext.value : 0.18);
+    const wCtx = Number.isNaN(rawCtx) ? 0.18 : Math.max(0.0, Math.min(0.60, rawCtx));
+    const ema = Math.max(0.02, Math.min(0.50, parseFloat(dom.diffEmaSmooth.value) || 0.12));
+
+    const res = dom.diffResolution ? dom.diffResolution.value : "512x384";
+    const useTaesd = dom.diffTaesd ? (dom.diffTaesd.value === "1") : true;
 
     dom.diffSteps.value = steps;
     dom.diffCfg.value = cfg;
     dom.diffStrLow.value = sLow;
     dom.diffStrHigh.value = sHigh;
+    if (dom.diffWorldContext) dom.diffWorldContext.value = wCtx;
     dom.diffEmaSmooth.value = ema;
 
-    sendDiffConfig(steps, cfg, sLow, sHigh, ema, 'custom');
-}
-
-async function sendDiffConfig(steps, cfg, sLow, sHigh, ema, presetKey) {
-    await fetch('/api/diffusion/config', {
+    fetch('/api/diffusion/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-            preset: presetKey,
+            mode: dom.diffModel ? dom.diffModel.value : 'lcm',
+            preset: presetOverride,
             steps: steps,
             guidance_scale: cfg,
             strength_low: sLow,
             strength_high: sHigh,
-            ema_smooth: ema
+            world_context: wCtx,
+            ema_smooth: ema,
+            resolution: res,
+            use_taesd: useTaesd,
+            use_color: useTaesd
         })
     });
 }
@@ -237,19 +406,45 @@ async function onLadderStageChange() {
     });
 }
 
+// =============================================================================
+// SSE ПОТОК ТЕЛЕМЕТРИИ И СОСТОЯНИЯ
+// =============================================================================
 const sse = new EventSource('/api/state_stream');
 
 sse.addEventListener('state', (e) => {
     const st = JSON.parse(e.data);
     if (st.world) {
         renderVisionConcepts(st.world.concepts || []);
-        dom.diffSteps.value = st.world.steps || 2;
-        dom.diffCfg.value = st.world.guidance_scale || 1.0;
-        dom.diffStrLow.value = st.world.strength_low || 0.50;
-        dom.diffStrHigh.value = st.world.strength_high || 0.85;
-        dom.diffEmaSmooth.value = st.world.ema_smooth || 0.14;
-        if (st.world.preset) dom.diffPreset.value = st.world.preset;
-        if (st.world.ladder_stage) dom.ladderStageSelect.value = st.world.ladder_stage;
+        if (document.activeElement !== dom.diffSteps) dom.diffSteps.value = st.world.steps ?? 0;
+        if (document.activeElement !== dom.diffCfg) dom.diffCfg.value = st.world.guidance_scale ?? 1.0;
+        if (document.activeElement !== dom.diffStrLow) dom.diffStrLow.value = st.world.strength_low ?? 0.50;
+        if (document.activeElement !== dom.diffStrHigh) dom.diffStrHigh.value = st.world.strength_high ?? 0.85;
+        if (dom.diffWorldContext && document.activeElement !== dom.diffWorldContext) {
+            dom.diffWorldContext.value = st.world.world_context ?? 0.18;
+        }
+        if (document.activeElement !== dom.diffEmaSmooth) dom.diffEmaSmooth.value = st.world.ema_smooth ?? 0.12;
+        if (dom.diffResolution && document.activeElement !== dom.diffResolution && st.world.resolution) {
+            dom.diffResolution.value = st.world.resolution;
+        }
+        if (dom.diffTaesd && document.activeElement !== dom.diffTaesd && st.world.use_taesd !== undefined) {
+            dom.diffTaesd.value = st.world.use_taesd ? "1" : "0";
+        }
+        if (st.world.preset && document.activeElement !== dom.diffPreset) {
+            dom.diffPreset.value = st.world.preset;
+        }
+        if (st.world.ladder_stage && document.activeElement !== dom.ladderStageSelect) {
+            dom.ladderStageSelect.value = st.world.ladder_stage;
+        }
+
+        if (dom.diffLagStatus) {
+            const gpuFps = (st.world.fps || 0).toFixed(1);
+            const scrFps = clientScreenFps.toFixed(1);
+            const genMs = (st.world.gen_ms || 0).toFixed(0);
+            const actSteps = st.world.actual_steps || st.world.steps || 2;
+            const res = st.world.resolution || "512x384";
+            const encLabel = st.world.use_taesd ? "TAESD+Color" : "Full-VAE";
+            dom.diffLagStatus.textContent = `Экран: ${scrFps} FPS | GPU: ${gpuFps} FPS (${genMs} мс) | Буфер: 0 кадр | Шаги: ${actSteps} | ${res} | ${encLabel} 🟢`;
+        }
 
         const mLoss = (st.world.monty_loss || 0.0).toFixed(4);
         const pers = (st.world.persistence || 0.0).toFixed(2);
@@ -305,7 +500,7 @@ sse.addEventListener('ble_cmd', async (e) => {
 });
 
 // =============================================================================
-// БЕСШОВНЫЙ WEB AUDIO API ПЛЕЕР (УСТРАНЯЕТ МИКРОПАУЗЫ БРАУЗЕРА МЕЖДУ БЛОКАМИ)
+// БЕСШОВНЫЙ WEB AUDIO API ПЛЕЕР (20 МС СЛАЙСЫ = 1 ТОКЕН ENCODEC)
 // =============================================================================
 async function startWebAudioStream() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -318,13 +513,13 @@ async function startWebAudioStream() {
     const response = await fetch('/audio.wav?t=' + Date.now(), { signal: audioAbortCtrl.signal });
     const reader = response.body.getReader();
 
-    let headerBytesRemaining = 44; // Пропускаем 44-байтный WAV-заголовок
+    let headerBytesRemaining = 44;
     let leftoverByte = null;
     let nextPlayTime = 0;
     let pendingSamples = [];
     let hasStarted = false;
-    const prebufferSamples = Math.floor(AUDIO_SR * 0.06); // 60 мс стартовый запас
-    const sliceSamples = Math.floor(AUDIO_SR * 0.02);     // 20 мс (640 сэмплов = 1 токен EnCodec)
+    const prebufferSamples = Math.floor(AUDIO_SR * 0.06);
+    const sliceSamples = Math.floor(AUDIO_SR * 0.02);
 
     function scheduleSlice(float32Arr) {
         if (!audioCtx || !isAudioPlaying) return;
@@ -332,7 +527,6 @@ async function startWebAudioStream() {
         if (nextPlayTime < now + 0.015) {
             nextPlayTime = now + 0.05;
         } else if (nextPlayTime > now + 1.2) {
-            // Защита от накопления очереди внутри самого браузера при сворачивании вкладки
             nextPlayTime = now + 0.12;
         }
         const audioBuf = audioCtx.createBuffer(1, float32Arr.length, AUDIO_SR);
@@ -344,7 +538,6 @@ async function startWebAudioStream() {
         src.start(nextPlayTime);
         nextPlayTime += float32Arr.length / AUDIO_SR;
     }
-
 
     (async () => {
         try {
@@ -388,7 +581,7 @@ async function startWebAudioStream() {
                 if (!hasStarted) {
                     if (pendingSamples.length >= prebufferSamples) {
                         hasStarted = true;
-                        nextPlayTime = audioCtx.currentTime + 0.08;
+                        nextPlayTime = audioCtx.currentTime + 0.04;
                         while (pendingSamples.length >= sliceSamples) {
                             scheduleSlice(new Float32Array(pendingSamples.splice(0, sliceSamples)));
                         }
@@ -435,10 +628,13 @@ function toggleAudio() {
     }
 }
 
+// =============================================================================
+// BLUETOOTH BLE (FREEEEG16/24)
+// =============================================================================
 function createDeviceCardDOM(devObj) {
     const clone = dom.deviceCardTemplate.content.cloneNode(true);
     const cardEl = clone.querySelector('.device-card');
-    
+
     const titleName = cardEl.querySelector('.device-title-name');
     const userInput = cardEl.querySelector('.device-user-input');
     const roleSelect = cardEl.querySelector('.device-role-select');
@@ -631,6 +827,9 @@ async function sendBatch(devObj) {
 }
 
 setInterval(() => {
+    clientScreenFps = clientRenderCount;
+    clientRenderCount = 0;
+
     activeDevices.forEach(dev => {
         if (!dev.domRefs) return;
         const total = dev.totalReceived + dev.totalLost;
@@ -653,6 +852,9 @@ setInterval(() => {
     });
 }, 1000);
 
+// =============================================================================
+// УПРАВЛЕНИЕ КОНЦЕПТАМИ И ЗАПИСЬЮ СЕССИЙ
+// =============================================================================
 function renderConceptList(containerEl, list, isMusic, onRemove) {
     containerEl.replaceChildren();
     if (list.length === 0) {
@@ -667,7 +869,7 @@ function renderConceptList(containerEl, list, isMusic, onRemove) {
         const clone = dom.conceptChipTemplate.content.cloneNode(true);
         const chip = clone.querySelector('.concept-chip');
         if (isMusic) chip.classList.add('music');
-        
+
         const txt = chip.querySelector('.concept-text');
         txt.textContent = c;
 
@@ -749,6 +951,7 @@ async function updateMusicConfig() {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
+            model: dom.musicModel ? dom.musicModel.value : 'facebook/musicgen-small',
             target_block: targetBlock,
             target_context: parseFloat(dom.mContext.value) || 3.6,
             target_buffer_count: parseInt(dom.mBuffer.value) || 2,
@@ -780,7 +983,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     dom.probeModeToggle.addEventListener('change', (e) => toggleProbeMode(e.target.checked));
     dom.btnConnectBle.addEventListener('click', connectNewBleDevice);
     dom.btnAudio.addEventListener('click', toggleAudio);
-    
+
     dom.btnAddVision.addEventListener('click', addVisionConcept);
     dom.btnAddMusic.addEventListener('click', addMusicConcept);
 
@@ -789,14 +992,22 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     dom.diffPreset.addEventListener('change', (e) => applyPreset(e.target.value));
-    [dom.diffSteps, dom.diffCfg, dom.diffStrLow, dom.diffStrHigh, dom.diffEmaSmooth].forEach(inp => {
-        inp.addEventListener('change', onManualParamChange);
+    [
+        dom.diffSteps, dom.diffCfg, dom.diffStrLow, dom.diffStrHigh,
+        dom.diffWorldContext, dom.diffEmaSmooth, dom.diffResolution, dom.diffTaesd
+    ].forEach(inp => {
+        if (inp) {
+            inp.addEventListener('change', () => onManualParamChange('custom'));
+        }
     });
 
     if (dom.musicPreset) {
         dom.musicPreset.addEventListener('change', (e) => applyMusicPreset(e.target.value));
     }
-    [dom.mStrLow, dom.mStrHigh, dom.mEmaSmooth, dom.mBlock, dom.mContext, dom.mBuffer, dom.mTemp, dom.mTopK, dom.mCfg].forEach(inp => {
+    [
+        dom.mStrLow, dom.mStrHigh, dom.mEmaSmooth, dom.mBlock,
+        dom.mContext, dom.mBuffer, dom.mTemp, dom.mTopK, dom.mCfg
+    ].forEach(inp => {
         if (inp) {
             inp.addEventListener('change', () => {
                 if (dom.musicPreset) dom.musicPreset.value = 'custom';
@@ -807,6 +1018,9 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     dom.btnRecStart.addEventListener('click', () => toggleRecording(true));
     dom.btnRecStop.addEventListener('click', () => toggleRecording(false));
+
+    // Запускаем непрерывный Server-Push видео-поток (0 запросов от клиента, до 60 FPS)
+    startPushVideoStream();
 
     try {
         const [rV, rM] = await Promise.all([

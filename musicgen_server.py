@@ -665,6 +665,32 @@ def main():
                         'play_speed': play_speed,
                         'actual_block': raw_audio_len
                     })
+                    
+                elif cmd == 'switch_model':
+                    global _CACHED_TOKENIZED
+                    new_model_name = str(msg.get('model', 'facebook/musicgen-small')).strip()
+                    print(f"🔄 [MUSICGEN-SERVER] Горячая смена модели на: {new_model_name}...", flush=True)
+                    del mg
+                    torch.cuda.empty_cache()
+                    mg = MusicGen.get_pretrained(new_model_name, device=DEVICE)
+                    mg.lm.eval()
+                    mg.compression_model.eval()
+                    if DEVICE.type == 'cuda':
+                        mg.lm.to(torch.float16)
+                        mg.compression_model.to(torch.float16)
+                    for layer in mg.lm.transformer.layers:
+                        if layer.cross_attention is not None and not layer.cross_attention.custom:
+                            ca = layer.cross_attention
+                            ca.custom = True
+                            ca.in_proj_weight = ca.mha.in_proj_weight
+                            ca.in_proj_bias = ca.mha.in_proj_bias
+                            ca.out_proj = ca.mha.out_proj
+                    t5_cond = mg.lm.condition_provider.conditioners['description']
+                    _CACHED_TOKENIZED = None
+                    current_diag_seq = None
+                    crossfader.overlap = None
+                    print(f"✅ [MUSICGEN-SERVER] Модель {new_model_name} успешно загружена в VRAM!", flush=True)
+                    conn.send({'status': 'ok', 'model': new_model_name})
 
                 elif cmd == 'flush':
                     current_diag_seq = None

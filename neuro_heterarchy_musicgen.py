@@ -232,8 +232,15 @@ class AsyncMusicWorker(threading.Thread):
                                 if isinstance(inc, dict):
                                     cmd = inc.get('cmd')
                                     if cmd == 'update_config':
+                                        new_cfg = inc.get('config', {})
+                                        new_m = new_cfg.get('model')
+                                        old_m = self.cfg.get('model', 'facebook/musicgen-small')
                                         with self.lock:
-                                            self.cfg.update(inc.get('config', {}))
+                                            self.cfg.update(new_cfg)
+                                        if new_m and new_m != old_m:
+                                            self.conn.send({'cmd': 'switch_model', 'model': new_m})
+                                            self.conn.recv()
+                                            self._apply_new_concepts(self.semantic.words)
                                     elif cmd == 'update_concepts':
                                         gw_concepts = inc.get('concepts', [])
                                         if inc.get('is_initial_sync') and not gw_concepts and self.semantic.words:

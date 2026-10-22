@@ -229,31 +229,66 @@
             </div>
 
             <div class="panel">
-                <h3>🎨 Визуальный мир (Диффузия)</h3>
+                <h3>🎨 Визуальный мир (Диффузия — Zero-Buffer Realtime)</h3>
+                <div id="diffLagStatus" class="lag-status">
+                    Буфер: 0.00с (0 кадр) | FPS: 0.0 (0 мс) | Шаги: 2 | 512×384 | TAESD+Color 🟢
+                </div>
+
                 <label>Активный пул образов (Пусто = Свободный дрейф):</label>
                 <div id="visionConceptList" class="concept-container"></div>
                 <div class="input-row">
                     <input type="text" id="newVisionInput" placeholder="Новый визуальный образ...">
                     <button type="button" class="btn btn-green btn-fixed" id="btnAddVision">+ ОБРАЗ</button>
                 </div>
+                
+                <label class="mt-6">Архитектура модели (GPU VRAM):</label>
+                <select id="diffModel">
+                    <option value="lcm" selected>⚡ LCM Dreamshaper v7 (SD 1.5 | 2.2 GB VRAM — Быстрая классика)</option>
+                    <option value="sd-turbo">🚀 SD-Turbo (SD 2.1 | 2.8 GB VRAM — 1-шаговая резкость)</option>
+                    <option value="sdxl-turbo">💎 SDXL-Turbo (SDXL 1.0 | 6.5 GB VRAM — Кинематограф для 4090/5090)</option>
+                </select>
 
                 <label class="mt-8">Режим динамики (Пресеты):</label>
                 <select id="diffPreset">
-                    <option value="meditation">🧘 Глубокая медитация (Плавный морфинг: Steps 2, Str 0.45-0.70, EMA 0.30)</option>
-                    <option value="balanced" selected>⚖️ Баланс / Стандарт (Steps 2, Str 0.50-0.85, EMA 0.14)</option>
-                    <option value="dynamic">⚡ Высокая динамика (Быстрый отклик: Steps 3, Str 0.60-0.92, EMA 0.08)</option>
+                    <option value="meditation">🧘 Глубокая медитация (Плавный связный мир: Steps 0, Ctx 0.30, EMA 0.28)</option>
+                    <option value="balanced" selected>⚖️ Баланс / Авто-Реалтайм (Steps 0 Авто, Ctx 0.18, EMA 0.12)</option>
+                    <option value="dynamic">⚡ Мгновенный отклик (Steps 2, Ctx 0.05, EMA 0.05)</option>
                     <option value="custom">🛠️ Пользовательский (Ручная настройка)</option>
                 </select>
 
-                <div class="grid-4 mt-6">
-                    <div><label>Steps:</label><input type="number" id="diffSteps" value="2" min="1" max="6"></div>
+                <div class="grid-3 mt-6">
+                    <div>
+                        <label>Размер картинки:</label>
+                        <select id="diffResolution">
+                            <option value="384x288">384×288 (Турбо)</option>
+                            <option value="448x336">448×336 (Быстро)</option>
+                            <option value="512x384" selected>512×384 (Стандарт)</option>
+                            <option value="640x480">640×480 (HD)</option>
+                            <option value="768x576">768×576 (Ultra)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Энкодер + Цвет:</label>
+                        <select id="diffTaesd">
+                            <option value="1" selected>⚡ TAESD + Авто-Цвет</option>
+                            <option value="0">🎨 Full VAE (Без корр.)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Шаги (0 = Авто):</label>
+                        <input type="number" id="diffSteps" value="0" min="0" max="8" step="1">
+                    </div>
+                </div>
+
+                <div class="grid-4 mt-4">
                     <div><label>CFG:</label><input type="number" id="diffCfg" value="1.0" min="0.0" max="3.0" step="0.1"></div>
-                    <div><label>Min Str:</label><input type="number" id="diffStrLow" value="0.50" min="0.35" max="0.75" step="0.05"></div>
-                    <div><label>Max Str:</label><input type="number" id="diffStrHigh" value="0.85" min="0.55" max="0.95" step="0.05"></div>
+                    <div><label>Min Str:</label><input type="number" id="diffStrLow" value="0.50" min="0.30" max="0.80" step="0.05"></div>
+                    <div><label>Max Str:</label><input type="number" id="diffStrHigh" value="0.85" min="0.50" max="0.95" step="0.05"></div>
+                    <div><label>Связность:</label><input type="number" id="diffWorldContext" value="0.18" min="0.00" max="0.60" step="0.04"></div>
                 </div>
                 <div class="mt-4">
-                    <label>EMA Плавность (0.04 = динамика, 0.40 = медитация):</label>
-                    <input type="number" id="diffEmaSmooth" value="0.14" min="0.04" max="0.50" step="0.02">
+                    <label>EMA Плавность мысли (0.04 = резкая смена, 0.35 = плавный морфинг):</label>
+                    <input type="number" id="diffEmaSmooth" value="0.12" min="0.02" max="0.50" step="0.02">
                 </div>
             </div>
 
@@ -265,6 +300,14 @@
                 <div id="musicLagStatus" class="lag-status">
                     Буфер: 0.0 с (0 чанков) | RTF: 1.0x | DynStr: 0.25
                 </div>
+                
+                <label class="mt-6">Модель MusicGen (GPU VRAM):</label>
+                <select id="musicModel">
+                    <option value="facebook/musicgen-small" selected>⚡ MusicGen Small (300M | 1.5 GB VRAM — Сверхбыстрый отклик)</option>
+                    <option value="facebook/musicgen-medium">🎵 MusicGen Medium (1.5B | 4.2 GB VRAM — Богатая аранжировка)</option>
+                    <option value="facebook/musicgen-melody">🎹 MusicGen Melody (1.5B | 4.5 GB VRAM — Выразительные мелодии)</option>
+                    <option value="facebook/musicgen-large">💎 MusicGen Large (3.3B | 8.5 GB VRAM — Максимум для 4090/5090)</option>
+                </select>
 
                 <label>Активные музыкальные темы (Пусто = Свободный дрейф по словарю T5):</label>
                 <div id="musicConceptList" class="concept-container"></div>

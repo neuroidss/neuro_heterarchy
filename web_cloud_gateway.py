@@ -36,8 +36,13 @@ SAMPLE_RATE = 32000
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+import socket
+
 latest_jpeg_frame = None
+latest_jpeg_id = 0
+latest_jpeg_ts = 0.0
 jpeg_lock = threading.Lock()
+jpeg_cond = threading.Condition(jpeg_lock)
 
 audio_pcm_queue = []
 browser_playout_horizon = 0.0
@@ -76,11 +81,20 @@ music_state_lock = threading.Lock()
 world_state = {
     "concepts": [],
     "preset": "balanced",
-    "steps": 2,
+    "steps": 0,                  # 0 = Авто-шаги по умолчанию
+    "actual_steps": 2,
+    "resolution": "512x384",
+    "use_taesd": True,
+    "use_color": True,
+    "world_context": 0.18,
     "guidance_scale": 1.0,
     "strength_low": 0.50,
     "strength_high": 0.85,
-    "ema_smooth": 0.14,
+    "ema_smooth": 0.12,
+    "fps": 0.0,
+    "gen_ms": 0.0,
+    "buffer_frames": 0,
+    "buffer_sec": 0.0,
     "is_recording": False,
     "active_session_path": "",
     "current_puck": [0.0, 0.0],
@@ -241,22 +255,73 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404, "app.js не найден")
 
+        elif clean_path == '/frame.jpg':
+            # ZERO-BUFFER PULL: Браузер запрашивает следующий кадр строго по готовности экрана!
+            # В прокси RunPod никогда не копится очередь старых картинок (всегда 0 кадров в буфере).
+            global last_served_jpeg_id
+            with jpeg_lock:
+                frame = latest_jpeg_frame
+                fid = latest_jpeg_id
+                fts = latest_jpeg_ts
+                unconsumed = max(0, fid - last_served_jpeg_id - 1)
+                last_served_jpeg_id = fid
+                age_sec = max(0.0, time.time() - fts) if fts > 0 else 0.0
+
+            with world_state_lock:
+                world_state["buffer_frames"] = unconsumed
+                world_state["buffer_sec"] = round(age_sec, 2)
+
+            if frame is None:
+                self.send_response(204)
+                self.end_headers()
+                return
+
+            try:
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(frame)))
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.send_header('X-Frame-Id', str(fid))
+                self.send_header('X-Frame-Lag-Ms', str(int(age_sec * 1000)))
+                self.end_headers()
+                self.wfile.write(frame)
+                self.wfile.flush()
+            except Exception:
+                pass
+
         elif clean_path in ['/stream.mjpg', '/live']:
+            # Отключаем буферизацию Нейгла (TCP_NODELAY), чтобы каждый кадр улетал мгновенно
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+
             self.send_response(200)
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-            self.send_header('Cache-Control', 'no-cache, private')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('X-Accel-Buffering', 'no')
             self.end_headers()
+
+            sent_id = -1
             while True:
-                with jpeg_lock:
+                with jpeg_cond:
+                    if latest_jpeg_id == sent_id:
+                        jpeg_cond.wait(timeout=0.5)
+                    if latest_jpeg_frame is None or latest_jpeg_id == sent_id:
+                        continue
                     frame = latest_jpeg_frame
-                if frame is not None:
-                    try:
-                        self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\n')
-                        self.wfile.write(f'Content-Length: {len(frame)}\r\n\r\n'.encode() + frame + b'\r\n')
-                        self.wfile.flush()
-                    except Exception:
-                        break
-                time.sleep(0.016)
+                    sent_id = latest_jpeg_id
+
+                try:
+                    header = (
+                        f"--frame\r\n"
+                        f"Content-Type: image/jpeg\r\n"
+                        f"Content-Length: {len(frame)}\r\n\r\n"
+                    ).encode('ascii')
+                    self.wfile.write(header + frame + b"\r\n")
+                    self.wfile.flush()
+                except Exception:
+                    break
 
         elif clean_path in ['/audio.wav', '/stream.wav']:
             self.send_response(200)
@@ -518,7 +583,7 @@ class ThreadedHTTPServer(ThreadingHTTPServer):
 
 
 def ipc_frame_receiver():
-    global latest_jpeg_frame
+    global latest_jpeg_frame, latest_jpeg_id, latest_jpeg_ts
     try:
         listener = Listener(('localhost', IPC_PORT), authkey=IPC_AUTHKEY)
     except Exception:
@@ -528,11 +593,84 @@ def ipc_frame_receiver():
             conn = listener.accept()
             while True:
                 data = conn.recv()
+                # Zero-Buffer Drain: если в пайпе несколько кадров, берем только самый последний!
+                dropped_ipc = 0
+                while conn.poll(0.0):
+                    data = conn.recv()
+                    dropped_ipc += 1
+
+                now = time.time()
                 if isinstance(data, bytes):
-                    with jpeg_lock:
+                    with jpeg_cond:
                         latest_jpeg_frame = data
+                        latest_jpeg_id += 1
+                        latest_jpeg_ts = now
+                        jpeg_cond.notify_all()
+                    with world_state_lock:
+                        world_state["buffer_frames"] = dropped_ipc
+                        world_state["buffer_sec"] = 0.0
+                elif isinstance(data, dict) and 'jpg' in data:
+                    with jpeg_cond:
+                        latest_jpeg_frame = data['jpg']
+                        latest_jpeg_id = int(data.get('frame_id', latest_jpeg_id + 1))
+                        latest_jpeg_ts = float(data.get('ts', now))
+                        age_sec = max(0.0, now - latest_jpeg_ts)
+                        jpeg_cond.notify_all()
+                    with world_state_lock:
+                        world_state["fps"] = round(float(data.get('fps', 0.0)), 1)
+                        world_state["gen_ms"] = round(float(data.get('gen_ms', 0.0)), 1)
+                        world_state["actual_steps"] = int(data.get('actual_steps', 2))
+                        world_state["resolution"] = f"{data.get('w', 512)}x{data.get('h', 384)}"
+                        world_state["use_taesd"] = bool(data.get('use_taesd', True))
+                        world_state["use_color"] = bool(data.get('use_color', True))
+                        world_state["buffer_frames"] = dropped_ipc
+                        world_state["buffer_sec"] = round(age_sec, 2)
         except Exception:
             time.sleep(0.5)
+
+
+def ipc_control_listener():
+    global active_diff_ctrl_conn
+    last_sse_push = 0.0
+    try:
+        listener = Listener(('localhost', IPC_DIFF_CONTROL_PORT), authkey=IPC_DIFF_AUTHKEY)
+    except Exception:
+        return
+    while True:
+        try:
+            conn = listener.accept()
+            with diff_ctrl_lock:
+                active_diff_ctrl_conn = conn
+                with world_state_lock:
+                    active_diff_ctrl_conn.send({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
+            while True:
+                msg = conn.recv()
+                if isinstance(msg, dict):
+                    cmd = msg.get("cmd")
+                    if cmd == "telemetry":
+                        with world_state_lock:
+                            world_state["current_puck"] = msg.get("puck", [0.0, 0.0])
+                            world_state["active_thought"] = msg.get("active_thought", "")
+                            world_state["ladder_stage"] = msg.get("ladder_stage", 4)
+                            world_state["monty_loss"] = msg.get("monty_loss", 0.0)
+                            world_state["persistence"] = msg.get("persistence", 0.0)
+                            world_state["surprise"] = msg.get("surprise", 0.0)
+                            world_state["regions"] = msg.get("regions", {})
+                            if "fps" in msg: world_state["fps"] = msg["fps"]
+                            if "gen_ms" in msg: world_state["gen_ms"] = msg["gen_ms"]
+                            if "actual_steps" in msg: world_state["actual_steps"] = msg["actual_steps"]
+                            if "resolution" in msg: world_state["resolution"] = msg["resolution"]
+                            if "use_taesd" in msg: world_state["use_taesd"] = msg["use_taesd"]
+                            if "use_color" in msg: world_state["use_color"] = msg["use_color"]
+                        now = time.time()
+                        if now - last_sse_push > 0.20:
+                            last_sse_push = now
+                            broadcast_full_state()
+        except Exception:
+            time.sleep(0.5)
+        finally:
+            with diff_ctrl_lock:
+                active_diff_ctrl_conn = None
 
 
 def ipc_audio_receiver():
@@ -602,44 +740,6 @@ def ipc_audio_receiver():
         finally:
             with music_conn_lock:
                 active_music_conn = None
-
-
-def ipc_control_listener():
-    global active_diff_ctrl_conn
-    last_sse_push = 0.0
-    try:
-        listener = Listener(('localhost', IPC_DIFF_CONTROL_PORT), authkey=IPC_DIFF_AUTHKEY)
-    except Exception:
-        return
-    while True:
-        try:
-            conn = listener.accept()
-            with diff_ctrl_lock:
-                active_diff_ctrl_conn = conn
-                with world_state_lock:
-                    active_diff_ctrl_conn.send({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
-            while True:
-                msg = conn.recv()
-                if isinstance(msg, dict):
-                    cmd = msg.get("cmd")
-                    if cmd == "telemetry":
-                        with world_state_lock:
-                            world_state["current_puck"] = msg.get("puck", [0.0, 0.0])
-                            world_state["active_thought"] = msg.get("active_thought", "")
-                            world_state["ladder_stage"] = msg.get("ladder_stage", 4)
-                            world_state["monty_loss"] = msg.get("monty_loss", 0.0)
-                            world_state["persistence"] = msg.get("persistence", 0.0)
-                            world_state["surprise"] = msg.get("surprise", 0.0)
-                            world_state["regions"] = msg.get("regions", {})
-                        now = time.time()
-                        if now - last_sse_push > 0.25:
-                            last_sse_push = now
-                            broadcast_full_state()
-        except Exception:
-            time.sleep(0.5)
-        finally:
-            with diff_ctrl_lock:
-                active_diff_ctrl_conn = None
 
 
 def load_initial_lore(lore_path):
