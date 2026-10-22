@@ -292,6 +292,13 @@
                 </div>
             </div>
 
+                <label>Активные музыкальные темы (Пусто = Свободный дрейф по словарю T5):</label>
+                <div id="musicConceptList" class="concept-container"></div>
+                <div class="input-row">
+                    <input type="text" id="newMusicInput" placeholder="Новая музыкальная тема...">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnAddMusic">+ ТЕМА</button>
+                </div>
+
             <div class="panel">
                 <h3>🔊 Музыкальный генератор (MusicGen 32 kHz)</h3>
                 <button type="button" id="btnAudio" class="btn btn-audio">▶️ ВКЛЮЧИТЬ LIVE ЗВУК</button>
@@ -308,13 +315,6 @@
                     <option value="facebook/musicgen-melody">🎹 MusicGen Melody (1.5B | 4.5 GB VRAM — Выразительные мелодии)</option>
                     <option value="facebook/musicgen-large">💎 MusicGen Large (3.3B | 8.5 GB VRAM — Максимум для 4090/5090)</option>
                 </select>
-
-                <label>Активные музыкальные темы (Пусто = Свободный дрейф по словарю T5):</label>
-                <div id="musicConceptList" class="concept-container"></div>
-                <div class="input-row">
-                    <input type="text" id="newMusicInput" placeholder="Новая музыкальная тема...">
-                    <button type="button" class="btn btn-green btn-fixed" id="btnAddMusic">+ ТЕМА</button>
-                </div>
 
                 <label class="mt-8">Сила влияния рабочей памяти на музыку (Пресеты):</label>
                 <select id="musicPreset">
