@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (0.1s BLOCK CAPABLE)
+NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (AUTO-MIN BLOCK & PACING)
 ===================================================================================
-- НЕПРЕРЫВНЫЙ ДИАГОНАЛЬНЫЙ ПОТОК:
-  История контекста хранится в диагональном пространстве кодбуков [1, 4, S].
-  Блок 0.1с требует ровно 5 шагов трансформера без краевых масок 2048.
-- МИНИМАЛЬНЫЙ БУФЕР И СОХРАНЕНИЕ ПИТЧА:
-  Никакого питч-шифта через F.interpolate. Точный темп 1.0x.
-  Авто-опускание блока до 0.10с при наличии аппаратного запаса (RTX 5090).
+- РЕЖИМ БЛОК = 0 (ПО УМОЛЧАНИЮ):
+  Динамически снижает размер блока вплоть до 1 токена EnCodec (0.02с = 20 мс),
+  утилизируя 100% мощности GPU, и увеличивает блок только при опустошении буфера.
+- ПОДДЕРЖКА СЛАБЫХ GPU (RTX 3060 и др.):
+  Если при заданном контексте (например 3.6с) и блоке (например 1.2с) RTF < 1.0,
+  сервер плавно замедляет темп музыки (play_speed < 1.0, без ускорения > 1.0x),
+  чтобы буфер никогда не пустел.
+- ЖЕСТКИЙ КОНТРОЛЬ ЧИСЛА БЛОКОВ БУФЕРА (target_buffer_count):
+  При заполнении буфера (например 2 блока) сервер автоматически уменьшает размер
+  блока и синхронизирует шаг генерации с реальным временем.
 ===================================================================================
 """
 from __future__ import annotations
 
 import os
-import sys
 import time
-import signal
 import argparse
 from multiprocessing.connection import Listener
 import torch
@@ -40,7 +42,11 @@ if torch.cuda.is_available():
     except Exception:
         pass
 
-from xformers import ops
+try:
+    from xformers import ops
+except ImportError:
+    ops = None
+
 from audiocraft.models import MusicGen
 from audiocraft.models.lm import LMModel
 from audiocraft.modules.transformer import (
@@ -54,6 +60,7 @@ from audiocraft.modules.conditioners import T5Conditioner
 
 SAMPLE_RATE = 32000
 FRAME_RATE = 50
+MIN_BLOCK_SEC = 1.0 / float(FRAME_RATE)  # 0.02s (1 токен EnCodec = 640 сэмплов)
 MAX_T5_TOKENS = 64
 
 LAST_PROFILE = {
@@ -66,6 +73,7 @@ LAST_PROFILE = {
 }
 
 _orig_complete_kv = StreamingMultiheadAttention._complete_kv
+
 
 def fast_complete_kv(self, k, v):
     if self.cross_attention or not self._is_streaming:
@@ -102,7 +110,7 @@ def fast_complete_kv(self, k, v):
         nk = static_k[:, :curr_len + slen, :, :]
         if v is not k:
             static_v[:, curr_len:curr_len + slen, :] = v
-            nv = static_v[:, :curr_len + slen, :]
+            nv = static_v[:, :curr_len + slen, :, :]
         else:
             nv = nk
 
@@ -178,7 +186,7 @@ def fast_mha_forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.
             q, k, v = q.float(), k.float(), v.float()
 
         if self.memory_efficient:
-            if time_dim == 2:
+            if time_dim == 2 or ops is None:
                 use_causal = (not self.cross_attention) and (T_q > 1) and (q.shape[2] == k.shape[2])
                 x = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal, dropout_p=0.0)
                 x = x.to(dtype).transpose(1, 2).reshape(B, T_q, C)
@@ -209,11 +217,13 @@ def fast_mha_forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.
     x, _ = self.mha(query, key, value, key_padding_mask, need_weights, attn_mask, average_attn_weights)
     return x.to(dtype), None
 
+
 StreamingMultiheadAttention._complete_kv = fast_complete_kv
 StreamingMultiheadAttention._apply_rope = fast_apply_rope
 StreamingMultiheadAttention.forward = fast_mha_forward
 
 _STATIC_SIN_EMB_CACHE = {}
+
 
 def fast_transformer_forward(self, x: torch.Tensor, *args, **kwargs):
     B, T, C = x.shape
@@ -234,9 +244,11 @@ def fast_transformer_forward(self, x: torch.Tensor, *args, **kwargs):
         self._streaming_state['offsets'] = offset_int + T
     return x
 
+
 StreamingTransformer.forward = fast_transformer_forward
 
 _CACHED_TOKENIZED = None
+
 
 @torch.no_grad()
 def step_continuous_diagonal_stream(
@@ -274,8 +286,10 @@ def step_continuous_diagonal_stream(
     k_eff = min(int(top_k), 50)
     inv_temp = 1.0 / max(0.05, float(temp))
 
+    gen_frames = max(1, int(gen_frames))
+
     if prev_diag_seq is None or prev_diag_seq.shape[-1] < 8:
-        steps_to_run = max(25, gen_frames + 4)
+        steps_to_run = max(12, gen_frames + 4)
         work_seq = torch.full((B, K, steps_to_run + 1), special_id, dtype=torch.long, device=device)
         start_step = 1
         LAST_PROFILE["ctx_tokens"] = 0
@@ -338,10 +352,10 @@ def step_continuous_diagonal_stream(
     total_extract = n_extract + prefix_frames
     s_start = total_seq_len - total_extract
 
-    c0 = work_seq[:, 0, s_start - 3 : total_seq_len - 3]
-    c1 = work_seq[:, 1, s_start - 2 : total_seq_len - 2]
-    c2 = work_seq[:, 2, s_start - 1 : total_seq_len - 1]
-    c3 = work_seq[:, 3, s_start     : total_seq_len]
+    c0 = work_seq[:, 0, s_start - 3: total_seq_len - 3]
+    c1 = work_seq[:, 1, s_start - 2: total_seq_len - 2]
+    c2 = work_seq[:, 2, s_start - 1: total_seq_len - 1]
+    c3 = work_seq[:, 3, s_start:     total_seq_len]
     ready_audio_codes = torch.stack([c0, c1, c2, c3], dim=1).clamp(0, lm.card - 1)
 
     new_diag_seq = work_seq[..., -450:].contiguous()
@@ -350,6 +364,7 @@ def step_continuous_diagonal_stream(
 
 ACTIVE_T5_EMBEDS = None
 _orig_t5_forward = T5Conditioner.forward
+
 
 def intercepted_t5_forward(self, inputs):
     global ACTIVE_T5_EMBEDS
@@ -365,6 +380,7 @@ def intercepted_t5_forward(self, inputs):
         mask = torch.ones((embeds.shape[0], embeds.shape[1]), device=target_device, dtype=torch.long)
         return self.output_proj(embeds), mask
     return _orig_t5_forward(self, inputs)
+
 
 T5Conditioner.forward = intercepted_t5_forward
 
@@ -404,51 +420,92 @@ class AudioCrossfaderGPU:
         return chunk[..., :-self.fade_len]
 
 
-def adapt_block_and_pacing(gen_time: float, raw_audio_duration: float, current_block: float,
-                           user_target_block: float, queue_sec: float) -> tuple[float, float, float]:
+def adapt_block_and_pacing(
+    gen_time: float,
+    raw_audio_duration: float,
+    current_block: float,
+    user_target_block: float,
+    queue_sec: float,
+    queue_chunks: int = 0,
+    target_buffer_count: int = 2,
+    safety_factor: float = 1.0
+) -> tuple[float, float, float, float]:
     """
-    Авто-адаптер ультра-короткого блока:
-    1. Стремится опустить current_block прямо до user_target_block (вплоть до 0.10s!).
-    2. Если железо не вытягивает (RTF < 0.95), плавно увеличивает блок до точки устойчивости.
-    3. Контролирует буфер: рассчитывает время засыпания sleep_sec, чтобы буфер
-       НИКОГДА не рос выше ~0.25с и не требовал сброса чанков!
+    Двухрежимный контроллер баланса GPU / Буфера / Скорости:
+    1) Если user_target_block <= 0.0 (Режим Авто-Минимум по умолчанию):
+       - Стремится сжать current_block до предела (1 фрейм = 0.02с), пока GPU успевает,
+         чтобы вся мощность уходила в мгновенный отклик без накопления буфера.
+       - Как только буфер пустеет (queue_chunks == 0 или RTF < 0.98), плавно увеличивает
+         размер блока, чтобы сбалансировать накладные расходы контекста.
+    2) Если user_target_block > 0.0 (Ручной режим, например 1.2с на RTX 3060 или 0.001с тест):
+       - Если GPU не тянет выбранный блок + контекст (RTF < 0.98) — плавно замедляет
+         музыку (play_speed < 1.0, но никогда > 1.0), чтобы буфер не обнулялся.
+       - Если же GPU слишком быстрый и буфер достиг target_buffer_count (например 2 чанка),
+         автоматически уменьшает размер блока и тормозит генерацию, чтобы буфер не рос.
     """
     gen_time = max(gen_time, 0.001)
     real_rtf = raw_audio_duration / gen_time
+    target_buf = max(1, int(target_buffer_count))
+    play_speed = 1.0
 
-    if real_rtf >= 1.04:
-        # Мощности хватает — опускаем блок к целевому (вплоть до 0.10 с)
-        current_block = max(user_target_block, current_block * 0.92)
-    elif real_rtf < 0.92:
-        # Если не успевает за звуком — чуть увеличиваем размер блока
-        current_block = min(max(user_target_block, 2.4), current_block * 1.06)
+    if user_target_block <= 0.0:
+        # АВТО-МИНИМУМ БЛОКА (Утилизация 100% мощности ускорителя)
+        if queue_chunks >= target_buf or (queue_chunks >= 1 and real_rtf > 1.06):
+            # Буфер полон или есть запас скорости -> жмем блок вниз к 0.02с
+            shrink = 0.76 if (queue_chunks > target_buf or real_rtf > 1.45) else 0.88
+            current_block = max(MIN_BLOCK_SEC, current_block * shrink)
+        elif queue_chunks == 0 or real_rtf < 0.96:
+            # Буфер опустел / ускоритель не вытягивает такой мелкий блок -> растим блок
+            grow_step = max(MIN_BLOCK_SEC, current_block * 0.22)
+            current_block = min(4.0, current_block + grow_step)
+        elif real_rtf > 1.15:
+            current_block = max(MIN_BLOCK_SEC, current_block * 0.94)
+
+        current_block = float(np.clip(current_block, MIN_BLOCK_SEC, 4.0))
+
+        # Если даже при выросшем блоке слабая карта не тянет тяжелый контекст — замедляем музыку
+        if current_block >= 0.80 and real_rtf < 0.96 and queue_chunks == 0:
+            play_speed = float(np.clip((real_rtf * 0.95) / max(0.5, safety_factor), 0.40, 1.0))
+
     else:
-        current_block = current_block * 0.85 + user_target_block * 0.15
+        # РУЧНОЙ БЛОК (с защитой от переполнения буфера и авто-замедлением на слабых GPU)
+        desired_block = max(MIN_BLOCK_SEC, float(user_target_block))
 
-    current_block = float(np.clip(current_block, 0.10, 4.0))
+        if queue_chunks >= target_buf and real_rtf > 1.05:
+            # Буфер уже набрал заданное число блоков (например 2) -> снижаем размер блока!
+            current_block = max(MIN_BLOCK_SEC, current_block * 0.80)
+        else:
+            current_block = float(np.clip(current_block * 0.65 + desired_block * 0.35, MIN_BLOCK_SEC, 4.0))
 
-    # Целевой буфер: 1 чанк (не более 0.25-0.35 секунды)
-    target_q = max(0.15, min(0.35, current_block * 0.8))
-    q_excess = queue_sec - target_q
+        # Если ускоритель тормозной (например RTX 3060 с контекстом 3.6с) -> замедляем музыку (<= 1.0x)
+        if real_rtf < 0.98 and queue_chunks < target_buf:
+            play_speed = float(np.clip((real_rtf * 0.95) / max(0.5, safety_factor), 0.35, 1.0))
+        else:
+            play_speed = 1.0
 
-    # Если сгенерировали раньше времени — микро-пауза для удержания минимального буфера
+    actual_out_duration = raw_audio_duration / play_speed
+
+    # Строгий контроль очереди: если в буфере уже есть target_buf чанков,
+    # спим ровно столько, чтобы не превышать лимит числа блоков буфера!
     sleep_sec = 0.0
-    if q_excess > 0.05 and real_rtf > 1.0:
-        sleep_sec = float(min(0.25, q_excess * 0.7))
+    if queue_chunks >= target_buf:
+        excess_chunks = max(0, queue_chunks - target_buf)
+        base_wait = max(0.0, actual_out_duration - gen_time)
+        sleep_sec = float(np.clip(base_wait + excess_chunks * actual_out_duration * 0.6, 0.0, 3.0))
 
-    return current_block, real_rtf, sleep_sec
+    return current_block, real_rtf, play_speed, sleep_sec
 
 
 def main():
     global ACTIVE_T5_EMBEDS
-    parser = argparse.ArgumentParser(description="NeuroCanvas MusicGen Server Realtime Zero-Warp")
+    parser = argparse.ArgumentParser(description="NeuroCanvas MusicGen Server Realtime Auto-Min Block")
     parser.add_argument('--port', type=int, default=6005)
     parser.add_argument('--model', type=str, default="facebook/musicgen-small")
     parser.add_argument('--quiet-step', action='store_true', default=False)
     args = parser.parse_args()
 
     print("=" * 70)
-    print(f"🎵 ИНИЦИАЛИЗАЦИЯ MUSICGEN НА {DEVICE} (ZERO-PITCH-WARP, 0.1s CAPABLE)...")
+    print(f"🎵 ИНИЦИАЛИЗАЦИЯ MUSICGEN НА {DEVICE} (AUTO-MIN 0.02s BLOCK & SLOWDOWN)...")
     print("=" * 70)
 
     set_efficient_attention_backend('torch')
@@ -481,7 +538,7 @@ def main():
 
     crossfader = AudioCrossfaderGPU(fade_len=640)
     current_diag_seq = None
-    current_block = 1.0
+    current_block = 0.16  # Стартуем с малого блока и тут же адаптируемся
 
     listener = Listener(('localhost', args.port), authkey=b'music')
     print(f"🚀 [MUSICGEN-SERVER] Слушаю порт {args.port}...")
@@ -520,11 +577,14 @@ def main():
                 elif cmd == 'generate_step':
                     t0 = time.perf_counter()
                     embeds_np = msg.get('t5_embeds')
-                    user_target_block = float(msg.get('block_sec', 1.0))
+                    user_target_block = float(msg.get('block_sec', 0.0))
                     context_sec = float(msg.get('context_sec', 3.6))
                     temp = float(msg.get('temp', 1.0))
                     top_k = int(msg.get('top_k', 250))
-                    queue_sec = float(msg.get('queue_sec', 0.25))
+                    safety_factor = float(msg.get('safety_factor', 1.0))
+                    queue_sec = float(msg.get('queue_sec', 0.0))
+                    queue_chunks = int(msg.get('queue_chunks', 0))
+                    target_buffer_count = int(msg.get('target_buffer_count', 2))
                     is_reset = bool(msg.get('is_reset', False))
 
                     if embeds_np is not None:
@@ -534,8 +594,12 @@ def main():
                         current_diag_seq = None
                         crossfader.overlap = None
 
+                    # Если юзер вручную задал блок > 0 и буфер не переполнен, сразу берем его
+                    if user_target_block > 0.0 and queue_chunks < target_buffer_count:
+                        current_block = max(MIN_BLOCK_SEC, user_target_block)
+
                     attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
-                    gen_frames = max(5, int(round(current_block * FRAME_RATE)))
+                    gen_frames = max(1, int(round(current_block * FRAME_RATE)))
                     ctx_frames = max(10, int(round(context_sec * FRAME_RATE)))
 
                     with torch.inference_mode(), mg.autocast:
@@ -549,7 +613,6 @@ def main():
                             torch.cuda.synchronize()
                         t_enc = time.perf_counter()
                         decoded_audio = mg.compression_model.decode(ready_codes, None)
-                        # Оставляем ровно 640 сэмплов перехлеста для кроссфейдера
                         new_chunk = decoded_audio[..., 1280:] if pfx >= 2 else decoded_audio
                         if DEVICE.type == 'cuda':
                             torch.cuda.synchronize()
@@ -558,26 +621,39 @@ def main():
                         raw_audio_len = gen_frames / float(FRAME_RATE)
                         gen_time = time.perf_counter() - t0
 
-                        # Адаптация блока и расчет микро-паузы для удержания буфера
-                        current_block, real_rtf, sleep_sec = adapt_block_and_pacing(
-                            gen_time, raw_audio_len, current_block, user_target_block, queue_sec
+                        current_block, real_rtf, play_speed, sleep_sec = adapt_block_and_pacing(
+                            gen_time=gen_time,
+                            raw_audio_duration=raw_audio_len,
+                            current_block=current_block,
+                            user_target_block=user_target_block,
+                            queue_sec=queue_sec,
+                            queue_chunks=queue_chunks,
+                            target_buffer_count=target_buffer_count,
+                            safety_factor=safety_factor
                         )
 
-                        # ЧИСТЫЙ ЗВУК: Без искажения тональности (F.interpolate удален!)
-                        clean = crossfader.process(new_chunk)
+                        # Если слабая карта (например RTX 3060) не вытягивает RTF 1.0 — плавно замедляем
+                        if play_speed < 0.995 and new_chunk.shape[-1] > 640:
+                            base_new_samples = new_chunk.shape[-1] - 640
+                            stretched_total = 640 + int(round(base_new_samples / play_speed))
+                            new_chunk = F.interpolate(
+                                new_chunk.float(), size=stretched_total, mode='linear', align_corners=False
+                            )
+
+                        clean = crossfader.process(new_chunk.float())
                         pcm = clean[0, 0].cpu().float().numpy()
 
-                    if sleep_sec > 0.005:
+                    if sleep_sec > 0.002:
                         time.sleep(sleep_sec)
 
                     chunk_idx += 1
                     if not args.quiet_step:
                         actual_ctx_s = LAST_PROFILE.get('ctx_tokens', 0) / float(FRAME_RATE)
                         print(
-                            f"⏱️ [Чанк #{chunk_idx:03d}] RTF: {real_rtf:4.2f}x | "
-                            f"AutoBlock: {current_block:.2f}s (Target:{user_target_block:.2f}s, Ctx:{actual_ctx_s:.2f}s, Buf:{queue_sec:.2f}s) | "
-                            f"Шагов: {LAST_PROFILE['steps_count']} ({LAST_PROFILE['per_step_ms']:.2f} мс/шаг) | "
-                            f"LM: {LAST_PROFILE['lm_loop_ms']:.0f}мс | EnCodec: {LAST_PROFILE['encodec_ms']:.0f}мс",
+                            f"⏱️ [Чанк #{chunk_idx:03d}] RTF:{real_rtf:4.2f}x | Speed:{play_speed:4.2f}x | "
+                            f"Block:{raw_audio_len:.2f}s->Next:{current_block:.2f}s (Target:{user_target_block:.3f}s, Ctx:{actual_ctx_s:.1f}s) | "
+                            f"Buf:{queue_sec:.2f}s ({queue_chunks}/{target_buffer_count} blk) | "
+                            f"Steps:{LAST_PROFILE['steps_count']} ({LAST_PROFILE['per_step_ms']:.1f}ms/st)",
                             flush=True
                         )
 
@@ -586,8 +662,8 @@ def main():
                         'gen_time': gen_time,
                         'audio_len': len(pcm) / float(SAMPLE_RATE),
                         'rtf': real_rtf,
-                        'play_speed': 1.0,
-                        'actual_block': current_block
+                        'play_speed': play_speed,
+                        'actual_block': raw_audio_len
                     })
 
                 elif cmd == 'flush':

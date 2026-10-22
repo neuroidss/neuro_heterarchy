@@ -166,9 +166,9 @@ const PRESETS = {
 };
 
 const MUSIC_PRESETS = {
-    meditation: { block: 1.8, ctx: 3.6, strLow: 0.12, strHigh: 0.45, ema: 0.35, temp: 0.95 },
-    balanced:   { block: 1.8, ctx: 2.4, strLow: 0.25, strHigh: 0.75, ema: 0.20, temp: 1.0 },
-    dynamic:    { block: 1.4, ctx: 1.6, strLow: 0.35, strHigh: 0.92, ema: 0.10, temp: 1.05 }
+    meditation: { block: 0.0, ctx: 3.6, strLow: 0.12, strHigh: 0.45, ema: 0.35, temp: 0.95 },
+    balanced:   { block: 0.0, ctx: 3.6, strLow: 0.25, strHigh: 0.75, ema: 0.20, temp: 1.0 },
+    dynamic:    { block: 0.0, ctx: 2.4, strLow: 0.35, strHigh: 0.92, ema: 0.10, temp: 1.05 }
 };
 
 function applyPreset(presetKey) {
@@ -268,8 +268,8 @@ sse.addEventListener('state', (e) => {
     }
     if (st.music) {
         renderMusicConcepts(st.music.concepts || []);
-        if (document.activeElement !== dom.mBlock) dom.mBlock.value = st.music.target_block ?? 1.8;
-        if (document.activeElement !== dom.mContext) dom.mContext.value = st.music.target_context ?? 2.4;
+        if (document.activeElement !== dom.mBlock) dom.mBlock.value = st.music.target_block ?? 0;
+        if (document.activeElement !== dom.mContext) dom.mContext.value = st.music.target_context ?? 3.6;
         if (document.activeElement !== dom.mBuffer) dom.mBuffer.value = st.music.target_buffer_count ?? 2;
         if (document.activeElement !== dom.mTemp) dom.mTemp.value = st.music.temp ?? 1.0;
         if (document.activeElement !== dom.mTopK) dom.mTopK.value = st.music.top_k ?? 250;
@@ -278,11 +278,14 @@ sse.addEventListener('state', (e) => {
         if (document.activeElement !== dom.mStrHigh) dom.mStrHigh.value = st.music.strength_high ?? 0.75;
         if (document.activeElement !== dom.mEmaSmooth) dom.mEmaSmooth.value = st.music.ema_smooth ?? 0.20;
 
-        const bSec = (st.music.buffer_sec || 0).toFixed(1);
+        const bSec = (st.music.buffer_sec || 0).toFixed(2);
         const bChunks = st.music.buffer_chunks || 0;
+        const maxChunks = st.music.target_buffer_count || 2;
+        const actBlk = (st.music.actual_block || 0.16).toFixed(2);
+        const spd = (st.music.play_speed || 1.0).toFixed(2);
         const rtf = (st.music.rtf || 1.0).toFixed(2);
         const dStr = (st.music.dyn_strength || 0.25).toFixed(2);
-        dom.musicLagStatus.textContent = `Буфер: ${bSec} с (${bChunks} чанков) | RTF: ${rtf}x | Сила WM (DynStr): ${dStr} 🟢`;
+        dom.musicLagStatus.textContent = `Буфер: ${bSec}с (${bChunks}/${maxChunks} бл) | Блок: ${actBlk}с | Speed: ${spd}x | RTF: ${rtf}x | WM: ${dStr} 🟢`;
     }
 });
 
@@ -320,32 +323,28 @@ async function startWebAudioStream() {
     let nextPlayTime = 0;
     let pendingSamples = [];
     let hasStarted = false;
-    const prebufferSamples = Math.floor(AUDIO_SR * 0.45); // 0.45с стартовый запас против микропауз
-    const sliceSamples = Math.floor(AUDIO_SR * 0.16);     // Планируем по 160 мс
+    const prebufferSamples = Math.floor(AUDIO_SR * 0.06); // 60 мс стартовый запас
+    const sliceSamples = Math.floor(AUDIO_SR * 0.02);     // 20 мс (640 сэмплов = 1 токен EnCodec)
 
     function scheduleSlice(float32Arr) {
         if (!audioCtx || !isAudioPlaying) return;
         const now = audioCtx.currentTime;
-        if (nextPlayTime < now + 0.02) {
-            // Если вдруг буфер просел — ставим мягкий запас 180 мс без щелчка
-            nextPlayTime = now + 0.18;
+        if (nextPlayTime < now + 0.015) {
+            nextPlayTime = now + 0.05;
+        } else if (nextPlayTime > now + 1.2) {
+            // Защита от накопления очереди внутри самого браузера при сворачивании вкладки
+            nextPlayTime = now + 0.12;
         }
-        const ahead = nextPlayTime - now;
-        // Плавная автоподстройка скорости в пределах ±2%, чтобы буфер никогда не пустел и не рос
-        let rate = 1.0;
-        if (ahead < 0.28) rate = 0.975;
-        else if (ahead > 2.2) rate = 1.03;
-
         const audioBuf = audioCtx.createBuffer(1, float32Arr.length, AUDIO_SR);
         audioBuf.getChannelData(0).set(float32Arr);
 
         const src = audioCtx.createBufferSource();
         src.buffer = audioBuf;
-        src.playbackRate.value = 1.0;
         src.connect(audioCtx.destination);
         src.start(nextPlayTime);
-        nextPlayTime += (float32Arr.length / AUDIO_SR);
+        nextPlayTime += float32Arr.length / AUDIO_SR;
     }
+
 
     (async () => {
         try {
@@ -738,16 +737,20 @@ async function updateMusicConfig() {
     let sHigh = Math.max(sLow + 0.05, Math.min(0.98, parseFloat(dom.mStrHigh.value) || 0.75));
     const ema = Math.max(0.04, Math.min(0.60, parseFloat(dom.mEmaSmooth.value) || 0.20));
 
+    const parsedBlock = parseFloat(dom.mBlock.value);
+    const targetBlock = Number.isNaN(parsedBlock) ? 0.0 : Math.max(0.0, parsedBlock);
+
     dom.mStrLow.value = sLow;
     dom.mStrHigh.value = sHigh;
     dom.mEmaSmooth.value = ema;
+    dom.mBlock.value = targetBlock;
 
     await fetch('/api/music_config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-            target_block: parseFloat(dom.mBlock.value) || 1.8,
-            target_context: parseFloat(dom.mContext.value) || 2.4,
+            target_block: targetBlock,
+            target_context: parseFloat(dom.mContext.value) || 3.6,
             target_buffer_count: parseInt(dom.mBuffer.value) || 2,
             temp: parseFloat(dom.mTemp.value) || 1.0,
             top_k: parseInt(dom.mTopK.value) || 250,

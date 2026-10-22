@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v8.5 (ZERO-DROP & PROXY-READY)
-===================================================================================
-- БЕСШОВНЫЙ СТРИМИНГ АУДИО БЕЗ ДРОПОВ: Все чанки поступают в непрерывный поток.
-- RUNPOD PROXY READY: Если сертификаты не переданы, работает по HTTP для корректного
-  проксирования через https://<id>-8080.proxy.runpod.net (без зависания Handshake).
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v8.6 (TRUE BUFFER BLOCKS & AUTO-MIN)
 ===================================================================================
 """
 
 from __future__ import annotations
-import sys
 import os
 import ssl
 import wave
@@ -45,6 +40,7 @@ latest_jpeg_frame = None
 jpeg_lock = threading.Lock()
 
 audio_pcm_queue = []
+browser_playout_horizon = 0.0
 audio_pcm_lock = threading.Lock()
 
 session_wav_writer = None
@@ -59,7 +55,9 @@ diff_ctrl_lock = threading.Lock()
 music_state = {
     "concepts": [],
     "preset": "balanced",
-    "target_block": 1.0,
+    "target_block": 0.0,         # 0.0 = Авто-минимизация блока по умолчанию!
+    "actual_block": 0.16,
+    "play_speed": 1.0,
     "target_context": 3.6,
     "target_buffer_count": 2,
     "temp": 1.0,
@@ -95,11 +93,30 @@ world_state = {
 }
 world_state_lock = threading.Lock()
 
-devices_registry = {}
-devices_lock = threading.Lock()
-
 sse_clients = []
 sse_lock = threading.Lock()
+
+
+def _recalc_and_push_buffer_locked(now: float):
+    """Пересчитывает реальный остаток блоков и секунд (в очереди + в полете у браузера)."""
+    ahead_sec = max(0.0, browser_playout_horizon - now)
+    queue_sec = sum(len(c) for c in audio_pcm_queue) / (SAMPLE_RATE * 4.0)
+    total_sec = queue_sec + ahead_sec
+    in_flight = 1 if ahead_sec > 0.015 else 0
+    total_chunks = len(audio_pcm_queue) + in_flight
+    with music_state_lock:
+        music_state["buffer_sec"] = round(total_sec, 3)
+        music_state["buffer_chunks"] = total_chunks
+    with music_conn_lock:
+        if active_music_conn is not None:
+            try:
+                active_music_conn.send({
+                    'cmd': 'gateway_buffer_stat',
+                    'buffer_sec': total_sec,
+                    'buffer_chunks': total_chunks
+                })
+            except Exception:
+                pass
 
 
 def broadcast_sse(event_name: str, payload: dict):
@@ -199,6 +216,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        global browser_playout_horizon
         clean_path = self.path.split('?')[0].rstrip('/')
 
         if clean_path in ['', '/index.html']:
@@ -251,22 +269,33 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             except Exception:
                 return
 
-            # Непрерывный поток: без сброса чанков в середине фраз
+            with audio_pcm_lock:
+                browser_playout_horizon = time.time()
+
+            # Отдаем чанки в браузер ровно по мере их реального проигрывания (не более 0.15с в полете),
+            # чтобы в браузере НИКОГДА не накапливалось 88 секунд в одном блоке!
             while True:
                 chunk = None
+                now = time.time()
                 with audio_pcm_lock:
-                    if len(audio_pcm_queue) > 0:
+                    ahead = browser_playout_horizon - now
+                    if ahead <= 0.15 and len(audio_pcm_queue) > 0:
                         chunk = audio_pcm_queue.pop(0)
+                        c_dur = len(chunk) / (SAMPLE_RATE * 4.0)
+                        browser_playout_horizon = max(now, browser_playout_horizon) + c_dur
+                        _recalc_and_push_buffer_locked(now)
+
                 if chunk is not None:
                     try:
                         floats = np.frombuffer(chunk, dtype=np.float32)
                         int16s = (np.clip(floats, -1.0, 1.0) * 32767).astype(np.int16)
                         self.wfile.write(int16s.tobytes())
                         self.wfile.flush()
+                        broadcast_full_state()
                     except Exception:
                         break
                 else:
-                    time.sleep(0.01)
+                    time.sleep(0.008)
 
         elif clean_path == '/api/state_stream':
             self.send_response(200)
@@ -397,7 +426,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                         active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
                     except Exception:
                         pass
-            broadcast_full_state()
+                broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
         elif clean_path == '/api/music/concepts/remove':
@@ -411,7 +440,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                         active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
                     except Exception:
                         pass
-            broadcast_full_state()
+                broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
         elif clean_path == '/api/diffusion/config':
@@ -535,6 +564,8 @@ def ipc_audio_receiver():
                         raw_bytes = data.get('pcm')
                         with music_state_lock:
                             music_state["rtf"] = round(float(data.get('rtf', 1.0)), 2)
+                            music_state["play_speed"] = round(float(data.get('play_speed', 1.0)), 2)
+                            music_state["actual_block"] = round(float(data.get('actual_block', 0.16)), 3)
                             if 'dyn_strength' in data:
                                 music_state["dyn_strength"] = round(float(data['dyn_strength']), 2)
                     elif cmd == 'sync_from_runner':
@@ -556,28 +587,14 @@ def ipc_audio_receiver():
                                 pass
 
                     with audio_pcm_lock:
+                        now = time.time()
+                        max_blocks = max(1, int(music_state.get("target_buffer_count", 2)))
                         audio_pcm_queue.append(raw_bytes)
-                        # ЗАЩИТА ОТ ДРОПОВ: Очередь не выбрасывает чанки!
-                        # Лимит 60 чанков (~12 секунд) срабатывает ТОЛЬКО при зависании браузера
-                        if len(audio_pcm_queue) > 60:
+                        # Строгий лимит по числу блоков буфера (плюс 1 блок запаса),
+                        # чтобы очередь НИКОГДА не копила 60 чанков (88 секунд)!
+                        while len(audio_pcm_queue) > max_blocks + 1:
                             audio_pcm_queue.pop(0)
-
-                        total_bytes = sum(len(c) for c in audio_pcm_queue)
-                        b_sec = total_bytes / (SAMPLE_RATE * 4)
-                        with music_state_lock:
-                            music_state["buffer_sec"] = b_sec
-                            music_state["buffer_chunks"] = len(audio_pcm_queue)
-
-                    # Передаем реальный остаток буфера обратно серверу для идеального темпа
-                    with music_conn_lock:
-                        if active_music_conn is not None:
-                            try:
-                                active_music_conn.send({
-                                    'cmd': 'gateway_buffer_stat',
-                                    'buffer_sec': b_sec
-                                })
-                            except Exception:
-                                pass
+                        _recalc_and_push_buffer_locked(now)
 
                     broadcast_full_state()
         except Exception:
@@ -658,7 +675,6 @@ def main():
 
     server = ThreadedHTTPServer(('0.0.0.0', port), UnifiedCloudHandler)
 
-    # В RunPod Proxy снаружи ВСЕГДА валидный HTTPS, поэтому внутрь слушаем чистый HTTP
     scheme = "http"
     if args.cert and args.key and os.path.exists(args.cert) and os.path.exists(args.key):
         try:
@@ -666,11 +682,8 @@ def main():
             ctx.load_cert_chain(certfile=args.cert, keyfile=args.key)
             server.socket = ctx.wrap_socket(server.socket, server_side=True)
             scheme = "https"
-            print(f"🔒 [GATEWAY] Прямой TLS активирован: {args.cert}")
-        except Exception as e:
-            print(f"⚠️ [GATEWAY] Режим чистого HTTP: {e}")
-    else:
-        print("🌐 [GATEWAY] Запуск в режиме прямого HTTP для RunPod Proxy (Zero-Handshake Lag).")
+        except Exception:
+            pass
 
     print(f"🚀 [GATEWAY] Веб-терминал: {scheme}://0.0.0.0:{port}/")
     try:

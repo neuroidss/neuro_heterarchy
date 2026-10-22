@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: REAL-TIME MUSICGEN GENERATIVE RUNNER (ZERO-DROP & AUTO-MINIMIZE BUFFER)
-===================================================================================
-- НИ ОДИН ЧАНК НЕ ВЫБРАСЫВАЕТСЯ (Zero Drop):
-  Все сгенерированные сэмплы доигрываются до конца.
-- Передает точный остаток очереди (queue_sec) на сервер, чтобы сервер сам
-  подруливал скоростью (Speed 0.45x..1.18x) и авто-минимизировал размер блока!
-- Полноразмерное сферическое EMA-сглаживание [64 × 768] с сохранением нормы T5.
+NEUROCANVAS: REAL-TIME MUSICGEN GENERATIVE RUNNER (AUTO-MIN BLOCK = 0 DEFAULT)
 ===================================================================================
 """
 
@@ -27,12 +21,8 @@ import torch.nn.functional as F
 
 try:
     os.setpriority(os.PRIO_PROCESS, 0, -20)
-    print("⚡ [System] Auto-Priority applied: NI -20 (Real-Time PRI 0)", flush=True)
-except PermissionError:
-    try:
-        os.setpriority(os.PRIO_PROCESS, 0, -10)
-    except Exception:
-        pass
+except Exception:
+    pass
 
 CURRENT_DIR = Path(__file__).resolve().parent
 for p in [CURRENT_DIR, CURRENT_DIR / "src", CURRENT_DIR.parent / "src"]:
@@ -51,12 +41,17 @@ queued_samples_lock = threading.Lock()
 queued_samples_total = 0
 
 
-def push_audio_chunk_zero_drop(pcm: np.ndarray):
-    """Кладет чанк в очередь БЕЗ выбрасывания предыдущих чанков!"""
+def push_audio_chunk_zero_drop(pcm: np.ndarray, max_chunks: int = 2):
     global queued_samples_total
     if pcm is None or len(pcm) == 0:
         return
     with queued_samples_lock:
+        while audio_playback_queue.qsize() > max(1, max_chunks):
+            try:
+                old = audio_playback_queue.get_nowait()
+                queued_samples_total = max(0, queued_samples_total - len(old))
+            except Exception:
+                break
         audio_playback_queue.put(pcm)
         queued_samples_total += len(pcm)
 
@@ -72,16 +67,15 @@ def pop_audio_chunk(timeout: float = 0.5) -> np.ndarray | None:
         return None
 
 
-def get_local_queue_seconds() -> float:
+def get_local_queue_stats() -> tuple[float, int]:
     with queued_samples_lock:
-        return float(queued_samples_total) / float(SAMPLE_RATE)
+        return float(queued_samples_total) / float(SAMPLE_RATE), int(audio_playback_queue.qsize())
 
 
 def audio_playback_worker(target_buf=1):
     import sounddevice as sd
     while audio_playback_queue.qsize() < target_buf and not stop_playback.is_set():
-        time.sleep(0.04)
-    print("🔈 [Audio Player] Вывод звука 32 kHz в терминале активен (Zero-Drop).", flush=True)
+        time.sleep(0.02)
     try:
         with sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype='float32', latency='high') as stream:
             while not stop_playback.is_set():
@@ -113,7 +107,9 @@ class AsyncMusicWorker(threading.Thread):
         self.latest_pcm = np.zeros(0, dtype=np.float32)
         self.rtf = 1.0
         self.play_speed = 1.0
-        self.gateway_queue_sec = 0.8
+        self.actual_block = 0.16
+        self.gateway_queue_sec = 0.0
+        self.gateway_queue_chunks = 0
         self.latest_dyn_strength = runtime_cfg['strength_low']
 
     def update_conditioning(self, embeds, block_sec, context_sec, temp, top_k, cfg_coef, is_drop, dyn_strength):
@@ -159,8 +155,9 @@ class AsyncMusicWorker(threading.Thread):
         while self.running:
             with self.lock:
                 emb = self.latest_embeds
-                b_sec = self.block_sec
-                c_sec = self.cfg['target_context']
+                b_sec = float(self.cfg.get('target_block', 0.0))
+                c_sec = float(self.cfg.get('target_context', 3.6))
+                t_buf_cnt = int(self.cfg.get('target_buffer_count', 2))
                 t_val = self.temp
                 k_val = self.top_k
                 cfg_c = self.cfg_coef
@@ -173,7 +170,10 @@ class AsyncMusicWorker(threading.Thread):
                 time.sleep(0.01)
                 continue
 
-            q_sec = get_local_queue_seconds() if self.enable_local_audio else self.gateway_queue_sec
+            if self.enable_local_audio:
+                q_sec, q_chunks = get_local_queue_stats()
+            else:
+                q_sec, q_chunks = self.gateway_queue_sec, self.gateway_queue_chunks
 
             try:
                 self.conn.send({
@@ -181,11 +181,13 @@ class AsyncMusicWorker(threading.Thread):
                     't5_embeds': emb,
                     'block_sec': b_sec,
                     'context_sec': c_sec,
+                    'target_buffer_count': t_buf_cnt,
                     'temp': t_val,
                     'top_k': k_val,
                     'cfg_coef': cfg_c,
                     'safety_factor': safety,
                     'queue_sec': q_sec,
+                    'queue_chunks': q_chunks,
                     'is_reset': drop_val
                 })
                 resp = self.conn.recv()
@@ -193,14 +195,14 @@ class AsyncMusicWorker(threading.Thread):
                     pcm = resp['pcm']
                     self.rtf = float(resp.get('rtf', 1.0))
                     self.play_speed = float(resp.get('play_speed', 1.0))
+                    self.actual_block = float(resp.get('actual_block', 0.16))
                     self.cfg['current_speed'] = self.play_speed
-                    if 'actual_block' in resp:
-                        self.cfg['actual_block'] = float(resp['actual_block'])
+                    self.cfg['actual_block'] = self.actual_block
                     with self.lock:
                         self.latest_pcm = pcm
 
                     if self.enable_local_audio:
-                        push_audio_chunk_zero_drop(pcm)
+                        push_audio_chunk_zero_drop(pcm, max_chunks=t_buf_cnt)
 
                     if self.gateway_conn is None:
                         try:
@@ -222,6 +224,7 @@ class AsyncMusicWorker(threading.Thread):
                                 'pcm': pcm.tobytes(),
                                 'rtf': self.rtf,
                                 'play_speed': self.play_speed,
+                                'actual_block': self.actual_block,
                                 'dyn_strength': dyn_str
                             })
                             while self.gateway_conn.poll(0.0):
@@ -231,7 +234,6 @@ class AsyncMusicWorker(threading.Thread):
                                     if cmd == 'update_config':
                                         with self.lock:
                                             self.cfg.update(inc.get('config', {}))
-                                            print(f"🎛️ [MUSIC CFG]: {self.cfg}", flush=True)
                                     elif cmd == 'update_concepts':
                                         gw_concepts = inc.get('concepts', [])
                                         if inc.get('is_initial_sync') and not gw_concepts and self.semantic.words:
@@ -243,7 +245,8 @@ class AsyncMusicWorker(threading.Thread):
                                         else:
                                             self._apply_new_concepts(gw_concepts)
                                     elif cmd == 'gateway_buffer_stat':
-                                        self.gateway_queue_sec = float(inc.get('buffer_sec', 0.8))
+                                        self.gateway_queue_sec = float(inc.get('buffer_sec', 0.0))
+                                        self.gateway_queue_chunks = int(inc.get('buffer_chunks', 0))
                         except Exception:
                             self.gateway_conn = None
 
@@ -287,9 +290,10 @@ def main():
     parser.add_argument('--mode', type=str, default="semantic", choices=["semantic", "turbo"])
     parser.add_argument('--gateway-port', type=int, default=6003)
 
-    parser.add_argument('--target-block', type=float, default=2.4)
-    parser.add_argument('--target-context', type=float, default=1.2)
-    parser.add_argument('--target-buffer-count', type=int, default=1)
+    # По умолчанию target_block = 0.0 (Авто-минимизация блока до предела ускорителя)
+    parser.add_argument('--target-block', type=float, default=0.0)
+    parser.add_argument('--target-context', type=float, default=3.6)
+    parser.add_argument('--target-buffer-count', type=int, default=2)
     parser.add_argument('--speed-safety-factor', type=float, default=1.0)
     parser.add_argument('--temp', type=float, default=1.0)
     parser.add_argument('--top-k', type=int, default=250)
@@ -311,27 +315,21 @@ def main():
         'strength_low': args.strength_low,
         'strength_high': args.strength_high,
         'ema_smooth': args.ema_smooth,
-        'current_speed': 1.0
+        'current_speed': 1.0,
+        'actual_block': 0.16
     }
 
     enable_local_sound = not args.headless
     enable_pygame_hud = (not args.headless) and (not args.minimal_ui)
 
-    print("=" * 70)
-    print(f"🧠 NEUROCANVAS MUSIC RUNNER (HUD: {enable_pygame_hud} | LOCAL AUDIO: {enable_local_sound})")
-    print("=" * 70)
-
-    print("⏳ Подключение к musicgen_server (порт 6005)...", flush=True)
     conn = None
     while conn is None:
         try:
             conn = Client(('localhost', 6005), authkey=b'music')
-            print("✅ MusicGen сервер готов к работе!", flush=True)
         except Exception:
             time.sleep(0.5)
 
     words = parse_initial_music_concepts(args.lore_file, args.concepts)
-    print(f"📤 Запрос предрассчета {len(words)} тем лора у сервера...", flush=True)
     conn.send({'cmd': 'init_lore', 'prompts': words})
     resp = conn.recv()
 
@@ -358,8 +356,6 @@ def main():
 
     if enable_local_sound:
         threading.Thread(target=audio_playback_worker, args=(runtime_config['target_buffer_count'],), daemon=True).start()
-    else:
-        print("🔇 [Headless Mode] Локальный вывод звука в терминале отключен.", flush=True)
 
     engine = HeterarchicalBrainEngine(gamma_max=args.gamma_max)
     engine.start()
@@ -375,7 +371,7 @@ def main():
 
     try:
         while True:
-            dt = 0.016 if hud else 0.10
+            dt = 0.016 if hud else 0.05
             if hud:
                 dt, commands = hud.poll_events(len(engine.get_frame().nodes))
                 for cmd, payload in commands:
@@ -390,7 +386,7 @@ def main():
                     elif cmd == "adj_param":
                         p_name, delta = payload
                         if p_name == "target_block":
-                            runtime_config['target_block'] = float(np.clip(runtime_config['target_block'] + delta, 0.5, 4.0))
+                            runtime_config['target_block'] = float(np.clip(runtime_config['target_block'] + delta, 0.0, 4.0))
                         elif p_name == "temp":
                             runtime_config['temp'] = float(np.clip(runtime_config['temp'] + delta, 0.3, 1.8))
 
@@ -411,7 +407,6 @@ def main():
                 strength_high=runtime_config['strength_high']
             )
 
-            # Сферическое EMA-сглаживание: сохраняет точную норму каждого из 64 токенов T5!
             cur_ema_param = float(runtime_config.get('ema_smooth', 0.20))
             ema_alpha = float(np.clip(dt / max(0.04, cur_ema_param), 0.02, 0.60))
             target_norms = torch.norm(target_out, p=2, dim=-1, keepdim=True).clamp(min=1.0)
@@ -432,18 +427,18 @@ def main():
                 hud.render(telem, rtf=worker.rtf, dt=dt, runtime_cfg=runtime_config)
             elif args.minimal_ui:
                 now = time.time()
-                if now - last_term_print >= 0.5:
+                if now - last_term_print >= 0.4:
                     last_term_print = now
                     dag_str = " ".join(telem.get("dag_log_parts", ["DRIFT"])[:4])
-                    q_s = get_local_queue_seconds()
+                    q_s, q_c = get_local_queue_stats()
                     sys.stdout.write(
                         f"\r🎵 [MINIMAL-UI] RTF:{worker.rtf:4.2f}x | Speed:{worker.play_speed:4.2f}x | "
-                        f"Buf:{q_s:3.1f}s | DynStr:{telem.get('dyn_strength', 0.25):.2f} | {dag_str}      "
+                        f"Blk:{worker.actual_block:4.2f}s | Buf:{q_s:3.1f}s({q_c}) | {dag_str}      "
                     )
                     sys.stdout.flush()
-                time.sleep(0.10)
+                time.sleep(0.05)
             else:
-                time.sleep(0.10)
+                time.sleep(0.05)
 
     except KeyboardInterrupt:
         pass
@@ -457,4 +452,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
