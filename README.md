@@ -11,6 +11,7 @@
 [![arXiv:2507.05888](https://img.shields.io/badge/arXiv-2507.05888-b31b1b.svg)](https://arxiv.org/abs/2507.05888)
 [![DOI:10.1088/1741-2552/aacfe4](https://img.shields.io/badge/DOI-10.1088%2F1741--2552%2Faacfe4-yellow.svg)](https://doi.org/10.1088/1741-2552/aacfe4)
 [![DOI:10.1038/nn.4186](https://img.shields.io/badge/DOI-10.1038%2Fnn.4186-teal.svg)](https://doi.org/10.1038/nn.4186)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/dmitry-sukhoruchkin/runpod-cors-proxy)
 
 ---
 
