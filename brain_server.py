@@ -15,12 +15,17 @@ from render_logic import NeuroRender
 def main():
     parser = argparse.ArgumentParser(description="NeuroCanvas Fast Brain Server")
     parser.add_argument('--mode', type=str, default="lcm", choices=["lcm", "turbo", "sdxl-turbo"])
-    parser.add_argument('--stochastic', action='store_true', default=False,
-                        help="Вернуть старый стохастический (случайный) шум на каждом кадре вместо детерминированного")
+    parser.add_argument('--stochastic', dest='stochastic', action='store_true', default=None,
+                        help="Включить стохастический (случайный) шум на каждом кадре (как в классическом движке)")
+    parser.add_argument('--deterministic', '--no-stochastic', dest='stochastic', action='store_false',
+                        help="Отключить стохастику (100% детерминированный режим от рабочей памяти ЭЭГ)")
     args = parser.parse_args()
 
-    deterministic = not args.stochastic
-    print(f"🧠 STARTING FAST NEURAL BRAIN SERVER (CUDA BACKEND | Deterministic={deterministic}) 🧠")
+    # По умолчанию стохастика включена (как в старом движке), если явно не передан --deterministic
+    stochastic_mode = True if args.stochastic is None else bool(args.stochastic)
+    deterministic = not stochastic_mode
+
+    print(f"🧠 STARTING FAST NEURAL BRAIN SERVER (CUDA BACKEND | Stochastic={stochastic_mode} | Deterministic={deterministic}) 🧠")
     current_mode = args.mode
     render = NeuroRender(mode=current_mode, use_taesd=True, deterministic=deterministic)
 
@@ -38,7 +43,9 @@ def main():
                     if cmd == 'init_mode':
                         req_mode = msg.get('mode', current_mode)
                         req_taesd = msg.get('use_taesd', render.use_taesd)
-                        if 'deterministic' in msg:
+                        if 'stochastic' in msg and msg['stochastic'] is not None:
+                            render.deterministic = not bool(msg['stochastic'])
+                        elif 'deterministic' in msg and msg['deterministic'] is not None:
                             render.deterministic = bool(msg['deterministic'])
 
                         if req_mode != current_mode:
@@ -49,7 +56,20 @@ def main():
                             current_mode = req_mode
                         else:
                             render.set_taesd(req_taesd)
-                        conn.send({'status': 'ok', 'mode': current_mode, 'is_sdxl': render.is_sdxl})
+                        conn.send({
+                            'status': 'ok',
+                            'mode': current_mode,
+                            'is_sdxl': render.is_sdxl,
+                            'deterministic': render.deterministic,
+                            'stochastic': not render.deterministic
+                        })
+                        continue
+
+                    elif cmd == 'set_stochastic':
+                        stoch = bool(msg.get('stochastic', True))
+                        render.deterministic = not stoch
+                        print(f"🎲 [BRAIN SERVER] Режим стохастики переключен: Stochastic={stoch} (Deterministic={render.deterministic})")
+                        conn.send({'status': 'ok', 'stochastic': stoch, 'deterministic': render.deterministic})
                         continue
 
                     elif cmd == 'encode_base_prompts':
@@ -61,6 +81,7 @@ def main():
                         image_np = msg.pop('image_np', None)
                         embeds_np = msg.pop('prompt_embeds', None)
                         pooled_np = msg.pop('pooled_prompt_embeds', None)
+                        wm_np = msg.pop('wm_5x5x32x120', None)
 
                         kwargs = msg.copy()
                         del kwargs['cmd']
@@ -70,6 +91,9 @@ def main():
                             if t_emb.ndim == 2:
                                 t_emb = t_emb.unsqueeze(0)
                             kwargs['prompt_embeds'] = t_emb
+
+                        if wm_np is not None:
+                            kwargs['wm_5x5x32x120'] = torch.tensor(wm_np, dtype=torch.float32, device=render.device)
 
                         if render.is_sdxl:
                             if pooled_np is not None:

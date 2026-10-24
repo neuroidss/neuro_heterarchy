@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (DETERMINISTIC & STOCHASTIC)
+NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (ULTRA-OPTIMIZED KERNELS)
 ===================================================================================
-- ПО УМОЛЧАНИЮ ДЕТЕРМИНИРОВАННЫЙ РЕЖИМ (deterministic=True):
-  Выбор токенов во всех 4 кодбуках EnCodec управляется напрямую полноразмерным
-  срезом тензора ЭЭГ cross_attn_src[:, offset % 64, :4*k_eff]. Из одного и того же
-  ЭЭГ всегда воспроизводится 100% побитово идентичный звук!
-- РЕЖИМ ОТКАТА «КАК БЫЛО» (--stochastic или 'deterministic': False):
-  Возвращает классический случайный Gumbel-шум u.uniform_().
+- РЕЖИМ БЛОК = 0 (ПО УМОЛЧАНИЮ):
+  Динамически снижает размер блока вплоть до 1 токена EnCodec (0.02с = 20 мс),
+  утилизируя 100% мощности GPU, и увеличивает блок только при опустошении буфера.
+- ПОДДЕРЖКА СЛАБЫХ GPU (RTX 3060 и др.):
+  Если при заданном контексте (например 3.6с) и блоке (например 1.2с) RTF < 1.0,
+  сервер плавно замедляет темп музыки (play_speed < 1.0, без ускорения > 1.0x),
+  чтобы буфер никогда не пустел.
+- УЛЬТРА-ОПТИМИЗАЦИЯ ШАГА ТРАНСФОРМЕРА:
+  * Удален холостой вызов _get_mask (LowerTriangularMask) при SDPA.
+  * 4 таблицы эмбеддингов кодбуков слиты в один батчевый вызов (_fused_emb_weight).
+  * Веса кросс-аттеншна q_weight предкэшированы без нарезки view на каждом шаге.
+- РЕЖИМ СТОХАСТИКИ / ДЕТЕРМИНИЗМА:
+  По умолчанию стохастика включена (100% как в классическом сервере). При флаге
+  --deterministic (или --no-stochastic) стохастика отключается.
 ===================================================================================
 """
 from __future__ import annotations
@@ -186,6 +194,7 @@ _CACHED_TOKENIZED = None
 
 
 def prepare_lm_fast_weights(lm: LMModel):
+    """Предкэширует срезы весов MHA, эмбеддингов и выходных голов (убирает тысячи аллокаций в цикле)."""
     for layer in lm.transformer.layers:
         if layer.cross_attention is not None:
             ca = layer.cross_attention
@@ -219,7 +228,7 @@ def step_continuous_diagonal_stream(
     ctx_frames: int,
     temp: float = 1.0,
     top_k: int = 250,
-    deterministic: bool = True
+    deterministic: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     global _CACHED_TOKENIZED, LAST_PROFILE
     t_start_t5 = time.perf_counter()
@@ -289,12 +298,12 @@ def step_continuous_diagonal_stream(
             if temp > 0.0:
                 top_logits, top_indices = torch.topk(logits * inv_temp, k=k_eff, dim=-1)
                 if deterministic and cross_attn_src is not None:
-                    # 100% ДЕТЕРМИНИЗМ: каждый из 4 кодбуков берет свой срез из тензора ЭЭГ cross_attn_src
+                    # Детерминированный режим (без случайного генератора)
                     t_idx = offset % cross_attn_src.shape[1]
                     eeg_slice_4xk = cross_attn_src[:, t_idx, :K * k_eff].contiguous().view(B, K, k_eff)
                     u = torch.sigmoid(eeg_slice_4xk).clamp(1e-6, 1.0 - 1e-6)
                 else:
-                    # РЕЖИМ «КАК БЫЛО» (--stochastic): классический случайный Gumbel-шум
+                    # Стохастический режим (100% как было в вашем оригинальном сервере)
                     u = torch.empty_like(top_logits).uniform_(1e-6, 1.0 - 1e-6)
                 gumbel = top_logits - torch.log(-torch.log(u))
                 sample_idx = torch.argmax(gumbel, dim=-1, keepdim=True)
@@ -449,10 +458,10 @@ def adapt_block_and_pacing(
     return current_block, real_rtf, play_speed, sleep_sec
 
 
-def run_startup_diagnostics(mg: MusicGen, dummy_t5: torch.Tensor, deterministic: bool = True):
+def run_startup_diagnostics(mg: MusicGen, dummy_t5: torch.Tensor, deterministic: bool = False):
     global ACTIVE_T5_EMBEDS, _CACHED_TOKENIZED
     print("\n" + "=" * 90)
-    print(f"🔬 [ДИАГНОСТИКА MUSICGEN: БЕСШОВНЫЙ ДИАГОНАЛЬНЫЙ СТРИМ (Deterministic={deterministic})]")
+    print("🔬 [ДИАГНОСТИКА MUSICGEN: БЕСШОВНЫЙ ДИАГОНАЛЬНЫЙ СТРИМ (БЛОКИ ОТ 0.1с ДО 2.4с)]")
     print("=" * 90)
 
     if torch.cuda.is_available():
@@ -519,16 +528,20 @@ def main():
     parser = argparse.ArgumentParser(description="NeuroCanvas MusicGen Server Realtime Auto-Min Block")
     parser.add_argument('--port', type=int, default=6005)
     parser.add_argument('--model', type=str, default="facebook/musicgen-small")
-    parser.add_argument('--benchmark', action='store_true', default=True)
+    parser.add_argument('--benchmark', dest='benchmark', action='store_true', default=True)
+    parser.add_argument('--no-benchmark', dest='benchmark', action='store_false')
     parser.add_argument('--quiet-step', action='store_true', default=False)
-    parser.add_argument('--stochastic', action='store_true', default=False,
-                        help="Вернуть старый случайный Gumbel-шум u.uniform_() вместо детерминированного выбора")
+    parser.add_argument('--stochastic', dest='stochastic', action='store_true', default=True,
+                        help="Включить стохастику (по умолчанию включена, как в оригинальном сервере)")
+    parser.add_argument('--deterministic', '--no-stochastic', dest='stochastic', action='store_false',
+                        help="Отключить стохастику (детерминированный режим)")
     args = parser.parse_args()
 
-    default_deterministic = not args.stochastic
+    stochastic_mode = True if args.stochastic is None else bool(args.stochastic)
+    default_deterministic = not stochastic_mode
 
     print("=" * 70)
-    print(f"🎵 ИНИЦИАЛИЗАЦИЯ MUSICGEN НА {DEVICE} (Deterministic={default_deterministic})...")
+    print(f"🎵 ИНИЦИАЛИЗАЦИЯ MUSICGEN НА {DEVICE} (AUTO-MIN 0.02s BLOCK | Stochastic={stochastic_mode})...")
     print("=" * 70)
 
     set_efficient_attention_backend('torch')
@@ -545,10 +558,6 @@ def main():
     raw_emb = t5_cond.t5.shared.weight.detach().to(torch.float32)
     mean_tok_norm = float(torch.norm(raw_emb, p=2, dim=-1).mean().item())
     norm_emb = raw_emb / (torch.norm(raw_emb, dim=-1, keepdim=True) + 1e-7)
-
-    # Фиксируем seed перед pca_lowrank, чтобы базис был 100% одинаковым при любом перезапуске
-    torch.manual_seed(777)
-    torch.cuda.manual_seed_all(777)
     _, _, V_all = torch.pca_lowrank(norm_emb, q=120)
     proj_120_to_768 = V_all[:, :120].T.contiguous().to(DEVICE)
     global_svd_bases_64x768 = (F.normalize(V_all[:, :64].T.contiguous(), p=2, dim=-1) * mean_tok_norm).to(DEVICE)
@@ -560,7 +569,6 @@ def main():
     if args.benchmark:
         run_startup_diagnostics(mg, empty_embed_t, deterministic=default_deterministic)
 
-    cached_attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
     crossfader = AudioCrossfaderGPU(fade_len=640)
     current_diag_seq = None
     current_block = 0.16
@@ -612,8 +620,14 @@ def main():
                     queue_chunks = int(msg.get('queue_chunks', 0))
                     target_buffer_count = int(msg.get('target_buffer_count', 2))
                     is_reset = bool(msg.get('is_reset', False))
-                    use_det = bool(msg.get('deterministic', default_deterministic))
                     lock_speed = bool(msg.get('lock_speed', False))
+
+                    if 'stochastic' in msg and msg['stochastic'] is not None:
+                        use_det = not bool(msg['stochastic'])
+                    elif 'deterministic' in msg and msg['deterministic'] is not None:
+                        use_det = bool(msg['deterministic'])
+                    else:
+                        use_det = default_deterministic
 
                     if embeds_np is not None:
                         ACTIVE_T5_EMBEDS = torch.from_numpy(embeds_np).to(DEVICE)
@@ -627,12 +641,13 @@ def main():
                     if user_target_block > 0.0 and (queue_chunks < target_buffer_count or lock_speed):
                         current_block = max(MIN_BLOCK_SEC, user_target_block)
 
+                    attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
                     gen_frames = max(1, int(round(current_block * FRAME_RATE)))
                     ctx_frames = max(10, int(round(context_sec * FRAME_RATE)))
 
                     with torch.inference_mode(), mg.autocast:
                         current_diag_seq, ready_codes, pfx = step_continuous_diagonal_stream(
-                            mg.lm, current_diag_seq, cached_attributes,
+                            mg.lm, current_diag_seq, attributes,
                             gen_frames=gen_frames, ctx_frames=ctx_frames,
                             temp=temp, top_k=top_k, deterministic=use_det
                         )
@@ -650,7 +665,6 @@ def main():
                         gen_time = time.perf_counter() - t0
 
                         if lock_speed:
-                            # В режиме строгой верификации отключаем влияние секундомера ОС (time.perf_counter)
                             real_rtf = raw_audio_len / max(gen_time, 0.001)
                             play_speed = 1.0
                             sleep_sec = 0.0
@@ -712,7 +726,6 @@ def main():
                         mg.compression_model.to(torch.float16)
                     prepare_lm_fast_weights(mg.lm)
                     t5_cond = mg.lm.condition_provider.conditioners['description']
-                    cached_attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
                     _CACHED_TOKENIZED = None
                     current_diag_seq = None
                     crossfader.overlap = None

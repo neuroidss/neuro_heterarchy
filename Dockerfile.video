@@ -1,0 +1,37 @@
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV SDL_VIDEODRIVER=dummy
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    git \
+    curl \
+    openssh-server \
+    libgl1 \
+    libglib2.0-0 \
+    libasound2 \
+    libx11-6 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /var/run/sshd /root/.ssh && chmod 700 /root/.ssh \
+    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
+    && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+
+WORKDIR /app
+
+RUN pip3 install --no-cache-dir --upgrade pip
+COPY requirements_video.txt .
+RUN pip3 install --no-cache-dir -r requirements_video.txt
+
+RUN pip3 install --no-cache-dir bitsandbytes accelerate
+
+COPY . .
+
+EXPOSE 22 6002 6006 8080
+
+CMD ["/usr/sbin/sshd", "-D"]

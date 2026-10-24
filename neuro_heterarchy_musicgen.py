@@ -3,6 +3,11 @@
 ===================================================================================
 NEUROCANVAS: REAL-TIME MUSICGEN RUNNER (POWERED BY SHARED AMODAL GPU BUS)
 ===================================================================================
+- Функция project_amodal_bus_to_musicgen_gpu 100% идентична вашему оригинальному
+  рабочему файлу (но находится здесь, чтобы neuro_amodal_engine.py оставался
+  полностью амодальным).
+- Поддерживает переключение стохастики (--stochastic / --deterministic).
+===================================================================================
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ from neuro_genesis_engine import SelfSufficientHeterarchyRouter
 from music_genesis_engine import UniversalMusicSemanticSpace
 from neuro_amodal_engine import (
     SharedAmodalCognitiveEngine,
-    project_amodal_bus_to_musicgen_gpu,
+    HardwareVRAMBus,
 )
 
 SAMPLE_RATE = 32000
@@ -43,6 +48,107 @@ stop_playback = threading.Event()
 
 queued_samples_lock = threading.Lock()
 queued_samples_total = 0
+
+
+@torch.no_grad()
+def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: UniversalMusicSemanticSpace,
+                                       target_block: float, target_context: float,
+                                       base_temp: float, base_top_k: int, cfg_coef: float,
+                                       strength_low: float, strength_high: float,
+                                       need_ui_telemetry: bool = False):
+    """
+    100% точная математика из вашего рабочего файла:
+    использует slot_norm_coord_16, amodal_manifold_77x768[1:65] и SVD-проекцию v_aff!
+    """
+    meta = bus.meta_32
+    n_sec = max(2, int(meta[1].item()))
+    fcz_pers_t = meta[6]
+    max_surp_t = meta[7]
+
+    active_drive_t = torch.clamp(fcz_pers_t * 0.70 + torch.clamp(max_surp_t, max=1.0) * 0.30, 0.0, 1.0)
+    dyn_str_t = torch.clamp(strength_low + (strength_high - strength_low) * active_drive_t, strength_low, 0.98)
+    dyn_str = float(dyn_str_t.item())
+
+    order = bus.slot_order_16[:n_sec].long()
+    norm_coords = bus.slot_norm_coord_16[:n_sec]
+    c_flow = bus.causal_flow_16x16[:n_sec, :n_sec]
+    amodal_64 = bus.amodal_manifold_77x768[1:65]
+
+    with semantic.lock:
+        c_bases_copy = list(semantic.c_bases)
+        words_copy = list(semantic.words)
+        n_bases = min(len(c_bases_copy), len(words_copy))
+
+        if n_bases == 0:
+            base_64 = semantic.last_active_embed.clone()
+            clean_norms = torch.norm(base_64, p=2, dim=-1, keepdim=True).clamp(min=1.0)
+            v_aff = semantic.global_svd_bases[:16]
+            slot_idx_gpu = torch.zeros(n_sec, dtype=torch.long, device=DEVICE)
+        else:
+            slot_idx_gpu = torch.clamp((norm_coords * n_bases).long(), 0, n_bases - 1)
+            root_s = order[0] % n_sec
+            root_c_idx = int(slot_idx_gpu[root_s].item()) % n_bases
+            base_64 = c_bases_copy[root_c_idx].clone()
+            clean_norms = torch.norm(base_64, p=2, dim=-1, keepdim=True).clamp(min=1.0)
+
+            if n_bases > 1 and n_sec > 1:
+                child_s = order[1] % n_sec
+                child_c_idx = int(slot_idx_gpu[child_s].item()) % n_bases
+                if child_c_idx != root_c_idx:
+                    t_child = c_bases_copy[child_c_idx]
+                    dot = torch.sum(t_child * base_64, dim=-1, keepdim=True) / (torch.sum(base_64 ** 2, dim=-1, keepdim=True) + 1e-7)
+                    ortho = F.normalize(t_child - dot * base_64, p=2, dim=-1) * clean_norms
+                    is_sup = (c_flow[root_s, child_s] >= 0.03).float()
+                    base_64[4:20].add_(ortho[4:20] * is_sup * 0.32 + t_child[4:20] * (1.0 - is_sup) * 0.22)
+
+            v_aff = semantic.get_concept_affordances_svd(root_c_idx, max_bases=16)
+
+        coords = torch.matmul(amodal_64, v_aff.T)
+        musical_mod = F.normalize(torch.matmul(coords, v_aff), p=2, dim=-1) * clean_norms
+
+        final_64 = base_64 * (1.0 - 0.35 * dyn_str_t) + musical_mod * (0.35 * dyn_str_t)
+        final_64 = F.normalize(final_64, p=2, dim=-1) * clean_norms
+
+    temp = float(min(1.8, max(0.3, base_temp * (0.88 + 0.25 * dyn_str))))
+    top_k = int(min(450, max(30, base_top_k + int((dyn_str - 0.4) * 100))))
+
+    telemetry = {"dyn_strength": round(dyn_str, 3), "is_drop": False}
+    if need_ui_telemetry:
+        indices = [int(i) % max(1, n_bases) for i in slot_idx_gpu.tolist()]
+        names = [words_copy[i].upper() for i in indices] if n_bases > 0 else ["СВОБОДНЫЙ_ДРЕЙФ"] * n_sec
+        root_name = names[int(order[0].item()) % n_sec]
+        telemetry.update({
+            "primary_role": "AFz", "primary_active": True,
+            "total_clock_sectors": n_sec, "current_clock_sec": int(meta[2].item()) % n_sec,
+            "slot_names": names, "slot_indices": indices,
+            "sealed_mask": [bool(x > 0.5) for x in bus.slot_seals_16[:n_sec].tolist()],
+            "slot_stabilities": bus.slot_stabs_16[:n_sec].cpu().numpy(),
+            "causal_flow_np": c_flow.cpu().numpy(),
+            "dag_log_parts": [root_name],
+            "dl_phase": float(meta[3].item()), "is_delta_tick": bool(meta[4].item() > 0.5),
+            "active_vocab_size": n_bases,
+            "fpz_active": True, "fpz_tension": float(meta[16].item()), "fpz_concept": root_name,
+            "f3_active": True, "f3_concept": root_name,
+            "f3_x_local": float(meta[9].item()), "f3_y_global": float(meta[10].item()), "f3_kuramoto": float(meta[11].item()),
+            "f4_active": True, "f4_concept": root_name, "f4_entropy": float(active_drive_t.item()),
+            "fcz_active": True, "fcz_concept": root_name,
+            "fcz_lx": float(meta[12].item()), "fcz_ly": float(meta[13].item()),
+            "fcz_rx": float(meta[14].item()), "fcz_ry": float(meta[15].item()),
+        })
+    return final_64, target_block, target_context, temp, top_k, cfg_coef, telemetry
+
+
+# Алиас для обратной совместимости с neuro_deterministic_reproducer.py
+def map_working_memory_to_music_field_gpu(bus: HardwareVRAMBus, semantic: UniversalMusicSemanticSpace,
+                                          target_block: float, target_context: float,
+                                          base_temp: float, base_top_k: int, cfg_coef: float,
+                                          strength_low: float, strength_high: float,
+                                          need_ui_telemetry: bool = False):
+    final_64, b_sec, c_sec, t_val, k_val, cfg_c, telem = project_amodal_bus_to_musicgen_gpu(
+        bus, semantic, target_block, target_context, base_temp, base_top_k, cfg_coef,
+        strength_low, strength_high, need_ui_telemetry
+    )
+    return final_64, bus.wm_field_5x5x32x120, b_sec, c_sec, t_val, k_val, cfg_c, telem
 
 
 def push_audio_chunk_zero_drop(pcm: np.ndarray, max_chunks: int = 2):
@@ -91,12 +197,13 @@ def audio_playback_worker(target_buf=1):
 
 
 class AsyncMusicWorker(threading.Thread):
-    def __init__(self, conn, runtime_cfg, semantic, gateway_port=6003, enable_local_audio=True):
+    def __init__(self, conn, runtime_cfg, semantic, gateway_port=6003, enable_local_audio=True, deterministic=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.cfg = runtime_cfg
         self.semantic = semantic
         self.enable_local_audio = enable_local_audio
+        self.deterministic = deterministic
         self.running = True
         self.lock = threading.Lock()
         self.latest_embeds = None
@@ -168,6 +275,7 @@ class AsyncMusicWorker(threading.Thread):
                 safety = self.cfg['speed_safety_factor']
                 drop_val = self.is_drop
                 dyn_str = self.latest_dyn_strength
+                det_override = self.deterministic
                 self.is_drop = False
 
             if emb is None:
@@ -180,7 +288,7 @@ class AsyncMusicWorker(threading.Thread):
                 q_sec, q_chunks = self.gateway_queue_sec, self.gateway_queue_chunks
 
             try:
-                self.conn.send({
+                req = {
                     'cmd': 'generate_step',
                     't5_embeds': emb,
                     'block_sec': b_sec,
@@ -193,7 +301,11 @@ class AsyncMusicWorker(threading.Thread):
                     'queue_sec': q_sec,
                     'queue_chunks': q_chunks,
                     'is_reset': drop_val
-                })
+                }
+                if det_override is not None:
+                    req['deterministic'] = bool(det_override)
+
+                self.conn.send(req)
                 resp = self.conn.recv()
                 if 'pcm' in resp:
                     pcm = resp['pcm']
@@ -241,6 +353,10 @@ class AsyncMusicWorker(threading.Thread):
                                         old_m = self.cfg.get('model', 'facebook/musicgen-small')
                                         with self.lock:
                                             self.cfg.update(new_cfg)
+                                            if 'stochastic' in new_cfg:
+                                                self.deterministic = not bool(new_cfg['stochastic'])
+                                            elif 'deterministic' in new_cfg:
+                                                self.deterministic = bool(new_cfg['deterministic'])
                                         if new_m and new_m != old_m:
                                             self.conn.send({'cmd': 'switch_model', 'model': new_m})
                                             self.conn.recv()
@@ -301,6 +417,11 @@ def main():
     parser.add_argument('--mode', type=str, default="semantic", choices=["semantic", "turbo"])
     parser.add_argument('--gateway-port', type=int, default=6003)
 
+    parser.add_argument('--stochastic', dest='stochastic', action='store_true', default=True,
+                        help="Включить стохастику в MusicGen (по умолчанию)")
+    parser.add_argument('--deterministic', '--no-stochastic', dest='stochastic', action='store_false',
+                        help="Отключить стохастику в MusicGen")
+
     parser.add_argument('--target-block', type=float, default=0.0)
     parser.add_argument('--target-context', type=float, default=3.6)
     parser.add_argument('--target-buffer-count', type=int, default=2)
@@ -313,6 +434,8 @@ def main():
     parser.add_argument('--strength-high', type=float, default=0.80)
     parser.add_argument('--ema-smooth', type=float, default=0.20)
     args = parser.parse_args()
+
+    init_det = None if args.stochastic is None else (not bool(args.stochastic))
 
     runtime_config = {
         'target_block': args.target_block,
@@ -352,7 +475,6 @@ def main():
     )
     router = SelfSufficientHeterarchyRouter(args.users)
 
-    # Подключаемся к единому амодальному движку рабочей памяти (или поднимаем его, если мы первые)
     amodal_engine = SharedAmodalCognitiveEngine(
         router=router,
         gamma_max=args.gamma_max,
@@ -370,7 +492,8 @@ def main():
 
     worker = AsyncMusicWorker(
         conn, runtime_config, semantic=semantic,
-        gateway_port=args.gateway_port, enable_local_audio=enable_local_sound
+        gateway_port=args.gateway_port, enable_local_audio=enable_local_sound,
+        deterministic=init_det
     )
     worker.start()
 

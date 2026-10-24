@@ -24,7 +24,7 @@ services:
     command: >
       bash -c "
       mkdir -p /workspace/hf_cache /workspace/logs &&
-      python3 -u /app/musicgen_server.py --port 6005 --model facebook/musicgen-small --quiet-step &
+      python3 -u /app/musicgen_server.py --port 6005 --model facebook/musicgen-small --quiet-step --stochastic &
       python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem &
       sleep 3 &&
       python3 -u /app/neuro_heterarchy_musicgen.py --headless --mode semantic --concepts "psychedelic drums" --gateway-port 6003 &

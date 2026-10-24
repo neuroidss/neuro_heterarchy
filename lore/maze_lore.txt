@@ -1,0 +1,20 @@
+[FPZ]
+overhead top-down view of a simple 5x5 stone maze, clear wide corridors, glowing green exit portal at the corner, simple layout visible from above
+
+[AFZ]
+spacious stone corridors, wide walkways, simple 90 degree turns, open layout
+
+[F3]
+giant dark obsidian stone blocks as walls, crisp sharp edges, high contrast between walls and floor
+
+[F4]
+cinematic overhead lighting, polished dark basalt floor, sharp focus, clean architectural detail
+
+[FCZ]
+giant bright luminous golden-cyan plasma sphere avatar taking up half the corridor, rolling smoothly forward
+giant bright luminous golden-cyan plasma sphere avatar rolling along the wide stone corridor
+giant bright luminous golden-cyan plasma sphere avatar turning around the stone corner
+giant bright luminous golden-cyan plasma sphere avatar hovering and pulsing with bright energy
+
+[NEGATIVE]
+extreme close-up, macro photography, 13x13, tiny grid, green wireframe, green matrix, tilted camera, first person view, broken walls, blurry, low resolution

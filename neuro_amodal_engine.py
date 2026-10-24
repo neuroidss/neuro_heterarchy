@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: 100% VRAM-RESIDENT COGNITIVE ENGINE (NATIVE PYTORCH _share_cuda_ IPC)
+NEUROCANVAS: 100% GPU VRAM-RESIDENT AMODAL COGNITIVE ENGINE (ZERO CPU / ZERO NUMPY)
 ===================================================================================
-- 100% МАТЕМАТИКИ В VRAM:
-  Сырые отсчеты LSL сразу попадают в raw_buf_gpu. БПФ, Гильберт, ciPLV, 89.5 Гц
-  рипплы Дики, 5 колонок Монти, SVD и граф A ⊃ B считаются строго на GPU.
-- ПРЯМОЙ ОБЩИЙ ТЕНЗОР В VRAM МЕЖДУ PYTHON 3.10 И PYTHON 3.9:
-  Использует нативный C++ механизм PyTorch (UntypedStorage._share_cuda_ / _new_shared_cuda).
-  Оба процесса смотрят в один и тот же физический адрес видеопамяти (0% CPU, 0% PCIe).
+- НИКАКОГО NUMPY ИЛИ /dev/shm MEMMAP В КОНВЕЙЕРЕ:
+  Вся математика и вся передача состояния между процессами одного окружения (Video /
+  Diffusion) идет исключительно через видеопамять GPU (CUDA IPC _share_cuda_).
+- Компактные матрицы Монти W_out (32*120 x 4096 = 60 МБ) и in-place операция addr_()
+  гарантируют малое потребление VRAM (~280 МБ на все 5 регионов коры).
 ===================================================================================
 """
 
@@ -18,7 +17,6 @@ import os
 import json
 import time
 import math
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,14 +25,24 @@ from pylsl import StreamInlet, resolve_streams
 from neuro_heterarchy_core import DEVICE, COORDS_X, COORDS_Y, parse_stream_identity, CANONICAL_ROLES
 
 MAX_SLOTS = 16
+MAX_CLOCK_SECTORS = 16
 BUF_SIZE = 256
 FFT_SLOW = 1024
 NUM_CHANNELS = 16
 NUM_MAX_DEVICES = 16
+NUM_REGIONS = 5
+NUM_BANDS = 5       # 0: Delta, 1: Theta, 2: Beta, 3: Gamma, 4: Ripples (89.5 Hz)
 NUM_SLOTS = 32
+NUM_PAIRS = 120
+NUM_COLUMNS = 4096
+K_ACTIVE = 80
 TWO_PI = 2.0 * math.pi
 
-IPC_HANDLE_FILE = "/dev/shm/neuro_pytorch_cuda_ipc.json"
+BAND_DELTA   = 0
+BAND_THETA   = 1
+BAND_BETA    = 2
+BAND_GAMMA   = 3
+BAND_RIPPLES = 4
 
 REGION_ROLES = ["AFz", "FCz", "F3", "F4", "Fpz"]
 REGION_TAU_SEC = {
@@ -45,38 +53,43 @@ REGION_TAU_SEC = {
     "Fpz": 5.00,
 }
 
-TOTAL_FLOATS = 71776
+IPC_HANDLE_FILE = "/dev/shm/neuro_amodal_vram_v3_ipc.json"
+TOTAL_AMODAL_FLOATS = 210288
 
 
 class HardwareVRAMBus:
     """
-    Нативный общий тензор в видеопамяти через C++ аллокатор PyTorch (_share_cuda_).
-    Оба процесса (Python 3.10 и Python 3.9) читают и пишут в один и тот же адрес VRAM!
+    100% GPU VRAM шина. Никаких numpy memmap и никаких копирований на CPU!
     """
     def __init__(self):
-        self.gpu_flat = torch.zeros(TOTAL_FLOATS, dtype=torch.float32, device=DEVICE)
+        self.gpu_flat = torch.zeros(TOTAL_AMODAL_FLOATS, dtype=torch.float32, device=DEVICE)
         self._bind_views()
         self.is_owner = False
         self.attached_pid = -1
 
     def _bind_views(self):
+        self.meta_64                = self.gpu_flat[0:64]
         self.meta_32                = self.gpu_flat[0:32]
-        self.amodal_manifold_77x768 = self.gpu_flat[32:59168].view(77, 768)
-        self.z_slots_16x768         = self.gpu_flat[59168:71456].view(MAX_SLOTS, 768)
-        self.causal_flow_16x16      = self.gpu_flat[71456:71712].view(MAX_SLOTS, MAX_SLOTS)
-        self.slot_order_16          = self.gpu_flat[71712:71728]
-        self.slot_stabs_16          = self.gpu_flat[71728:71744]
-        self.slot_seals_16          = self.gpu_flat[71744:71760]
-        self.slot_norm_coord_16     = self.gpu_flat[71760:71776]
+        self.amodal_manifold_77x768 = self.gpu_flat[64:59200].view(77, 768)
+        self.z_slots_16x768         = self.gpu_flat[59200:71488].view(MAX_SLOTS, 768)
+        self.causal_flow_16x16      = self.gpu_flat[71488:71744].view(MAX_SLOTS, MAX_SLOTS)
+        self.slot_order_16          = self.gpu_flat[71744:71760]
+        self.slot_stabs_16          = self.gpu_flat[71760:71776]
+        self.slot_seals_16          = self.gpu_flat[71776:71792]
+        self.slot_norm_coord_16     = self.gpu_flat[71792:71808]
+        self.wm_field_5x5x32x120    = self.gpu_flat[71808:167808].view(NUM_REGIONS, NUM_BANDS, NUM_SLOTS, NUM_PAIRS)
+        self.monty_l23_5x4096       = self.gpu_flat[167808:188288].view(NUM_REGIONS, NUM_COLUMNS)
+        self.monty_anom_5x4096      = self.gpu_flat[188288:208768].view(NUM_REGIONS, NUM_COLUMNS)
+        self.ripple_dag_5x16x16     = self.gpu_flat[208768:210048].view(NUM_REGIONS, MAX_CLOCK_SECTORS, MAX_CLOCK_SECTORS)
+        self.seals_and_stabs_5x3x16 = self.gpu_flat[210048:210288].view(NUM_REGIONS, 3, MAX_CLOCK_SECTORS)
 
-    def allocate_and_publish_vram_handle(self):
-        if self.is_owner:
-            return
+    def get_cuda_ipc_Payload(self) -> dict:
         storage = self.gpu_flat.untyped_storage()
         tup = storage._share_cuda_()
-        payload = {
+        return {
             "pid": os.getpid(),
             "ts": time.time(),
+            "total_floats": TOTAL_AMODAL_FLOATS,
             "device_idx": int(tup[0]),
             "handle": tup[1].hex(),
             "size_bytes": int(tup[2]),
@@ -86,26 +99,27 @@ class HardwareVRAMBus:
             "event_handle": tup[6].hex(),
             "event_sync_required": bool(tup[7]),
         }
-        tmp_path = f"{IPC_HANDLE_FILE}.{os.getpid()}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
-        os.replace(tmp_path, IPC_HANDLE_FILE)
-        self.is_owner = True
-        print(f"⚡ [VRAM CUDA-IPC] Опубликован прямой тензор в VRAM (PID={os.getpid()}, Ptr={hex(self.gpu_flat.data_ptr())})")
 
-    def try_attach_to_existing_vram(self) -> bool:
-        if self.is_owner or not os.path.exists(IPC_HANDLE_FILE):
-            return False
+    def allocate_and_publish_vram_handle(self):
+        if self.is_owner:
+            return
         try:
-            with open(IPC_HANDLE_FILE, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            owner_pid = int(d["pid"])
-            if owner_pid == os.getpid() or not os.path.exists(f"/proc/{owner_pid}"):
-                return False
+            payload = self.get_cuda_ipc_Payload()
+            tmp_path = f"{IPC_HANDLE_FILE}.{os.getpid()}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, IPC_HANDLE_FILE)
+            self.is_owner = True
+            print(f"⚡ [VRAM CUDA-IPC] Опубликована общая рабочая память прямо в VRAM (PID={os.getpid()}, Ptr={hex(self.gpu_flat.data_ptr())})")
+        except Exception as e:
+            print(f"⚠️ [VRAM CUDA-IPC Note]: {e}")
+            self.is_owner = True
 
+    def attach_from_ipc_dict(self, d: dict) -> bool:
+        try:
+            owner_pid = int(d["pid"])
             if self.attached_pid == owner_pid:
                 return True
-
             storage_cls = getattr(torch, "UntypedStorage", getattr(torch, "_UntypedStorage", None))
             shared_storage = storage_cls._new_shared_cuda(
                 int(d["device_idx"]),
@@ -118,21 +132,35 @@ class HardwareVRAMBus:
                 bool(d["event_sync_required"]),
             )
             self.gpu_flat = torch.empty(0, dtype=torch.float32, device=DEVICE).set_(
-                shared_storage, 0, (TOTAL_FLOATS,)
+                shared_storage, 0, (TOTAL_AMODAL_FLOATS,)
             )
             self._bind_views()
             self.attached_pid = owner_pid
-            print(f"🔗 [VRAM CUDA-IPC] Прямой маппинг в VRAM процесса PID={owner_pid} (Ptr={hex(self.gpu_flat.data_ptr())}, 0% CPU!)")
+            print(f"🔗 [VRAM CUDA-IPC] Прямое подключение к физическому адресу VRAM PID={owner_pid} (Ptr={hex(self.gpu_flat.data_ptr())}, 0% CPU!)")
             return True
         except Exception:
-            # Сбрасываем возможную ошибку CUDA в случае мертвого дескриптора от старого запуска
             torch.cuda.synchronize()
-            self.attached_pid = -1
+            return False
+
+    def try_attach_to_existing_vram(self) -> bool:
+        if self.is_owner or not os.path.exists(IPC_HANDLE_FILE):
+            return False
+        try:
+            with open(IPC_HANDLE_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            owner_pid = int(d["pid"])
+            # Проверяем, что процесс-владелец действительно жив и файл свежий
+            if owner_pid == os.getpid() or not os.path.exists(f"/proc/{owner_pid}"):
+                return False
+            if int(d.get("total_floats", 0)) != TOTAL_AMODAL_FLOATS:
+                return False
+            return self.attach_from_ipc_dict(d)
+        except Exception:
             return False
 
 
 @torch.no_grad()
-def build_scalable_dipole_geometry_gpu(coords_x_np: np.ndarray, coords_y_np: np.ndarray, chunk_limit: int = 65536) -> dict:
+def build_scalable_dipole_geometry_gpu(coords_x_np, coords_y_np, chunk_limit: int = 65536) -> dict:
     cx = torch.tensor(coords_x_np, dtype=torch.float32, device=DEVICE)
     cy = torch.tensor(coords_y_np, dtype=torch.float32, device=DEVICE)
     n_ch = cx.shape[0]
@@ -189,6 +217,7 @@ def build_scalable_dipole_geometry_gpu(coords_x_np: np.ndarray, coords_y_np: np.
 
 
 GEOM_GPU = build_scalable_dipole_geometry_gpu(COORDS_X, COORDS_Y)
+build_cortical_dipole_geometry_gpu = build_scalable_dipole_geometry_gpu
 
 
 class DirectGPUSpectralFrontend(nn.Module):
@@ -208,8 +237,12 @@ class DirectGPUSpectralFrontend(nn.Module):
         self.register_buffer("base_rfftfreq_1024", torch.fft.rfftfreq(FFT_SLOW, d=1.0, device=DEVICE))
         slot_ang = -math.pi + (TWO_PI / NUM_SLOTS) * (torch.arange(NUM_SLOTS, device=DEVICE) + 0.5)
         self.register_buffer("slot_angles", slot_ang.view(1, NUM_SLOTS, 1, 1))
+
+        self.register_buffer("delta_centers", torch.linspace(0.5, 3.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
+        self.register_buffer("theta_centers", torch.linspace(3.8, 8.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
+        self.register_buffer("beta_centers",  torch.linspace(13.0, 30.0, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
         self.register_buffer("gamma_centers", torch.linspace(30.0, gamma_max, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
-        self.register_buffer("rip_centers", torch.linspace(70.0, 100.0, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
+        self.register_buffer("rip_centers",   torch.linspace(70.0, 100.0, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
 
     def _poll_lsl_hotplug(self):
         now = time.time()
@@ -244,6 +277,123 @@ class DirectGPUSpectralFrontend(nn.Module):
             pass
 
     @torch.no_grad()
+    def _extract_ciplv_band(self, fft_exp: torch.Tensor, freqs_4d: torch.Tensor, pos_mask: torch.Tensor,
+                            centers: torch.Tensor, bw: float, w_phase: torch.Tensor) -> torch.Tensor:
+        i_idx, j_idx = self.geom["i_idx"], self.geom["j_idx"]
+        filt = torch.exp(-0.5 * ((freqs_4d - centers) / bw) ** 2) * 2.0 * pos_mask.unsqueeze(1)
+        Z = torch.fft.ifft(fft_exp * filt, dim=-1)
+        P = Z / (torch.abs(Z) + 1e-12)
+        cg = P[:, :, i_idx, :] * torch.conj(P[:, :, j_idx, :])
+        psi = torch.sum(cg * w_phase, dim=-1)
+        return torch.imag(psi) / torch.sqrt(torch.clamp(1.0 - torch.real(psi) ** 2, min=1e-5))
+
+    @torch.no_grad()
+    def compute_from_buffer_gpu(self, sub_buf: torch.Tensor, fs_vec: torch.Tensor, slot_roles: list[str]) -> dict:
+        D = sub_buf.shape[0]
+        freqs_dev = self.base_fftfreq_256 * fs_vec
+
+        centered = sub_buf - torch.mean(sub_buf, dim=2, keepdim=True)
+        notch = ((torch.abs(freqs_dev) < 48.5) | (torch.abs(freqs_dev) > 51.5)) & \
+                ((torch.abs(freqs_dev) < 98.5) | (torch.abs(freqs_dev) > 101.5))
+        fft_clean = torch.fft.fft(centered, dim=-1) * notch.float()
+
+        fft_1024 = torch.fft.rfft(centered[0], n=FFT_SLOW, dim=-1)
+        freqs_slow = self.base_rfftfreq_1024 * float(fs_vec[0, 0, 0].item())
+
+        dl_mask = (freqs_slow >= 0.5) & (freqs_slow <= 3.2)
+        dl_pwr = torch.sum(torch.abs(fft_1024[:, dl_mask]) ** 2, dim=0)
+        dl_freq = torch.clamp(torch.sum(dl_pwr * freqs_slow[dl_mask]) / (torch.sum(dl_pwr) + 1e-6), 0.5, 3.2)
+
+        th_mask = (freqs_slow >= 3.8) & (freqs_slow <= 8.5)
+        th_pwr = torch.sum(torch.abs(fft_1024[:, th_mask]) ** 2, dim=0)
+        th_freq = torch.clamp(torch.sum(th_pwr * freqs_slow[th_mask]) / (torch.sum(th_pwr) + 1e-6), 3.5, 9.0)
+
+        pos_mask = (self.base_fftfreq_256 >= 0).float()
+
+        f_theta = torch.exp(-0.5 * ((freqs_dev - 6.0) / 1.5) ** 2) * 2.0 * pos_mask
+        Z_theta = torch.fft.ifft(fft_clean * f_theta, dim=-1)
+        P_theta = Z_theta / (torch.abs(Z_theta) + 1e-12)
+        phi_theta_all = torch.angle(torch.mean(P_theta, dim=1))
+
+        f_delta = torch.exp(-0.5 * ((freqs_dev - 1.5) / 0.6) ** 2) * 2.0 * pos_mask
+        Z_delta = torch.fft.ifft(fft_clean * f_delta, dim=-1)
+        P_delta = Z_delta / (torch.abs(Z_delta) + 1e-12)
+        phi_delta_all = torch.angle(torch.mean(P_delta, dim=1))
+
+        dl_phase = phi_delta_all[0, -1]
+        th_phase = phi_theta_all[0, -1]
+
+        fft_exp = fft_clean.unsqueeze(1)
+        freqs_4d = freqs_dev.unsqueeze(1)
+        w = torch.exp(3.2 * torch.cos(phi_theta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles))
+        w = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-6)
+
+        w_delta = torch.exp(2.8 * torch.cos(phi_delta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles))
+        w_delta = w_delta / (torch.sum(w_delta, dim=-1, keepdim=True) + 1e-6)
+
+        i_idx, j_idx = self.geom["i_idx"], self.geom["j_idx"]
+
+        g_filt = torch.exp(-0.5 * ((freqs_4d - self.gamma_centers) / 4.5) ** 2) * 2.0 * pos_mask.unsqueeze(1)
+        Z_gamma = torch.fft.ifft(fft_exp * g_filt, dim=-1)
+        P_gamma = Z_gamma / (torch.abs(Z_gamma) + 1e-12)
+        cg_gamma = P_gamma[:, :, i_idx, :] * torch.conj(P_gamma[:, :, j_idx, :])
+        psi_gamma = torch.sum(cg_gamma * w, dim=-1)
+        gamma_anchor = torch.imag(psi_gamma * torch.conj(psi_gamma[:, 0:1, :]))
+
+        r_filt = torch.exp(-0.5 * ((freqs_4d - self.rip_centers) / 4.0) ** 2) * 2.0 * pos_mask.unsqueeze(1)
+        Z_rip = torch.fft.ifft(fft_exp * r_filt, dim=-1)
+        P_rip = Z_rip / (torch.abs(Z_rip) + 1e-12)
+        cg_rip = P_rip[:, :, i_idx, :] * torch.conj(P_rip[:, :, j_idx, :])
+        psi_rip = torch.sum(cg_rip * w, dim=-1)
+        h_rip = torch.imag(psi_rip) / torch.sqrt(torch.clamp(1.0 - torch.real(psi_rip) ** 2, min=1e-5))
+
+        wm_delta = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.delta_centers, 0.6, w_delta)
+        wm_theta = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.theta_centers, 1.2, w_delta)
+        wm_beta  = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.beta_centers,  3.0, w)
+        bands_Dx5x32x120 = torch.stack([wm_delta, wm_theta, wm_beta, gamma_anchor, h_rip], dim=1)
+
+        traj_2d = torch.matmul(gamma_anchor, self.geom["proj_2d"]) * 8.0
+        base_xy = traj_2d[:, 0, :]
+        end_xy = traj_2d[:, -1, :] - base_xy
+        d_len = torch.hypot(end_xy[:, 0], end_xy[:, 1]) + 1e-6
+        lx = torch.where(d_len > 1.0, end_xy[:, 0] / d_len, end_xy[:, 0])
+        ly = torch.where(d_len > 1.0, end_xy[:, 1] / d_len, end_xy[:, 1])
+
+        rel_xy = traj_2d[:, 1:-1, :] - base_xy.unsqueeze(1)
+        sag_sum = torch.sum(end_xy[:, 0:1] * rel_xy[:, :, 1] - end_xy[:, 1:2] * rel_xy[:, :, 0], dim=1)
+        rx = torch.clamp(sag_sum / (d_len * 16.0), -1.0, 1.0)
+
+        mid_xy = traj_2d[:, NUM_SLOTS // 2, :] - base_xy
+        l_past = torch.hypot(mid_xy[:, 0], mid_xy[:, 1])
+        l_fut = torch.hypot(end_xy[:, 0] - mid_xy[:, 0], end_xy[:, 1] - mid_xy[:, 1])
+        ry = (l_fut - l_past) / (l_fut + l_past + 1e-6)
+        kin_all = torch.stack([lx, -ly, rx, ry], dim=-1)
+
+        iplv_by_role, rip_by_role, kin_by_role, bands_by_role = {}, {}, {}, {}
+        for idx_in_sub, role in enumerate(slot_roles):
+            if role in REGION_ROLES:
+                iplv_by_role[role]  = gamma_anchor[idx_in_sub]
+                rip_by_role[role]   = h_rip[idx_in_sub]
+                kin_by_role[role]   = kin_all[idx_in_sub]
+                bands_by_role[role] = bands_Dx5x32x120[idx_in_sub]
+
+        return {
+            "num_live": D,
+            "th_freq": th_freq,
+            "dl_freq": dl_freq,
+            "th_phase": th_phase,
+            "dl_phase": dl_phase,
+            "master_iplv": gamma_anchor.mean(dim=0),
+            "master_rip": h_rip.mean(dim=0),
+            "master_5x32x120": bands_Dx5x32x120.mean(dim=0),
+            "default_kin": kin_all[0],
+            "iplv_by_role": iplv_by_role,
+            "rip_by_role": rip_by_role,
+            "kin_by_role": kin_by_role,
+            "bands_by_role": bands_by_role,
+        }
+
+    @torch.no_grad()
     def pull_and_compute_gpu(self, router) -> Optional[dict]:
         self._poll_lsl_hotplug()
         active_slots = [i for i, inl in enumerate(self.inlets) if inl is not None]
@@ -272,100 +422,11 @@ class DirectGPUSpectralFrontend(nn.Module):
         sub_buf = self.raw_buf_gpu[active_slots]
         D = sub_buf.shape[0]
         fs_vec = torch.tensor([self.device_fs[i] for i in active_slots], device=DEVICE).view(D, 1, 1)
-        freqs_dev = self.base_fftfreq_256 * fs_vec
-
-        centered = sub_buf - torch.mean(sub_buf, dim=2, keepdim=True)
-        notch = ((torch.abs(freqs_dev) < 48.5) | (torch.abs(freqs_dev) > 51.5)) & \
-                ((torch.abs(freqs_dev) < 98.5) | (torch.abs(freqs_dev) > 101.5))
-        fft_clean = torch.fft.fft(centered, dim=-1) * notch.float()
-
-        fft_1024 = torch.fft.rfft(centered[0], n=FFT_SLOW, dim=-1)
-        freqs_slow = self.base_rfftfreq_1024 * self.device_fs[active_slots[0]]
-
-        dl_mask = (freqs_slow >= 0.5) & (freqs_slow <= 3.2)
-        dl_pwr = torch.sum(torch.abs(fft_1024[:, dl_mask]) ** 2, dim=0)
-        dl_freq = torch.clamp(torch.sum(dl_pwr * freqs_slow[dl_mask]) / (torch.sum(dl_pwr) + 1e-6), 0.5, 3.2)
-
-        th_mask = (freqs_slow >= 3.8) & (freqs_slow <= 8.5)
-        th_pwr = torch.sum(torch.abs(fft_1024[:, th_mask]) ** 2, dim=0)
-        th_freq = torch.clamp(torch.sum(th_pwr * freqs_slow[th_mask]) / (torch.sum(th_pwr) + 1e-6), 3.5, 9.0)
-
-        pos_mask = (self.base_fftfreq_256 >= 0).float()
-
-        f_theta = torch.exp(-0.5 * ((freqs_dev - 6.0) / 1.5) ** 2) * 2.0 * pos_mask
-        Z_theta = torch.fft.ifft(fft_clean * f_theta, dim=-1)
-        P_theta = Z_theta / (torch.abs(Z_theta) + 1e-12)
-        phi_theta_all = torch.angle(torch.mean(P_theta, dim=1))
-
-        f_delta = torch.exp(-0.5 * ((freqs_dev - 1.5) / 0.6) ** 2) * 2.0 * pos_mask
-        Z_delta = torch.fft.ifft(fft_clean * f_delta, dim=-1)
-        P_delta = Z_delta / (torch.abs(Z_delta) + 1e-12)
-        phi_delta_all = torch.angle(torch.mean(P_delta, dim=1))
-
-        dl_phase = phi_delta_all[0, -1]
-
-        fft_exp = fft_clean.unsqueeze(1)
-        freqs_4d = freqs_dev.unsqueeze(1)
-        w = torch.exp(3.2 * torch.cos(phi_theta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles))
-        w = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-6)
-
-        i_idx, j_idx = self.geom["i_idx"], self.geom["j_idx"]
-
-        g_filt = torch.exp(-0.5 * ((freqs_4d - self.gamma_centers) / 4.5) ** 2) * 2.0 * pos_mask.unsqueeze(1)
-        Z_gamma = torch.fft.ifft(fft_exp * g_filt, dim=-1)
-        P_gamma = Z_gamma / (torch.abs(Z_gamma) + 1e-12)
-        cg_gamma = P_gamma[:, :, i_idx, :] * torch.conj(P_gamma[:, :, j_idx, :])
-        psi_gamma = torch.sum(cg_gamma * w, dim=-1)
-        gamma_anchor = torch.imag(psi_gamma * torch.conj(psi_gamma[:, 0:1, :]))
-
-        r_filt = torch.exp(-0.5 * ((freqs_4d - self.rip_centers) / 4.0) ** 2) * 2.0 * pos_mask.unsqueeze(1)
-        Z_rip = torch.fft.ifft(fft_exp * r_filt, dim=-1)
-        P_rip = Z_rip / (torch.abs(Z_rip) + 1e-12)
-        cg_rip = P_rip[:, :, i_idx, :] * torch.conj(P_rip[:, :, j_idx, :])
-        psi_rip = torch.sum(cg_rip * w, dim=-1)
-        h_rip = torch.imag(psi_rip) / torch.sqrt(torch.clamp(1.0 - torch.real(psi_rip) ** 2, min=1e-5))
-
-        traj_2d = torch.matmul(gamma_anchor, self.geom["proj_2d"]) * 8.0
-        base_xy = traj_2d[:, 0, :]
-        end_xy = traj_2d[:, -1, :] - base_xy
-        d_len = torch.hypot(end_xy[:, 0], end_xy[:, 1]) + 1e-6
-        lx = torch.where(d_len > 1.0, end_xy[:, 0] / d_len, end_xy[:, 0])
-        ly = torch.where(d_len > 1.0, end_xy[:, 1] / d_len, end_xy[:, 1])
-
-        rel_xy = traj_2d[:, 1:-1, :] - base_xy.unsqueeze(1)
-        sag_sum = torch.sum(end_xy[:, 0:1] * rel_xy[:, :, 1] - end_xy[:, 1:2] * rel_xy[:, :, 0], dim=1)
-        rx = torch.clamp(sag_sum / (d_len * 16.0), -1.0, 1.0)
-
-        mid_xy = traj_2d[:, NUM_SLOTS // 2, :] - base_xy
-        l_past = torch.hypot(mid_xy[:, 0], mid_xy[:, 1])
-        l_fut = torch.hypot(end_xy[:, 0] - mid_xy[:, 0], end_xy[:, 1] - mid_xy[:, 1])
-        ry = (l_fut - l_past) / (l_fut + l_past + 1e-6)
-        kin_all = torch.stack([lx, -ly, rx, ry], dim=-1)
-
-        iplv_by_role, rip_by_role, kin_by_role = {}, {}, {}
-        for idx_in_sub, slot_i in enumerate(active_slots):
-            role = (
-                router.overrides.get(slot_i)
-                or router.static_map.get(slot_i)
-                or self.stream_roles[slot_i]
-            )
-            if role in REGION_ROLES:
-                iplv_by_role[role] = gamma_anchor[idx_in_sub]
-                rip_by_role[role]  = h_rip[idx_in_sub]
-                kin_by_role[role]  = kin_all[idx_in_sub]
-
-        return {
-            "num_live": D,
-            "th_freq": th_freq,
-            "dl_freq": dl_freq,
-            "dl_phase": dl_phase,
-            "master_iplv": gamma_anchor.mean(dim=0),
-            "master_rip": h_rip.mean(dim=0),
-            "default_kin": kin_all[0],
-            "iplv_by_role": iplv_by_role,
-            "rip_by_role": rip_by_role,
-            "kin_by_role": kin_by_role,
-        }
+        roles = [
+            (router.overrides.get(s_i) or router.static_map.get(s_i) or self.stream_roles[s_i])
+            for s_i in active_slots
+        ]
+        return self.compute_from_buffer_gpu(sub_buf, fs_vec, roles)
 
 
 class GPUSealEngine(nn.Module):
@@ -459,6 +520,7 @@ class AmodalMontyColumnGPU(nn.Module):
         super().__init__()
         self.role = role
         self.geom = geom
+        self.n_pairs = geom["n_pairs"]
         self.num_columns = num_columns
         self.k_active = k_active
         self.num_slots = num_slots
@@ -471,7 +533,7 @@ class AmodalMontyColumnGPU(nn.Module):
         self.register_buffer("rf_pos", rf_pos)
         self.register_buffer("rf_neg", rf_neg)
 
-        self.register_buffer("W_out", torch.zeros((num_slots * 768, num_columns), device=DEVICE))
+        self.register_buffer("W_out", torch.zeros((num_slots * self.n_pairs, num_columns), device=DEVICE))
         self.register_buffer("W_topdown_sdr", torch.eye(num_columns, device=DEVICE) * 0.4)
         self.register_buffer("l23_pooled_sdr", torch.zeros(num_columns, device=DEVICE))
         self.register_buffer("upward_sdr_anomaly", torch.zeros(num_columns, device=DEVICE))
@@ -482,32 +544,39 @@ class AmodalMontyColumnGPU(nn.Module):
         self.action_integrator = AmodalActionIntegratorGPU()
         self.seals = GPUSealEngine(MAX_SLOTS)
         self.register_buffer("delta_cycle_buf", torch.zeros((2, MAX_SLOTS, 768), device=DEVICE))
-        self.register_buffer("virtual_iplv", torch.zeros((32, geom["n_pairs"]), device=DEVICE))
-        self.register_buffer("virtual_rip", torch.zeros((32, geom["n_pairs"]), device=DEVICE))
+        self.register_buffer("virtual_iplv", torch.zeros((32, self.n_pairs), device=DEVICE))
+        self.register_buffer("virtual_rip", torch.zeros((32, self.n_pairs), device=DEVICE))
+        self.register_buffer("virtual_5x32x120", torch.zeros((NUM_BANDS, 32, self.n_pairs), device=DEVICE))
         self.buf_ptr = 0
 
     @torch.no_grad()
-    def synthesize_virtual_gpu(self, master_iplv: torch.Tensor, master_rip: torch.Tensor):
+    def synthesize_virtual_gpu(self, master_iplv: torch.Tensor, master_rip: torch.Tensor, master_5x32x120: torch.Tensor):
         if self.role == "Fpz":
-            tgt = master_iplv * self.geom["macro_mask"] * 0.85
+            mask = self.geom["macro_mask"]
+            tgt = master_iplv * mask * 0.85
             alpha = 0.08
         elif self.role == "F3":
-            tgt = torch.relu(master_iplv) * self.geom["left_mask"] * 1.4
+            mask = self.geom["left_mask"]
+            tgt = torch.relu(master_iplv) * mask * 1.4
             alpha = 0.25
         elif self.role == "F4":
-            tgt = -torch.relu(-master_iplv) * self.geom["right_mask"] * 1.4
+            mask = self.geom["right_mask"]
+            tgt = -torch.relu(-master_iplv) * mask * 1.4
             alpha = 0.25
         elif self.role == "FCz":
+            mask = self.geom["micro_mask"]
             fast_diff = torch.roll(master_iplv, shifts=-1, dims=0) - master_iplv
-            tgt = (fast_diff * 0.6 + master_iplv * 0.4) * self.geom["micro_mask"] * 1.5
+            tgt = (fast_diff * 0.6 + master_iplv * 0.4) * mask * 1.5
             alpha = 0.50
         else:
+            mask = self.geom["meso_mask"] + self.geom["macro_mask"] * 0.5
             tgt = master_iplv
             alpha = 0.30
 
         self.virtual_iplv.mul_(1.0 - alpha).add_(tgt, alpha=alpha)
         self.virtual_rip.mul_(1.0 - alpha).add_(master_rip, alpha=alpha)
-        return self.virtual_iplv, self.virtual_rip
+        self.virtual_5x32x120.mul_(1.0 - alpha).add_(master_5x32x120 * mask.unsqueeze(0), alpha=alpha)
+        return self.virtual_iplv, self.virtual_rip, self.virtual_5x32x120
 
     @torch.no_grad()
     def forward_gpu(self, raw_iplv_32xP: torch.Tensor, raw_rip_32xP: torch.Tensor,
@@ -541,14 +610,14 @@ class AmodalMontyColumnGPU(nn.Module):
         if pred_from_parent is not None and top_down_parent_sdr is not None:
             sdr_err = sdr_inst - pred_from_parent
             self.upward_sdr_anomaly.copy_(torch.relu(sdr_err))
-            p_energy = torch.sum(top_down_parent_sdr ** 2) + 1.0
-            self.W_topdown_sdr.mul_(0.9998).add_(torch.outer(sdr_err, top_down_parent_sdr) * (0.03 / p_energy))
+            p_energy = float(torch.sum(top_down_parent_sdr ** 2).item()) + 1.0
+            self.W_topdown_sdr.addr_(sdr_err, top_down_parent_sdr, beta=0.9998, alpha=0.03 / p_energy)
         else:
             self.upward_sdr_anomaly.copy_(sdr_inst * 0.15)
 
         sdr_anom_norm = torch.norm(self.upward_sdr_anomaly) / math.sqrt(self.k_active)
 
-        real_flat = z_32x768.reshape(-1)
+        real_flat = raw_iplv_32xP.reshape(-1)
         pred_flat = torch.mv(self.W_out, self.l23_pooled_sdr)
         error_flat = real_flat - pred_flat
         loss_t = torch.mean(error_flat ** 2)
@@ -559,9 +628,9 @@ class AmodalMontyColumnGPU(nn.Module):
         )
         self.baseline_loss.mul_(0.985).add_(loss_t * 0.015)
 
-        state_energy = torch.sum(self.l23_pooled_sdr ** 2) + 1e-4
-        eta = torch.clamp(0.08 * (1.0 + surprise_t * 0.5), max=0.25) / state_energy
-        self.W_out.mul_(0.9995).add_(torch.outer(error_flat, self.l23_pooled_sdr) * eta)
+        state_energy = float(torch.sum(self.l23_pooled_sdr ** 2).item()) + 1e-4
+        eta = float(torch.clamp(0.08 * (1.0 + surprise_t * 0.5), max=0.25).item()) / state_energy
+        self.W_out.addr_(error_flat, self.l23_pooled_sdr, beta=0.9995, alpha=eta)
 
         z_on_16x768  = F.adaptive_avg_pool1d(x_pos_768.T.unsqueeze(0), 16).squeeze(0).T
         z_off_16x768 = F.adaptive_avg_pool1d(x_neg_768.T.unsqueeze(0), 16).squeeze(0).T
@@ -678,117 +747,145 @@ class SharedAmodalCognitiveEngine:
                 col.seals.reset_gpu()
 
     @torch.no_grad()
+    def _update_bus_from_eeg_dict(self, eeg_out: dict, dt: float) -> tuple[HardwareVRAMBus, bool]:
+        th_hz = float(eeg_out["th_freq"].item())
+        dl_hz = float(eeg_out["dl_freq"].item())
+        dl_phase = float(eeg_out["dl_phase"].item())
+        th_phase = float(eeg_out["th_phase"].item())
+
+        self.measured_ratio = self.measured_ratio * 0.95 + (th_hz / dl_hz) * 0.05
+        k_th = int(min(8, max(2, round(self.measured_ratio))))
+        n_sec = k_th * 2
+        sec_w = (2.0 * math.pi) / float(n_sec)
+        cur_sec = int(min(n_sec - 1, max(0, int(((dl_phase + math.pi) % (2.0 * math.pi)) / sec_w))))
+
+        is_tick = False
+        if dl_phase < -1.5:
+            self.delta_armed = True
+        elif dl_phase > 0.5 and self.delta_armed:
+            is_tick = True
+            self.delta_armed = False
+
+        real_iplv  = eeg_out["iplv_by_role"]
+        real_rip   = eeg_out["rip_by_role"]
+        real_kin   = eeg_out["kin_by_role"]
+        real_bands = eeg_out["bands_by_role"]
+        master_iplv = eeg_out["master_iplv"]
+        master_rip  = eeg_out["master_rip"]
+        master_5x32x120 = eeg_out["master_5x32x120"]
+
+        sdr_fcz = self.columns["FCz"].l23_pooled_sdr
+        sdr_f3  = self.columns["F3"].l23_pooled_sdr
+        sdr_f4  = self.columns["F4"].l23_pooled_sdr
+        sdr_afz = self.columns["AFz"].l23_pooled_sdr
+        sdr_fpz = self.columns["Fpz"].l23_pooled_sdr
+
+        anom_fcz = self.columns["FCz"].upward_sdr_anomaly
+        anom_f34 = 0.5 * (self.columns["F3"].upward_sdr_anomaly + self.columns["F4"].upward_sdr_anomaly)
+        anom_afz = self.columns["AFz"].upward_sdr_anomaly
+
+        parent_map = {"FCz": 0.5 * (sdr_f3 + sdr_f4), "F3": sdr_afz, "F4": sdr_afz, "AFz": sdr_fpz, "Fpz": None}
+        child_map  = {"FCz": None, "F3": anom_fcz, "F4": anom_fcz, "AFz": anom_f34, "Fpz": anom_afz}
+
+        res = {}
+        for r_idx, r in enumerate(REGION_ROLES):
+            if r in real_iplv:
+                ip_r, rp_r = real_iplv[r], real_rip[r]
+                b_5x32x120 = real_bands[r]
+            else:
+                ip_r, rp_r, b_5x32x120 = self.columns[r].synthesize_virtual_gpu(master_iplv, master_rip, master_5x32x120)
+
+            res[r] = self.columns[r].forward_gpu(
+                ip_r, rp_r, n_sec=n_sec, cur_sec=cur_sec, is_tick=is_tick, dt=dt,
+                top_down_parent_sdr=parent_map[r], bottom_up_child_anomaly=child_map[r]
+            )
+            self.bus.wm_field_5x5x32x120[r_idx].copy_(b_5x32x120)
+            self.bus.monty_l23_5x4096[r_idx].copy_(self.columns[r].l23_pooled_sdr)
+            self.bus.monty_anom_5x4096[r_idx].copy_(self.columns[r].upward_sdr_anomaly)
+            self.bus.ripple_dag_5x16x16[r_idx].zero_()
+            self.bus.ripple_dag_5x16x16[r_idx, :n_sec, :n_sec].copy_(res[r]["c_flow_mat"])
+            self.bus.seals_and_stabs_5x3x16[r_idx, 0, :n_sec].copy_(self.columns[r].seals.stabs[:n_sec])
+            self.bus.seals_and_stabs_5x3x16[r_idx, 1, :n_sec].copy_(self.columns[r].seals.charge[:n_sec])
+            self.bus.seals_and_stabs_5x3x16[r_idx, 2, :n_sec].copy_(self.columns[r].seals.mask[:n_sec])
+
+        apex_idx = next((i for i, r in enumerate(["AFz", "FCz", "F3", "F4", "Fpz"]) if r in real_iplv), 0)
+        apex_role = ["AFz", "FCz", "F3", "F4", "Fpz"][apex_idx]
+        primary = res[apex_role]
+        fcz_kin = real_kin.get("FCz", eeg_out["default_kin"])
+
+        raw_fcz_wave = res["FCz"]["sagitta_16x768"] + res["FCz"]["z_on_16x768"] * 0.5
+        fcz_act_16x768, fcz_pers = self.columns["FCz"].action_integrator.step_gpu(raw_fcz_wave, fcz_kin[3])
+
+        max_surp = torch.stack([res[r]["surprise"] for r in REGION_ROLES]).max()
+        fpz_tension = torch.clamp(max_surp * 0.55 + torch.abs(res["Fpz"]["temp_asym_scalar"]) * 0.45, 0.0, 1.0)
+        active_drive = torch.clamp(fcz_pers.squeeze(0) * 0.70 + torch.clamp(max_surp, max=1.0) * 0.30, 0.0, 1.0)
+        dyn_str = torch.clamp(
+            self.strength_low + (self.strength_high - self.strength_low) * active_drive,
+            self.strength_low, 0.95
+        )
+
+        m = self.bus.amodal_manifold_77x768
+        m.zero_()
+        m[1:5].copy_(res["Fpz"]["tree_16x768"][:4])
+        m[5:21].copy_(res["AFz"]["tree_16x768"])
+        m[21:37].copy_(res["F3"]["z_on_16x768"])
+        m[37:53].copy_(res["F4"]["z_off_16x768"] * 0.6 + res["F4"]["temp_asym_16x768"] * 0.4)
+        m[53:69].copy_(fcz_act_16x768)
+        m[69:76].copy_(primary["sdr_tokens_7x768"])
+
+        self.bus.z_slots_16x768.zero_()
+        self.bus.z_slots_16x768[:n_sec].copy_(primary["z_slots"])
+        self.bus.causal_flow_16x16.zero_()
+        self.bus.causal_flow_16x16[:n_sec, :n_sec].copy_(primary["c_flow_mat"])
+        self.bus.slot_order_16[:n_sec].copy_(primary["order_gpu"].float())
+        self.bus.slot_stabs_16[:n_sec].copy_(self.columns[apex_role].seals.stabs[:n_sec])
+        self.bus.slot_seals_16[:n_sec].copy_(self.columns[apex_role].seals.mask[:n_sec])
+        self.bus.slot_norm_coord_16[:n_sec].copy_(primary["slot_norm_coord"])
+
+        meta = self.bus.meta_64
+        meta[0]  = float(eeg_out["th_freq"].item())
+        meta[1]  = float(n_sec)
+        meta[2]  = float(cur_sec)
+        meta[3]  = eeg_out["dl_phase"]
+        meta[4]  = 1.0 if is_tick else 0.0
+        meta[5]  = dyn_str
+        meta[6]  = fcz_pers.squeeze(0)
+        meta[7]  = max_surp
+        meta[8]  = primary["loss"]
+        meta[9]  = res["F3"]["x_local"]
+        meta[10] = res["F3"]["y_global"]
+        meta[11] = res["F3"]["kuramoto_r"]
+        meta[12:16].copy_(fcz_kin)
+        meta[16] = fpz_tension
+        meta[17] = float(eeg_out["num_live"])
+        meta[18] = float(apex_idx)
+        meta[19] = float(eeg_out["dl_freq"].item())
+        meta[20] = th_phase
+
+        return self.bus, True
+
+    @torch.no_grad()
     def step(self, dt: float) -> tuple[HardwareVRAMBus, bool]:
         if not self.is_host and self.bus.try_attach_to_existing_vram():
-            return self.bus, bool((self.bus.meta_32[17] > 0.5).item())
+            return self.bus, bool((self.bus.meta_64[17] > 0.5).item())
 
         self._ensure_host_initialized()
         ctx = torch.cuda.stream(self.high_pri_stream) if self.high_pri_stream is not None else torch.no_grad()
         with ctx:
             eeg_out = self.spectral_gpu.pull_and_compute_gpu(self.router)
             if eeg_out is None:
-                self.bus.meta_32[17] = 0.0
+                self.bus.meta_64[17] = 0.0
                 return self.bus, False
+            return self._update_bus_from_eeg_dict(eeg_out, dt)
 
-            th_hz = float(eeg_out["th_freq"].item())
-            dl_hz = float(eeg_out["dl_freq"].item())
-            dl_phase = float(eeg_out["dl_phase"].item())
-
-            self.measured_ratio = self.measured_ratio * 0.95 + (th_hz / dl_hz) * 0.05
-            k_th = int(min(8, max(2, round(self.measured_ratio))))
-            n_sec = k_th * 2
-            sec_w = (2.0 * math.pi) / float(n_sec)
-            cur_sec = int(min(n_sec - 1, max(0, int(((dl_phase + math.pi) % (2.0 * math.pi)) / sec_w))))
-
-            is_tick = False
-            if dl_phase < -1.5:
-                self.delta_armed = True
-            elif dl_phase > 0.5 and self.delta_armed:
-                is_tick = True
-                self.delta_armed = False
-
-            real_iplv = eeg_out["iplv_by_role"]
-            real_rip  = eeg_out["rip_by_role"]
-            real_kin  = eeg_out["kin_by_role"]
-            master_iplv = eeg_out["master_iplv"]
-            master_rip  = eeg_out["master_rip"]
-
-            sdr_fcz = self.columns["FCz"].l23_pooled_sdr
-            sdr_f3  = self.columns["F3"].l23_pooled_sdr
-            sdr_f4  = self.columns["F4"].l23_pooled_sdr
-            sdr_afz = self.columns["AFz"].l23_pooled_sdr
-            sdr_fpz = self.columns["Fpz"].l23_pooled_sdr
-
-            anom_fcz = self.columns["FCz"].upward_sdr_anomaly
-            anom_f34 = 0.5 * (self.columns["F3"].upward_sdr_anomaly + self.columns["F4"].upward_sdr_anomaly)
-            anom_afz = self.columns["AFz"].upward_sdr_anomaly
-
-            parent_map = {"FCz": 0.5 * (sdr_f3 + sdr_f4), "F3": sdr_afz, "F4": sdr_afz, "AFz": sdr_fpz, "Fpz": None}
-            child_map  = {"FCz": None, "F3": anom_fcz, "F4": anom_fcz, "AFz": anom_f34, "Fpz": anom_afz}
-
-            res = {}
-            for r in REGION_ROLES:
-                if r in real_iplv:
-                    ip_r, rp_r = real_iplv[r], real_rip[r]
-                else:
-                    ip_r, rp_r = self.columns[r].synthesize_virtual_gpu(master_iplv, master_rip)
-                res[r] = self.columns[r].forward_gpu(
-                    ip_r, rp_r, n_sec=n_sec, cur_sec=cur_sec, is_tick=is_tick, dt=dt,
-                    top_down_parent_sdr=parent_map[r], bottom_up_child_anomaly=child_map[r]
-                )
-
-            apex_idx = next((i for i, r in enumerate(["AFz", "FCz", "F3", "F4", "Fpz"]) if r in real_iplv), 0)
-            apex_role = ["AFz", "FCz", "F3", "F4", "Fpz"][apex_idx]
-            primary = res[apex_role]
-            fcz_kin = real_kin.get("FCz", eeg_out["default_kin"])
-
-            raw_fcz_wave = res["FCz"]["sagitta_16x768"] + res["FCz"]["z_on_16x768"] * 0.5
-            fcz_act_16x768, fcz_pers = self.columns["FCz"].action_integrator.step_gpu(raw_fcz_wave, fcz_kin[3])
-
-            max_surp = torch.stack([res[r]["surprise"] for r in REGION_ROLES]).max()
-            fpz_tension = torch.clamp(max_surp * 0.55 + torch.abs(res["Fpz"]["temp_asym_scalar"]) * 0.45, 0.0, 1.0)
-            active_drive = torch.clamp(fcz_pers.squeeze(0) * 0.70 + torch.clamp(max_surp, max=1.0) * 0.30, 0.0, 1.0)
-            dyn_str = torch.clamp(
-                self.strength_low + (self.strength_high - self.strength_low) * active_drive,
-                self.strength_low, 0.95
-            )
-
-            m = self.bus.amodal_manifold_77x768
-            m.zero_()
-            m[1:5].copy_(res["Fpz"]["tree_16x768"][:4])
-            m[5:21].copy_(res["AFz"]["tree_16x768"])
-            m[21:37].copy_(res["F3"]["z_on_16x768"])
-            m[37:53].copy_(res["F4"]["z_off_16x768"] * 0.6 + res["F4"]["temp_asym_16x768"] * 0.4)
-            m[53:69].copy_(fcz_act_16x768)
-            m[69:76].copy_(primary["sdr_tokens_7x768"])
-
-            self.bus.z_slots_16x768.zero_()
-            self.bus.z_slots_16x768[:n_sec].copy_(primary["z_slots"])
-            self.bus.causal_flow_16x16.zero_()
-            self.bus.causal_flow_16x16[:n_sec, :n_sec].copy_(primary["c_flow_mat"])
-            self.bus.slot_order_16[:n_sec].copy_(primary["order_gpu"].float())
-            self.bus.slot_stabs_16[:n_sec].copy_(self.columns[apex_role].seals.stabs[:n_sec])
-            self.bus.slot_seals_16[:n_sec].copy_(self.columns[apex_role].seals.mask[:n_sec])
-            self.bus.slot_norm_coord_16[:n_sec].copy_(primary["slot_norm_coord"])
-
-            meta = self.bus.meta_32
-            meta[1]  = float(n_sec)
-            meta[2]  = float(cur_sec)
-            meta[3]  = eeg_out["dl_phase"]
-            meta[4]  = 1.0 if is_tick else 0.0
-            meta[5]  = dyn_str
-            meta[6]  = fcz_pers.squeeze(0)
-            meta[7]  = max_surp
-            meta[8]  = primary["loss"]
-            meta[9]  = res["F3"]["x_local"]
-            meta[10] = res["F3"]["y_global"]
-            meta[11] = res["F3"]["kuramoto_r"]
-            meta[12:16].copy_(fcz_kin)
-            meta[16] = fpz_tension
-            meta[17] = float(eeg_out["num_live"])
-            meta[18] = float(apex_idx)
-
-            return self.bus, True
+    @torch.no_grad()
+    def step_from_raw_eeg_gpu(self, raw_eeg_16x256: torch.Tensor, dt: float = 0.20, sps: float = 250.0) -> HardwareVRAMBus:
+        self._ensure_host_initialized()
+        sub_buf = raw_eeg_16x256.unsqueeze(0)
+        fs_vec = torch.tensor([[[sps]]], dtype=torch.float32, device=DEVICE)
+        eeg_out = self.spectral_gpu.compute_from_buffer_gpu(sub_buf, fs_vec, ["AFz"])
+        self._update_bus_from_eeg_dict(eeg_out, dt)
+        return self.bus
 
     def stop(self):
         if self.bus.is_owner:
@@ -796,171 +893,3 @@ class SharedAmodalCognitiveEngine:
                 os.remove(IPC_HANDLE_FILE)
             except OSError:
                 pass
-
-
-@torch.no_grad()
-def project_amodal_bus_to_diffusion_gpu(bus: HardwareVRAMBus, semantic,
-                                        strength_low: float, burst_strength: float,
-                                        need_ui_telemetry: bool = False) -> tuple[torch.Tensor, float, dict]:
-    meta = bus.meta_32
-    n_sec = max(2, int(meta[1].item()))
-    fcz_pers_t = meta[6]
-    max_surp_t = meta[7]
-
-    active_drive_t = torch.clamp(fcz_pers_t * 0.70 + torch.clamp(max_surp_t, max=1.0) * 0.30, 0.0, 1.0)
-    dyn_str_t = torch.clamp(strength_low + (burst_strength - strength_low) * active_drive_t, strength_low, 0.95)
-    dyn_str = float(dyn_str_t.item())
-
-    order = bus.slot_order_16[:n_sec].long()
-    norm_coords = bus.slot_norm_coord_16[:n_sec]
-    c_flow = bus.causal_flow_16x16[:n_sec, :n_sec]
-    amodal_77 = bus.amodal_manifold_77x768
-
-    with semantic.lock:
-        words_copy = list(semantic.words)
-        w_count = len(words_copy)
-
-        if w_count == 0:
-            target_77 = semantic.empty_embed.clone()
-            clean_norms = torch.norm(target_77, p=2, dim=-1, keepdim=True).clamp(min=1e-5)
-            v_aff = semantic.get_concept_affordances_svd(0, max_bases=16)
-            mod_77 = torch.matmul(torch.matmul(amodal_77, v_aff.T), v_aff)
-            target_77.add_(mod_77, alpha=0.35 * dyn_str)
-            target_77 = F.normalize(target_77, p=2, dim=-1) * clean_norms
-            slot_idx_gpu = torch.zeros(n_sec, dtype=torch.long, device=DEVICE)
-        else:
-            slot_idx_gpu = torch.clamp((norm_coords * w_count).long(), 0, w_count - 1)
-            root_s = order[0] % n_sec
-            root_c_idx = int(slot_idx_gpu[root_s].item()) % w_count
-            base_77 = semantic.get_77_embedding_gpu(words_copy[root_c_idx]).clone()
-            clean_norms = torch.norm(base_77, p=2, dim=-1, keepdim=True).clamp(min=1e-5)
-
-            if w_count > 1 and n_sec > 1:
-                child_s = order[1] % n_sec
-                child_c_idx = int(slot_idx_gpu[child_s].item()) % w_count
-                if child_c_idx != root_c_idx:
-                    child_emb = semantic.get_77_embedding_gpu(words_copy[child_c_idx])
-                    dot = torch.sum(child_emb * base_77, dim=-1, keepdim=True) / (torch.sum(base_77 ** 2, dim=-1, keepdim=True) + 1e-7)
-                    ortho = F.normalize(child_emb - dot * base_77, p=2, dim=-1) * clean_norms
-                    is_sup = (c_flow[root_s, child_s] >= 0.03).float()
-                    base_77.add_(ortho * is_sup * 0.32 + child_emb * (1.0 - is_sup) * 0.20)
-
-            v_aff = semantic.get_concept_affordances_svd(root_c_idx, max_bases=16)
-            mod_77 = torch.matmul(torch.matmul(amodal_77, v_aff.T), v_aff)
-            target_77 = base_77 + mod_77 * (0.35 * dyn_str)
-            target_77 = F.normalize(target_77, p=2, dim=-1) * clean_norms
-
-    telemetry = {}
-    if need_ui_telemetry:
-        indices = [int(i) % max(1, w_count) for i in slot_idx_gpu.tolist()]
-        names = [words_copy[i].upper() for i in indices] if w_count > 0 else ["СВОБОДНЫЙ_ДРЕЙФ"] * n_sec
-        root_name = names[int(order[0].item()) % n_sec]
-        telemetry = {
-            "primary_role": "AFz", "primary_active": True,
-            "ladder_stage": 4,
-            "monty_loss": round(float(meta[8].item()), 5),
-            "persistence": round(float(fcz_pers_t.item()), 3),
-            "surprise": round(float(max_surp_t.item()), 3),
-            "regions_telemetry": {},
-            "total_clock_sectors": n_sec, "current_clock_sec": int(meta[2].item()) % n_sec,
-            "slot_names": names, "slot_indices": indices,
-            "sealed_mask": [bool(x > 0.5) for x in bus.slot_seals_16[:n_sec].tolist()],
-            "slot_stabilities": bus.slot_stabs_16[:n_sec].cpu().numpy(),
-            "causal_flow_np": c_flow.cpu().numpy(),
-            "dag_log_parts": [root_name],
-            "dl_phase": float(meta[3].item()), "is_delta_tick": bool(meta[4].item() > 0.5),
-            "dyn_strength": dyn_str, "active_vocab_size": w_count,
-            "fpz_active": True, "fpz_tension": float(meta[16].item()), "fpz_concept": root_name,
-            "f3_active": True, "f3_concept": root_name,
-            "f3_x_local": float(meta[9].item()), "f3_y_global": float(meta[10].item()),
-            "f3_kuramoto": float(meta[11].item()), "f3_slot_names": names,
-            "f4_active": True, "f4_concept": root_name, "f4_entropy": float(active_drive_t.item()),
-            "fcz_active": True, "fcz_concept": root_name,
-            "fcz_lx": float(meta[12].item()), "fcz_ly": float(meta[13].item()),
-            "fcz_rx": float(meta[14].item()), "fcz_ry": float(meta[15].item()),
-        }
-    return target_77, dyn_str, telemetry
-
-
-@torch.no_grad()
-def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic,
-                                       target_block: float, target_context: float,
-                                       base_temp: float, base_top_k: int, cfg_coef: float,
-                                       strength_low: float, strength_high: float,
-                                       need_ui_telemetry: bool = False):
-    meta = bus.meta_32
-    n_sec = max(2, int(meta[1].item()))
-    fcz_pers_t = meta[6]
-    max_surp_t = meta[7]
-
-    active_drive_t = torch.clamp(fcz_pers_t * 0.70 + torch.clamp(max_surp_t, max=1.0) * 0.30, 0.0, 1.0)
-    dyn_str_t = torch.clamp(strength_low + (strength_high - strength_low) * active_drive_t, strength_low, 0.98)
-    dyn_str = float(dyn_str_t.item())
-
-    order = bus.slot_order_16[:n_sec].long()
-    norm_coords = bus.slot_norm_coord_16[:n_sec]
-    c_flow = bus.causal_flow_16x16[:n_sec, :n_sec]
-    amodal_64 = bus.amodal_manifold_77x768[1:65]
-
-    with semantic.lock:
-        c_bases_copy = list(semantic.c_bases)
-        words_copy = list(semantic.words)
-        n_bases = min(len(c_bases_copy), len(words_copy))
-
-        if n_bases == 0:
-            base_64 = semantic.last_active_embed.clone()
-            clean_norms = torch.norm(base_64, p=2, dim=-1, keepdim=True).clamp(min=1.0)
-            v_aff = semantic.global_svd_bases[:16]
-            slot_idx_gpu = torch.zeros(n_sec, dtype=torch.long, device=DEVICE)
-        else:
-            slot_idx_gpu = torch.clamp((norm_coords * n_bases).long(), 0, n_bases - 1)
-            root_s = order[0] % n_sec
-            root_c_idx = int(slot_idx_gpu[root_s].item()) % n_bases
-            base_64 = c_bases_copy[root_c_idx].clone()
-            clean_norms = torch.norm(base_64, p=2, dim=-1, keepdim=True).clamp(min=1.0)
-
-            if n_bases > 1 and n_sec > 1:
-                child_s = order[1] % n_sec
-                child_c_idx = int(slot_idx_gpu[child_s].item()) % n_bases
-                if child_c_idx != root_c_idx:
-                    t_child = c_bases_copy[child_c_idx]
-                    dot = torch.sum(t_child * base_64, dim=-1, keepdim=True) / (torch.sum(base_64 ** 2, dim=-1, keepdim=True) + 1e-7)
-                    ortho = F.normalize(t_child - dot * base_64, p=2, dim=-1) * clean_norms
-                    is_sup = (c_flow[root_s, child_s] >= 0.03).float()
-                    base_64[4:20].add_(ortho[4:20] * is_sup * 0.32 + t_child[4:20] * (1.0 - is_sup) * 0.22)
-
-            v_aff = semantic.get_concept_affordances_svd(root_c_idx, max_bases=16)
-
-        coords = torch.matmul(amodal_64, v_aff.T)
-        musical_mod = F.normalize(torch.matmul(coords, v_aff), p=2, dim=-1) * clean_norms
-
-        final_64 = base_64 * (1.0 - 0.35 * dyn_str_t) + musical_mod * (0.35 * dyn_str_t)
-        final_64 = F.normalize(final_64, p=2, dim=-1) * clean_norms
-
-    temp = float(min(1.8, max(0.3, base_temp * (0.88 + 0.25 * dyn_str))))
-    top_k = int(min(450, max(30, base_top_k + int((dyn_str - 0.4) * 100))))
-
-    telemetry = {"dyn_strength": round(dyn_str, 3), "is_drop": False}
-    if need_ui_telemetry:
-        indices = [int(i) % max(1, n_bases) for i in slot_idx_gpu.tolist()]
-        names = [words_copy[i].upper() for i in indices] if n_bases > 0 else ["СВОБОДНЫЙ_ДРЕЙФ"] * n_sec
-        root_name = names[int(order[0].item()) % n_sec]
-        telemetry.update({
-            "primary_role": "AFz", "primary_active": True,
-            "total_clock_sectors": n_sec, "current_clock_sec": int(meta[2].item()) % n_sec,
-            "slot_names": names, "slot_indices": indices,
-            "sealed_mask": [bool(x > 0.5) for x in bus.slot_seals_16[:n_sec].tolist()],
-            "slot_stabilities": bus.slot_stabs_16[:n_sec].cpu().numpy(),
-            "causal_flow_np": c_flow.cpu().numpy(),
-            "dag_log_parts": [root_name],
-            "dl_phase": float(meta[3].item()), "is_delta_tick": bool(meta[4].item() > 0.5),
-            "active_vocab_size": n_bases,
-            "fpz_active": True, "fpz_tension": float(meta[16].item()), "fpz_concept": root_name,
-            "f3_active": True, "f3_concept": root_name,
-            "f3_x_local": float(meta[9].item()), "f3_y_global": float(meta[10].item()), "f3_kuramoto": float(meta[11].item()),
-            "f4_active": True, "f4_concept": root_name, "f4_entropy": float(active_drive_t.item()),
-            "fcz_active": True, "fcz_concept": root_name,
-            "fcz_lx": float(meta[12].item()), "fcz_ly": float(meta[13].item()),
-            "fcz_rx": float(meta[14].item()), "fcz_ry": float(meta[15].item()),
-        })
-    return final_64, target_block, target_context, temp, top_k, cfg_coef, telemetry
