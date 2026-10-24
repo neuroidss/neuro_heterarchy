@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v8.6 (TRUE BUFFER BLOCKS & AUTO-MIN)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v9.0 (SERVER-SIDE ENGINE BUFFER CLOCK)
+===================================================================================
+- Буфер музыки принадлежит СТРОГО серверному движку (расходуется на сервере
+  с точной частотой 32 000 Гц независимо от того, включен ли звук в браузере).
+- Браузер подключается к /audio.wav как к готовому радиоэфиру и ничего сам не считает.
 ===================================================================================
 """
 
@@ -11,6 +15,8 @@ import ssl
 import wave
 import json
 import time
+import queue
+import socket
 import struct
 import shutil
 import argparse
@@ -33,20 +39,26 @@ IPC_DIFF_AUTHKEY = b'diff_ctrl'
 NUM_CHANNELS = 16
 DEFAULT_SPS = 250.0
 SAMPLE_RATE = 32000
+TICK_SEC = 0.040  # 40 мс серверный квант вещания (1280 сэмплов = 2560 байт int16)
+TICK_SAMPLES = int(SAMPLE_RATE * TICK_SEC)
+TICK_FLOAT_BYTES = TICK_SAMPLES * 4
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-import socket
 
 latest_jpeg_frame = None
 latest_jpeg_id = 0
 latest_jpeg_ts = 0.0
+last_served_jpeg_id = 0
 jpeg_lock = threading.Lock()
 jpeg_cond = threading.Condition(jpeg_lock)
 
-audio_pcm_queue = []
-browser_playout_horizon = 0.0
-audio_pcm_lock = threading.Lock()
+# Внутренний буфер аудио-движка на сервере: список байтовых чанков float32
+engine_audio_chunks: list[bytearray] = []
+engine_audio_lock = threading.Lock()
+
+# Подписчики живого аудио-потока (браузеры с включенным звуком)
+audio_listeners: list[queue.Queue] = []
+audio_listeners_lock = threading.Lock()
 
 session_wav_writer = None
 session_wav_lock = threading.Lock()
@@ -60,7 +72,7 @@ diff_ctrl_lock = threading.Lock()
 music_state = {
     "concepts": [],
     "preset": "balanced",
-    "target_block": 0.0,         # 0.0 = Авто-минимизация блока по умолчанию!
+    "target_block": 0.0,
     "actual_block": 0.16,
     "play_speed": 1.0,
     "target_context": 3.6,
@@ -81,7 +93,7 @@ music_state_lock = threading.Lock()
 world_state = {
     "concepts": [],
     "preset": "balanced",
-    "steps": 0,                  # 0 = Авто-шаги по умолчанию
+    "steps": 0,
     "actual_steps": 2,
     "resolution": "512x384",
     "use_taesd": True,
@@ -111,16 +123,16 @@ sse_clients = []
 sse_lock = threading.Lock()
 
 
-def _recalc_and_push_buffer_locked(now: float):
-    """Пересчитывает реальный остаток блоков и секунд (в очереди + в полете у браузера)."""
-    ahead_sec = max(0.0, browser_playout_horizon - now)
-    queue_sec = sum(len(c) for c in audio_pcm_queue) / (SAMPLE_RATE * 4.0)
-    total_sec = queue_sec + ahead_sec
-    in_flight = 1 if ahead_sec > 0.015 else 0
-    total_chunks = len(audio_pcm_queue) + in_flight
+def _recalc_and_push_buffer_locked():
+    """Пересчитывает реальный остаток серверного буфера движка и сообщает в MusicGen."""
+    total_bytes = sum(len(c) for c in engine_audio_chunks)
+    total_sec = total_bytes / float(SAMPLE_RATE * 4)
+    total_chunks = len(engine_audio_chunks)
+
     with music_state_lock:
-        music_state["buffer_sec"] = round(total_sec, 3)
+        music_state["buffer_sec"] = round(total_sec, 2)
         music_state["buffer_chunks"] = total_chunks
+
     with music_conn_lock:
         if active_music_conn is not None:
             try:
@@ -131,6 +143,57 @@ def _recalc_and_push_buffer_locked(now: float):
                 })
             except Exception:
                 pass
+
+
+def server_realtime_audio_clock():
+    """
+    Аппаратный серверный метроном 32 000 Гц.
+    Непрерывно расходует буфер движка со скоростью 1:1 реального времени на сервере,
+    даже если в браузере выключен звук. Браузер получает уже готовый поток!
+    """
+    next_tick = time.perf_counter()
+    last_sse_broadcast = 0.0
+
+    while True:
+        now = time.perf_counter()
+        sleep_dt = next_tick - now
+        if sleep_dt > 0.001:
+            time.sleep(sleep_dt)
+        next_tick = max(time.perf_counter(), next_tick + TICK_SEC)
+
+        pulled_bytes = bytearray()
+        with engine_audio_lock:
+            needed = TICK_FLOAT_BYTES
+            while needed > 0 and len(engine_audio_chunks) > 0:
+                head = engine_audio_chunks[0]
+                if len(head) <= needed:
+                    pulled_bytes.extend(head)
+                    needed -= len(head)
+                    engine_audio_chunks.pop(0)
+                else:
+                    pulled_bytes.extend(head[:needed])
+                    del head[:needed]
+                    needed = 0
+            _recalc_and_push_buffer_locked()
+
+        if len(pulled_bytes) > 0:
+            floats = np.frombuffer(pulled_bytes, dtype=np.float32)
+            pcm16_bytes = (np.clip(floats, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+
+            with audio_listeners_lock:
+                for q in list(audio_listeners):
+                    try:
+                        q.put_nowait(pcm16_bytes)
+                    except queue.Full:
+                        try:
+                            q.get_nowait()
+                            q.put_nowait(pcm16_bytes)
+                        except Exception:
+                            pass
+
+        if time.perf_counter() - last_sse_broadcast >= 0.25:
+            last_sse_broadcast = time.perf_counter()
+            broadcast_full_state()
 
 
 def broadcast_sse(event_name: str, payload: dict):
@@ -230,7 +293,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        global browser_playout_horizon
+        global last_served_jpeg_id
         clean_path = self.path.split('?')[0].rstrip('/')
 
         if clean_path in ['', '/index.html']:
@@ -256,9 +319,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 self.send_error(404, "app.js не найден")
 
         elif clean_path == '/frame.jpg':
-            # ZERO-BUFFER PULL: Браузер запрашивает следующий кадр строго по готовности экрана!
-            # В прокси RunPod никогда не копится очередь старых картинок (всегда 0 кадров в буфере).
-            global last_served_jpeg_id
             with jpeg_lock:
                 frame = latest_jpeg_frame
                 fid = latest_jpeg_id
@@ -281,8 +341,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'image/jpeg')
                 self.send_header('Content-Length', str(len(frame)))
                 self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-                self.send_header('X-Frame-Id', str(fid))
-                self.send_header('X-Frame-Lag-Ms', str(int(age_sec * 1000)))
                 self.end_headers()
                 self.wfile.write(frame)
                 self.wfile.flush()
@@ -290,7 +348,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 pass
 
         elif clean_path in ['/stream.mjpg', '/live']:
-            # Отключаем буферизацию Нейгла (TCP_NODELAY), чтобы каждый кадр улетал мгновенно
             try:
                 self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except Exception:
@@ -324,9 +381,15 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     break
 
         elif clean_path in ['/audio.wav', '/stream.wav']:
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+
             self.send_response(200)
             self.send_header('Content-Type', 'audio/x-wav')
             self.send_header('Cache-Control', 'no-cache, no-store')
+            self.send_header('X-Accel-Buffering', 'no')
             self.end_headers()
             try:
                 self.wfile.write(make_wav_header())
@@ -334,33 +397,21 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             except Exception:
                 return
 
-            with audio_pcm_lock:
-                browser_playout_horizon = time.time()
+            client_audio_q = queue.Queue(maxsize=25)
+            with audio_listeners_lock:
+                audio_listeners.append(client_audio_q)
 
-            # Отдаем чанки в браузер ровно по мере их реального проигрывания (не более 0.15с в полете),
-            # чтобы в браузере НИКОГДА не накапливалось 88 секунд в одном блоке!
-            while True:
-                chunk = None
-                now = time.time()
-                with audio_pcm_lock:
-                    ahead = browser_playout_horizon - now
-                    if ahead <= 0.15 and len(audio_pcm_queue) > 0:
-                        chunk = audio_pcm_queue.pop(0)
-                        c_dur = len(chunk) / (SAMPLE_RATE * 4.0)
-                        browser_playout_horizon = max(now, browser_playout_horizon) + c_dur
-                        _recalc_and_push_buffer_locked(now)
-
-                if chunk is not None:
-                    try:
-                        floats = np.frombuffer(chunk, dtype=np.float32)
-                        int16s = (np.clip(floats, -1.0, 1.0) * 32767).astype(np.int16)
-                        self.wfile.write(int16s.tobytes())
-                        self.wfile.flush()
-                        broadcast_full_state()
-                    except Exception:
-                        break
-                else:
-                    time.sleep(0.008)
+            try:
+                while True:
+                    pcm16_bytes = client_audio_q.get(timeout=15.0)
+                    self.wfile.write(pcm16_bytes)
+                    self.wfile.flush()
+            except Exception:
+                pass
+            finally:
+                with audio_listeners_lock:
+                    if client_audio_q in audio_listeners:
+                        audio_listeners.remove(client_audio_q)
 
         elif clean_path == '/api/state_stream':
             self.send_response(200)
@@ -369,7 +420,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
 
-            import queue
             client_q = queue.Queue(maxsize=30)
             with sse_lock:
                 sse_clients.append(client_q)
@@ -490,7 +540,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     try:
                         active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
                     except Exception:
-                        pass
+                            pass
                 broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
@@ -593,7 +643,6 @@ def ipc_frame_receiver():
             conn = listener.accept()
             while True:
                 data = conn.recv()
-                # Zero-Buffer Drain: если в пайпе несколько кадров, берем только самый последний!
                 dropped_ipc = 0
                 while conn.poll(0.0):
                     data = conn.recv()
@@ -724,15 +773,12 @@ def ipc_audio_receiver():
                             except Exception:
                                 pass
 
-                    with audio_pcm_lock:
-                        now = time.time()
+                    with engine_audio_lock:
                         max_blocks = max(1, int(music_state.get("target_buffer_count", 2)))
-                        audio_pcm_queue.append(raw_bytes)
-                        # Строгий лимит по числу блоков буфера (плюс 1 блок запаса),
-                        # чтобы очередь НИКОГДА не копила 60 чанков (88 секунд)!
-                        while len(audio_pcm_queue) > max_blocks + 1:
-                            audio_pcm_queue.pop(0)
-                        _recalc_and_push_buffer_locked(now)
+                        engine_audio_chunks.append(bytearray(raw_bytes))
+                        while len(engine_audio_chunks) > max_blocks + 1:
+                            engine_audio_chunks.pop(0)
+                        _recalc_and_push_buffer_locked()
 
                     broadcast_full_state()
         except Exception:
@@ -772,6 +818,7 @@ def main():
     threading.Thread(target=ipc_frame_receiver, daemon=True).start()
     threading.Thread(target=ipc_audio_receiver, daemon=True).start()
     threading.Thread(target=ipc_control_listener, daemon=True).start()
+    threading.Thread(target=server_realtime_audio_clock, daemon=True).start()
 
     server = ThreadedHTTPServer(('0.0.0.0', port), UnifiedCloudHandler)
 

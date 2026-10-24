@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (AUTO-MIN BLOCK & PACING)
+NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (DETERMINISTIC & STOCHASTIC)
 ===================================================================================
-- РЕЖИМ БЛОК = 0 (ПО УМОЛЧАНИЮ):
-  Динамически снижает размер блока вплоть до 1 токена EnCodec (0.02с = 20 мс),
-  утилизируя 100% мощности GPU, и увеличивает блок только при опустошении буфера.
-- ПОДДЕРЖКА СЛАБЫХ GPU (RTX 3060 и др.):
-  Если при заданном контексте (например 3.6с) и блоке (например 1.2с) RTF < 1.0,
-  сервер плавно замедляет темп музыки (play_speed < 1.0, без ускорения > 1.0x),
-  чтобы буфер никогда не пустел.
-- ЖЕСТКИЙ КОНТРОЛЬ ЧИСЛА БЛОКОВ БУФЕРА (target_buffer_count):
-  При заполнении буфера (например 2 блока) сервер автоматически уменьшает размер
-  блока и синхронизирует шаг генерации с реальным временем.
+- ПО УМОЛЧАНИЮ ДЕТЕРМИНИРОВАННЫЙ РЕЖИМ (deterministic=True):
+  Выбор токенов во всех 4 кодбуках EnCodec управляется напрямую полноразмерным
+  срезом тензора ЭЭГ cross_attn_src[:, offset % 64, :4*k_eff]. Из одного и того же
+  ЭЭГ всегда воспроизводится 100% побитово идентичный звук!
+- РЕЖИМ ОТКАТА «КАК БЫЛО» (--stochastic или 'deterministic': False):
+  Возвращает классический случайный Gumbel-шум u.uniform_().
 ===================================================================================
 """
 from __future__ import annotations
@@ -42,17 +38,11 @@ if torch.cuda.is_available():
     except Exception:
         pass
 
-try:
-    from xformers import ops
-except ImportError:
-    ops = None
-
 from audiocraft.models import MusicGen
 from audiocraft.models.lm import LMModel
 from audiocraft.modules.transformer import (
     StreamingMultiheadAttention,
     StreamingTransformer,
-    _get_attention_time_dimension,
     set_efficient_attention_backend,
     create_sin_embedding
 )
@@ -78,144 +68,89 @@ _orig_complete_kv = StreamingMultiheadAttention._complete_kv
 def fast_complete_kv(self, k, v):
     if self.cross_attention or not self._is_streaming:
         return _orig_complete_kv(self, k, v)
-    time_dim = _get_attention_time_dimension(self.memory_efficient)
 
     if (not hasattr(self, '_persistent_k') or
             self._persistent_k.shape[0] != k.shape[0] or
             self._persistent_k.ndim != k.ndim or
-            self._persistent_k.shape[3 - time_dim] != k.shape[3 - time_dim]):
+            self._persistent_k.shape[1] != k.shape[1]):
         shape_k = list(k.shape)
-        shape_k[time_dim] = 1024
+        shape_k[2] = 1024
         self._persistent_k = torch.zeros(shape_k, device=k.device, dtype=k.dtype)
         self._persistent_v = torch.zeros(shape_k, device=v.device, dtype=v.dtype)
 
     curr_len = self._streaming_state.get('curr_len', 0)
-    slen = k.shape[time_dim]
+    slen = k.shape[2]
     static_k = self._persistent_k
     static_v = self._persistent_v
 
-    if curr_len + slen > static_k.shape[time_dim]:
+    new_len = curr_len + slen
+    if new_len > 1024:
         return _orig_complete_kv(self, k, v)
 
-    if time_dim == 2:
-        static_k[:, :, curr_len:curr_len + slen, :] = k
-        nk = static_k[:, :, :curr_len + slen, :]
-        if v is not k:
-            static_v[:, :, curr_len:curr_len + slen, :] = v
-            nv = static_v[:, :, :curr_len + slen, :]
-        else:
-            nv = nk
+    static_k[:, :, curr_len:new_len, :] = k
+    nk = static_k[:, :, :new_len, :]
+    if v is not k:
+        static_v[:, :, curr_len:new_len, :] = v
+        nv = static_v[:, :, :new_len, :]
     else:
-        static_k[:, curr_len:curr_len + slen, :] = k
-        nk = static_k[:, :curr_len + slen, :, :]
-        if v is not k:
-            static_v[:, curr_len:curr_len + slen, :] = v
-            nv = static_v[:, :curr_len + slen, :, :]
-        else:
-            nv = nk
+        nv = nk
 
-    self._streaming_state['curr_len'] = curr_len + slen
+    self._streaming_state['curr_len'] = new_len
     return nk, nv
 
 
 def fast_apply_rope(self, query: torch.Tensor, key: torch.Tensor):
-    time_dim = _get_attention_time_dimension(self.memory_efficient)
-    assert self.rope is not None
     past_keys_offset = self._streaming_state.get('curr_len', 0)
-    return self.rope.rotate_qk(query, key, start=past_keys_offset, time_dim=time_dim)
+    return self.rope.rotate_qk(query, key, start=past_keys_offset, time_dim=2)
 
 
 def fast_mha_forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
                      key_padding_mask=None, need_weights=False, attn_mask=None,
                      average_attn_weights=True, is_causal=False):
-    time_dim = _get_attention_time_dimension(self.memory_efficient)
     dtype = query.dtype
     B, T_q, C = query.shape
     H = self.num_heads
     D = C // H
 
-    if self.causal:
-        attn_mask = self._get_mask(T_q, query.device, query.dtype)
+    if self.cross_attention:
+        q = F.linear(query, self._q_weight, self._q_bias)
+        if self.qk_layer_norm:
+            q = self.q_layer_norm(q)
+        q = q.view(B, T_q, H, D).transpose(1, 2)
 
-    if self.custom:
-        if self.cross_attention:
-            dim = self.in_proj_weight.shape[0] // 3
-            bias_q = self.in_proj_bias[:dim] if self.in_proj_bias is not None else None
-            q = F.linear(query, self.in_proj_weight[:dim], bias_q)
+        state = self._streaming_state
+        if self._is_streaming and 'cross_k' in state:
+            k = state['cross_k']
+            v = state['cross_v']
+        else:
+            k = F.linear(key, self._k_weight, self._k_bias)
+            v = F.linear(value, self._v_weight, self._v_bias)
             if self.qk_layer_norm:
-                q = self.q_layer_norm(q)
-            if time_dim == 2:
-                q = q.view(B, T_q, H, D).transpose(1, 2)
-            else:
-                q = q.view(B, T_q, H, D)
+                k = self.k_layer_norm(k)
+            T_k = k.shape[1]
+            k = k.view(B, T_k, H, D).transpose(1, 2).contiguous()
+            v = v.view(B, T_k, H, D).transpose(1, 2).contiguous()
+            if self._is_streaming:
+                state['cross_k'] = k
+                state['cross_v'] = v
+        use_causal = False
+    else:
+        projected = F.linear(query, self.in_proj_weight, self.in_proj_bias)
+        packed = projected.view(B, T_q, 3, H, D).permute(2, 0, 3, 1, 4)
+        q, k, v = packed[0], packed[1], packed[2]
 
-            if self._is_streaming and 'cross_k' in self._streaming_state:
-                k = self._streaming_state['cross_k']
-                v = self._streaming_state['cross_v']
-            else:
-                bias_k = self.in_proj_bias[dim:2 * dim] if self.in_proj_bias is not None else None
-                bias_v = self.in_proj_bias[2 * dim:] if self.in_proj_bias is not None else None
-                k = F.linear(key, self.in_proj_weight[dim:2 * dim], bias_k)
-                v = F.linear(value, self.in_proj_weight[2 * dim:], bias_v)
-                if self.qk_layer_norm:
-                    k = self.k_layer_norm(k)
-                T_k = k.shape[1]
-                if time_dim == 2:
-                    k = k.view(B, T_k, H, D).transpose(1, 2).contiguous()
-                    v = v.view(B, T_k, H, D).transpose(1, 2).contiguous()
-                else:
-                    k = k.view(B, T_k, H, D).contiguous()
-                    v = v.view(B, T_k, H, D).contiguous()
-                if self._is_streaming:
-                    self._streaming_state['cross_k'] = k
-                    self._streaming_state['cross_v'] = v
-        else:
-            projected = F.linear(query, self.in_proj_weight, self.in_proj_bias)
-            if time_dim == 2:
-                packed = projected.view(B, T_q, 3, H, D).permute(2, 0, 3, 1, 4)
-                q, k, v = packed[0], packed[1], packed[2]
-            else:
-                packed = projected.view(B, T_q, 3, H, D)
-                q, k, v = packed[:, :, 0], packed[:, :, 1], packed[:, :, 2]
+        if self.rope is not None:
+            past_keys_offset = self._streaming_state.get('curr_len', 0)
+            q, k = self.rope.rotate_qk(q, k, start=past_keys_offset, time_dim=2)
+        k, v = self._complete_kv(k, v)
+        use_causal = (T_q > 1) and (T_q == k.shape[2])
 
-            if self.rope:
-                q, k = self._apply_rope(q, k)
-            k, v = self._complete_kv(k, v)
-
-        if self.attention_as_float32:
-            q, k, v = q.float(), k.float(), v.float()
-
-        if self.memory_efficient:
-            if time_dim == 2 or ops is None:
-                use_causal = (not self.cross_attention) and (T_q > 1) and (q.shape[2] == k.shape[2])
-                x = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal, dropout_p=0.0)
-                x = x.to(dtype).transpose(1, 2).reshape(B, T_q, C)
-            else:
-                x = ops.memory_efficient_attention(q, k, v, attn_mask, p=0.0)
-                x = x.to(dtype).reshape(B, T_q, C)
-        else:
-            q = q / (D ** 0.5)
-            if time_dim == 2:
-                pre_w = torch.matmul(q, k.transpose(-2, -1))
-                if attn_mask is not None:
-                    pre_w = pre_w + attn_mask
-                w = torch.softmax(pre_w, dim=-1).to(v)
-                x = torch.matmul(w, v).to(dtype).transpose(1, 2).reshape(B, T_q, C)
-            else:
-                pre_w = torch.einsum("b t h d, b k h d -> b h t k", q, k)
-                if attn_mask is not None:
-                    pre_w = pre_w + attn_mask
-                w = torch.softmax(pre_w, dim=-1).to(v)
-                x = torch.einsum("b h t k, b k h d -> b t h d", w, v).to(dtype).reshape(B, T_q, C)
-
-        x = self.out_proj(x)
-        return x, None
-
-    key, value = self._complete_kv(key, value)
     if self.attention_as_float32:
-        query, key, value = query.float(), key.float(), value.float()
-    x, _ = self.mha(query, key, value, key_padding_mask, need_weights, attn_mask, average_attn_weights)
-    return x.to(dtype), None
+        q, k, v = q.float(), k.float(), v.float()
+
+    x = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal, dropout_p=0.0)
+    x = x.to(dtype).transpose(1, 2).reshape(B, T_q, C)
+    return self.out_proj(x), None
 
 
 StreamingMultiheadAttention._complete_kv = fast_complete_kv
@@ -250,6 +185,31 @@ StreamingTransformer.forward = fast_transformer_forward
 _CACHED_TOKENIZED = None
 
 
+def prepare_lm_fast_weights(lm: LMModel):
+    for layer in lm.transformer.layers:
+        if layer.cross_attention is not None:
+            ca = layer.cross_attention
+            if not ca.custom:
+                ca.custom = True
+                ca.in_proj_weight = ca.mha.in_proj_weight
+                ca.in_proj_bias = ca.mha.in_proj_bias
+                ca.out_proj = ca.mha.out_proj
+            dim = ca.in_proj_weight.shape[0] // 3
+            ca._q_weight = ca.in_proj_weight[:dim].contiguous()
+            ca._k_weight = ca.in_proj_weight[dim:2 * dim].contiguous()
+            ca._v_weight = ca.in_proj_weight[2 * dim:].contiguous()
+            ca._q_bias = ca.in_proj_bias[:dim].contiguous() if ca.in_proj_bias is not None else None
+            ca._k_bias = ca.in_proj_bias[dim:2 * dim].contiguous() if ca.in_proj_bias is not None else None
+            ca._v_bias = ca.in_proj_bias[2 * dim:].contiguous() if ca.in_proj_bias is not None else None
+
+    lm._fused_head_w_T = torch.stack([l.weight.T for l in lm.linears], dim=0).contiguous()
+    lm._fused_head_b = torch.stack([l.bias for l in lm.linears], dim=0).contiguous() if lm.linears[0].bias is not None else None
+
+    vocab_sz = lm.emb[0].weight.shape[0]
+    lm._fused_emb_weight = torch.cat([lm.emb[k].weight for k in range(4)], dim=0).contiguous()
+    lm._emb_offsets = (torch.arange(4, device=lm._fused_emb_weight.device) * vocab_sz).view(1, 4, 1)
+
+
 @torch.no_grad()
 def step_continuous_diagonal_stream(
     lm: LMModel,
@@ -258,7 +218,8 @@ def step_continuous_diagonal_stream(
     gen_frames: int,
     ctx_frames: int,
     temp: float = 1.0,
-    top_k: int = 250
+    top_k: int = 250,
+    deterministic: bool = True
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     global _CACHED_TOKENIZED, LAST_PROFILE
     t_start_t5 = time.perf_counter()
@@ -272,9 +233,8 @@ def step_continuous_diagonal_stream(
     else:
         cross_attn_src = None
 
-    if not hasattr(lm, '_fused_head_w'):
-        lm._fused_head_w = torch.stack([l.weight for l in lm.linears], dim=0)
-        lm._fused_head_b = torch.stack([l.bias for l in lm.linears], dim=0) if lm.linears[0].bias is not None else None
+    if not hasattr(lm, '_fused_head_w_T'):
+        prepare_lm_fast_weights(lm)
 
     if device.type == 'cuda':
         torch.cuda.synchronize()
@@ -304,28 +264,38 @@ def step_continuous_diagonal_stream(
         LAST_PROFILE["ctx_tokens"] = keep_ctx
 
     total_seq_len = work_seq.shape[-1]
+    fused_emb_w = lm._fused_emb_weight
+    emb_offsets = lm._emb_offsets
+    head_w_T = lm._fused_head_w_T
+    head_b = lm._fused_head_b
 
     with lm.streaming():
         prev_offset = 0
         for offset in range(start_step, total_seq_len):
             curr_sequence = work_seq[..., prev_offset:offset]
-            input_ = (lm.emb[0](curr_sequence[:, 0]) + lm.emb[1](curr_sequence[:, 1]) +
-                      lm.emb[2](curr_sequence[:, 2]) + lm.emb[3](curr_sequence[:, 3]))
+            input_ = F.embedding(curr_sequence + emb_offsets, fused_emb_w).sum(dim=1)
 
             out = lm.transformer(input_, cross_attention_src=cross_attn_src)
-            if lm.out_norm:
+            if lm.out_norm is not None:
                 out = lm.out_norm(out)
 
             out_last = out[:, -1, :].unsqueeze(0).expand(4, B, -1)
-            if lm._fused_head_b is not None:
-                logits = torch.baddbmm(lm._fused_head_b.unsqueeze(1), out_last, lm._fused_head_w.transpose(1, 2))
+            if head_b is not None:
+                logits = torch.baddbmm(head_b.unsqueeze(1), out_last, head_w_T)
             else:
-                logits = torch.bmm(out_last, lm._fused_head_w.transpose(1, 2))
+                logits = torch.bmm(out_last, head_w_T)
 
             logits = logits.permute(1, 0, 2)
             if temp > 0.0:
                 top_logits, top_indices = torch.topk(logits * inv_temp, k=k_eff, dim=-1)
-                u = torch.empty_like(top_logits).uniform_(1e-6, 1.0 - 1e-6)
+                if deterministic and cross_attn_src is not None:
+                    # 100% ДЕТЕРМИНИЗМ: каждый из 4 кодбуков берет свой срез из тензора ЭЭГ cross_attn_src
+                    t_idx = offset % cross_attn_src.shape[1]
+                    eeg_slice_4xk = cross_attn_src[:, t_idx, :K * k_eff].contiguous().view(B, K, k_eff)
+                    u = torch.sigmoid(eeg_slice_4xk).clamp(1e-6, 1.0 - 1e-6)
+                else:
+                    # РЕЖИМ «КАК БЫЛО» (--stochastic): классический случайный Gumbel-шум
+                    u = torch.empty_like(top_logits).uniform_(1e-6, 1.0 - 1e-6)
                 gumbel = top_logits - torch.log(-torch.log(u))
                 sample_idx = torch.argmax(gumbel, dim=-1, keepdim=True)
                 next_token = torch.gather(top_indices, -1, sample_idx)
@@ -420,6 +390,9 @@ class AudioCrossfaderGPU:
         return chunk[..., :-self.fade_len]
 
 
+_EMA_RTF = 1.0
+
+
 def adapt_block_and_pacing(
     gen_time: float,
     raw_audio_duration: float,
@@ -430,82 +403,132 @@ def adapt_block_and_pacing(
     target_buffer_count: int = 2,
     safety_factor: float = 1.0
 ) -> tuple[float, float, float, float]:
-    """
-    Двухрежимный контроллер баланса GPU / Буфера / Скорости:
-    1) Если user_target_block <= 0.0 (Режим Авто-Минимум по умолчанию):
-       - Стремится сжать current_block до предела (1 фрейм = 0.02с), пока GPU успевает,
-         чтобы вся мощность уходила в мгновенный отклик без накопления буфера.
-       - Как только буфер пустеет (queue_chunks == 0 или RTF < 0.98), плавно увеличивает
-         размер блока, чтобы сбалансировать накладные расходы контекста.
-    2) Если user_target_block > 0.0 (Ручной режим, например 1.2с на RTX 3060 или 0.001с тест):
-       - Если GPU не тянет выбранный блок + контекст (RTF < 0.98) — плавно замедляет
-         музыку (play_speed < 1.0, но никогда > 1.0), чтобы буфер не обнулялся.
-       - Если же GPU слишком быстрый и буфер достиг target_buffer_count (например 2 чанка),
-         автоматически уменьшает размер блока и тормозит генерацию, чтобы буфер не рос.
-    """
+    global _EMA_RTF
     gen_time = max(gen_time, 0.001)
     real_rtf = raw_audio_duration / gen_time
+    _EMA_RTF = _EMA_RTF * 0.65 + real_rtf * 0.35
+    eff_rtf = min(real_rtf, _EMA_RTF)
+
     target_buf = max(1, int(target_buffer_count))
     play_speed = 1.0
 
     if user_target_block <= 0.0:
-        # АВТО-МИНИМУМ БЛОКА (Утилизация 100% мощности ускорителя)
-        if queue_chunks >= target_buf or (queue_chunks >= 1 and real_rtf > 1.06):
-            # Буфер полон или есть запас скорости -> жмем блок вниз к 0.02с
-            shrink = 0.76 if (queue_chunks > target_buf or real_rtf > 1.45) else 0.88
+        max_auto_block = 1.20
+        if queue_chunks >= target_buf and real_rtf > 1.08:
+            shrink = 0.78 if (queue_chunks > target_buf or real_rtf > 1.40) else 0.88
             current_block = max(MIN_BLOCK_SEC, current_block * shrink)
-        elif queue_chunks == 0 or real_rtf < 0.96:
-            # Буфер опустел / ускоритель не вытягивает такой мелкий блок -> растим блок
-            grow_step = max(MIN_BLOCK_SEC, current_block * 0.22)
-            current_block = min(4.0, current_block + grow_step)
+        elif queue_chunks == 0 or real_rtf < 0.98:
+            grow_step = max(MIN_BLOCK_SEC, current_block * 0.20)
+            current_block = min(max_auto_block, current_block + grow_step)
         elif real_rtf > 1.15:
-            current_block = max(MIN_BLOCK_SEC, current_block * 0.94)
+            current_block = max(MIN_BLOCK_SEC, current_block * 0.92)
 
-        current_block = float(np.clip(current_block, MIN_BLOCK_SEC, 4.0))
-
-        # Если даже при выросшем блоке слабая карта не тянет тяжелый контекст — замедляем музыку
-        if current_block >= 0.80 and real_rtf < 0.96 and queue_chunks == 0:
-            play_speed = float(np.clip((real_rtf * 0.95) / max(0.5, safety_factor), 0.40, 1.0))
-
+        current_block = float(np.clip(current_block, MIN_BLOCK_SEC, max_auto_block))
     else:
-        # РУЧНОЙ БЛОК (с защитой от переполнения буфера и авто-замедлением на слабых GPU)
         desired_block = max(MIN_BLOCK_SEC, float(user_target_block))
-
-        if queue_chunks >= target_buf and real_rtf > 1.05:
-            # Буфер уже набрал заданное число блоков (например 2) -> снижаем размер блока!
-            current_block = max(MIN_BLOCK_SEC, current_block * 0.80)
+        if queue_chunks > target_buf and real_rtf > 1.10:
+            current_block = max(MIN_BLOCK_SEC, current_block * 0.85)
         else:
-            current_block = float(np.clip(current_block * 0.65 + desired_block * 0.35, MIN_BLOCK_SEC, 4.0))
+            current_block = float(np.clip(current_block * 0.60 + desired_block * 0.40, MIN_BLOCK_SEC, 4.0))
 
-        # Если ускоритель тормозной (например RTX 3060 с контекстом 3.6с) -> замедляем музыку (<= 1.0x)
-        if real_rtf < 0.98 and queue_chunks < target_buf:
-            play_speed = float(np.clip((real_rtf * 0.95) / max(0.5, safety_factor), 0.35, 1.0))
-        else:
-            play_speed = 1.0
+    if eff_rtf < 1.02 or (queue_chunks < target_buf and real_rtf < 1.08):
+        margin = 0.86 if queue_chunks < target_buf else 0.94
+        target_speed = (eff_rtf * margin) / max(0.5, float(safety_factor))
+        play_speed = float(np.clip(target_speed, 0.30, 1.0))
+    else:
+        play_speed = 1.0
 
     actual_out_duration = raw_audio_duration / play_speed
 
-    # Строгий контроль очереди: если в буфере уже есть target_buf чанков,
-    # спим ровно столько, чтобы не превышать лимит числа блоков буфера!
     sleep_sec = 0.0
-    if queue_chunks >= target_buf:
+    if queue_chunks >= target_buf and actual_out_duration > gen_time:
         excess_chunks = max(0, queue_chunks - target_buf)
         base_wait = max(0.0, actual_out_duration - gen_time)
-        sleep_sec = float(np.clip(base_wait + excess_chunks * actual_out_duration * 0.6, 0.0, 3.0))
+        sleep_sec = float(np.clip(base_wait + excess_chunks * actual_out_duration * 0.5, 0.0, 2.5))
 
     return current_block, real_rtf, play_speed, sleep_sec
 
 
+def run_startup_diagnostics(mg: MusicGen, dummy_t5: torch.Tensor, deterministic: bool = True):
+    global ACTIVE_T5_EMBEDS, _CACHED_TOKENIZED
+    print("\n" + "=" * 90)
+    print(f"🔬 [ДИАГНОСТИКА MUSICGEN: БЕСШОВНЫЙ ДИАГОНАЛЬНЫЙ СТРИМ (Deterministic={deterministic})]")
+    print("=" * 90)
+
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        free_b, total_b = torch.cuda.mem_get_info(0)
+        print(f"🖥️  GPU: {gpu_name} | Свободно VRAM: {free_b / (1024**2):.0f} МБ / {total_b / (1024**2):.0f} МБ")
+
+    ACTIVE_T5_EMBEDS = dummy_t5.to(DEVICE)
+    set_efficient_attention_backend('torch')
+    _CACHED_TOKENIZED = None
+
+    attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
+    with torch.inference_mode(), mg.autocast:
+        diag_seq, codes, _ = step_continuous_diagonal_stream(
+            mg.lm, None, attributes, gen_frames=185, ctx_frames=180, deterministic=deterministic
+        )
+        _ = mg.compression_model.decode(codes[..., -20:], None)
+        if DEVICE.type == 'cuda':
+            torch.cuda.synchronize()
+
+    print(f"{'Режим (Block / Context)':<28} | {'CtxТок':<6} | {'Шагов':<6} | {'LM Loop':<9} | {'1 Шаг':<8} | {'EnCodec':<7} | {'ЧИСТЫЙ RTF'}")
+    print("-" * 90)
+
+    for b_sec, c_sec in [(0.1, 3.6), (0.2, 3.6), (0.5, 3.6), (1.2, 3.6), (1.8, 2.4)]:
+        gen_f = max(5, int(round(b_sec * FRAME_RATE)))
+        ctx_f = max(10, int(round(c_sec * FRAME_RATE)))
+
+        if DEVICE.type == 'cuda':
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+
+        with torch.inference_mode(), mg.autocast:
+            diag_seq, codes, pfx = step_continuous_diagonal_stream(
+                mg.lm, diag_seq, attributes, gen_frames=gen_f, ctx_frames=ctx_f, deterministic=deterministic
+            )
+            if DEVICE.type == 'cuda':
+                torch.cuda.synchronize()
+            t_enc0 = time.perf_counter()
+            decoded_audio = mg.compression_model.decode(codes, None)
+            _ = decoded_audio[..., 1280:] if pfx >= 2 else decoded_audio
+            if DEVICE.type == 'cuda':
+                torch.cuda.synchronize()
+            enc_ms = (time.perf_counter() - t_enc0) * 1000.0
+
+        total_s = time.perf_counter() - t0
+        audio_s = gen_f / float(FRAME_RATE)
+        rtf = audio_s / total_s
+
+        print(
+            f"Block {b_sec:4.2f}s / Ctx {c_sec:4.2f}s    | "
+            f"{ctx_f:<6d} | "
+            f"{LAST_PROFILE['steps_count']:<6d} | "
+            f"{LAST_PROFILE['lm_loop_ms']:6.1f} ms | "
+            f"{LAST_PROFILE['per_step_ms']:5.2f} ms | "
+            f"{enc_ms:4.1f} ms | "
+            f"👉 {rtf:5.2f}x"
+        )
+
+    print("=" * 90 + "\n", flush=True)
+
+
 def main():
-    global ACTIVE_T5_EMBEDS
+    global ACTIVE_T5_EMBEDS, _CACHED_TOKENIZED
     parser = argparse.ArgumentParser(description="NeuroCanvas MusicGen Server Realtime Auto-Min Block")
     parser.add_argument('--port', type=int, default=6005)
     parser.add_argument('--model', type=str, default="facebook/musicgen-small")
+    parser.add_argument('--benchmark', action='store_true', default=True)
     parser.add_argument('--quiet-step', action='store_true', default=False)
+    parser.add_argument('--stochastic', action='store_true', default=False,
+                        help="Вернуть старый случайный Gumbel-шум u.uniform_() вместо детерминированного выбора")
     args = parser.parse_args()
 
+    default_deterministic = not args.stochastic
+
     print("=" * 70)
-    print(f"🎵 ИНИЦИАЛИЗАЦИЯ MUSICGEN НА {DEVICE} (AUTO-MIN 0.02s BLOCK & SLOWDOWN)...")
+    print(f"🎵 ИНИЦИАЛИЗАЦИЯ MUSICGEN НА {DEVICE} (Deterministic={default_deterministic})...")
     print("=" * 70)
 
     set_efficient_attention_backend('torch')
@@ -516,18 +539,16 @@ def main():
         mg.lm.to(torch.float16)
         mg.compression_model.to(torch.float16)
 
-    for layer in mg.lm.transformer.layers:
-        if layer.cross_attention is not None and not layer.cross_attention.custom:
-            ca = layer.cross_attention
-            ca.custom = True
-            ca.in_proj_weight = ca.mha.in_proj_weight
-            ca.in_proj_bias = ca.mha.in_proj_bias
-            ca.out_proj = ca.mha.out_proj
+    prepare_lm_fast_weights(mg.lm)
 
     t5_cond = mg.lm.condition_provider.conditioners['description']
     raw_emb = t5_cond.t5.shared.weight.detach().to(torch.float32)
     mean_tok_norm = float(torch.norm(raw_emb, p=2, dim=-1).mean().item())
     norm_emb = raw_emb / (torch.norm(raw_emb, dim=-1, keepdim=True) + 1e-7)
+
+    # Фиксируем seed перед pca_lowrank, чтобы базис был 100% одинаковым при любом перезапуске
+    torch.manual_seed(777)
+    torch.cuda.manual_seed_all(777)
     _, _, V_all = torch.pca_lowrank(norm_emb, q=120)
     proj_120_to_768 = V_all[:, :120].T.contiguous().to(DEVICE)
     global_svd_bases_64x768 = (F.normalize(V_all[:, :64].T.contiguous(), p=2, dim=-1) * mean_tok_norm).to(DEVICE)
@@ -536,9 +557,13 @@ def main():
         empty_embed_t = encode_clean_64_t5(t5_cond, "")
         empty_embed_64x768 = empty_embed_t.cpu().numpy()
 
+    if args.benchmark:
+        run_startup_diagnostics(mg, empty_embed_t, deterministic=default_deterministic)
+
+    cached_attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
     crossfader = AudioCrossfaderGPU(fade_len=640)
     current_diag_seq = None
-    current_block = 0.16  # Стартуем с малого блока и тут же адаптируемся
+    current_block = 0.16
 
     listener = Listener(('localhost', args.port), authkey=b'music')
     print(f"🚀 [MUSICGEN-SERVER] Слушаю порт {args.port}...")
@@ -575,6 +600,7 @@ def main():
                     })
 
                 elif cmd == 'generate_step':
+                    global _EMA_RTF
                     t0 = time.perf_counter()
                     embeds_np = msg.get('t5_embeds')
                     user_target_block = float(msg.get('block_sec', 0.0))
@@ -586,6 +612,8 @@ def main():
                     queue_chunks = int(msg.get('queue_chunks', 0))
                     target_buffer_count = int(msg.get('target_buffer_count', 2))
                     is_reset = bool(msg.get('is_reset', False))
+                    use_det = bool(msg.get('deterministic', default_deterministic))
+                    lock_speed = bool(msg.get('lock_speed', False))
 
                     if embeds_np is not None:
                         ACTIVE_T5_EMBEDS = torch.from_numpy(embeds_np).to(DEVICE)
@@ -593,20 +621,20 @@ def main():
                     if is_reset:
                         current_diag_seq = None
                         crossfader.overlap = None
+                        _EMA_RTF = 1.0
+                        current_block = max(MIN_BLOCK_SEC, user_target_block) if user_target_block > 0.0 else 0.16
 
-                    # Если юзер вручную задал блок > 0 и буфер не переполнен, сразу берем его
-                    if user_target_block > 0.0 and queue_chunks < target_buffer_count:
+                    if user_target_block > 0.0 and (queue_chunks < target_buffer_count or lock_speed):
                         current_block = max(MIN_BLOCK_SEC, user_target_block)
 
-                    attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
                     gen_frames = max(1, int(round(current_block * FRAME_RATE)))
                     ctx_frames = max(10, int(round(context_sec * FRAME_RATE)))
 
                     with torch.inference_mode(), mg.autocast:
                         current_diag_seq, ready_codes, pfx = step_continuous_diagonal_stream(
-                            mg.lm, current_diag_seq, attributes,
+                            mg.lm, current_diag_seq, cached_attributes,
                             gen_frames=gen_frames, ctx_frames=ctx_frames,
-                            temp=temp, top_k=top_k
+                            temp=temp, top_k=top_k, deterministic=use_det
                         )
 
                         if DEVICE.type == 'cuda':
@@ -621,18 +649,23 @@ def main():
                         raw_audio_len = gen_frames / float(FRAME_RATE)
                         gen_time = time.perf_counter() - t0
 
-                        current_block, real_rtf, play_speed, sleep_sec = adapt_block_and_pacing(
-                            gen_time=gen_time,
-                            raw_audio_duration=raw_audio_len,
-                            current_block=current_block,
-                            user_target_block=user_target_block,
-                            queue_sec=queue_sec,
-                            queue_chunks=queue_chunks,
-                            target_buffer_count=target_buffer_count,
-                            safety_factor=safety_factor
-                        )
+                        if lock_speed:
+                            # В режиме строгой верификации отключаем влияние секундомера ОС (time.perf_counter)
+                            real_rtf = raw_audio_len / max(gen_time, 0.001)
+                            play_speed = 1.0
+                            sleep_sec = 0.0
+                        else:
+                            current_block, real_rtf, play_speed, sleep_sec = adapt_block_and_pacing(
+                                gen_time=gen_time,
+                                raw_audio_duration=raw_audio_len,
+                                current_block=current_block,
+                                user_target_block=user_target_block,
+                                queue_sec=queue_sec,
+                                queue_chunks=queue_chunks,
+                                target_buffer_count=target_buffer_count,
+                                safety_factor=safety_factor
+                            )
 
-                        # Если слабая карта (например RTX 3060) не вытягивает RTF 1.0 — плавно замедляем
                         if play_speed < 0.995 and new_chunk.shape[-1] > 640:
                             base_new_samples = new_chunk.shape[-1] - 640
                             stretched_total = 640 + int(round(base_new_samples / play_speed))
@@ -665,9 +698,8 @@ def main():
                         'play_speed': play_speed,
                         'actual_block': raw_audio_len
                     })
-                    
+
                 elif cmd == 'switch_model':
-                    global _CACHED_TOKENIZED
                     new_model_name = str(msg.get('model', 'facebook/musicgen-small')).strip()
                     print(f"🔄 [MUSICGEN-SERVER] Горячая смена модели на: {new_model_name}...", flush=True)
                     del mg
@@ -678,23 +710,21 @@ def main():
                     if DEVICE.type == 'cuda':
                         mg.lm.to(torch.float16)
                         mg.compression_model.to(torch.float16)
-                    for layer in mg.lm.transformer.layers:
-                        if layer.cross_attention is not None and not layer.cross_attention.custom:
-                            ca = layer.cross_attention
-                            ca.custom = True
-                            ca.in_proj_weight = ca.mha.in_proj_weight
-                            ca.in_proj_bias = ca.mha.in_proj_bias
-                            ca.out_proj = ca.mha.out_proj
+                    prepare_lm_fast_weights(mg.lm)
                     t5_cond = mg.lm.condition_provider.conditioners['description']
+                    cached_attributes = [mg._prepare_tokens_and_attributes([""], None)[0][0]]
                     _CACHED_TOKENIZED = None
                     current_diag_seq = None
                     crossfader.overlap = None
+                    _EMA_RTF = 1.0
                     print(f"✅ [MUSICGEN-SERVER] Модель {new_model_name} успешно загружена в VRAM!", flush=True)
                     conn.send({'status': 'ok', 'model': new_model_name})
 
                 elif cmd == 'flush':
                     current_diag_seq = None
                     crossfader.overlap = None
+                    _EMA_RTF = 1.0
+                    current_block = 0.16
                     conn.send({'status': 'ok'})
 
         except Exception:

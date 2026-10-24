@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: ZERO-BUFFER REAL-TIME DIFFUSION RUNNER (AUTO-STEPS & TAESD LINK)
+NEUROCANVAS: 100% GPU ZERO-BUFFER DIFFUSION RUNNER (VRAM CUDA-IPC BUS)
 ===================================================================================
-- STEPS = 0 (АВТО-ШАГИ): Подбирает макс. число шагов (2..6) под скорость GPU.
-- АВТО-СВЯЗКА TAESD <-> COLOR SURGERY:
-  При включенном TAESD автоматически применяется коррекция цвета.
-  При выключенном TAESD (Full VAE) коррекция цвета автоматически отключается!
-- КОНТЕКСТ МИРА (world_context): Плавное удержание структуры кадра (0.0..0.50).
-- ZERO-BUFFER IPC: Отправляет кадры с таймштампом и номером без дубликатов.
+- Чтение рабочей памяти напрямую из VRAM через аппаратный CUDA IPC (DeviceToDevice).
+- Color Surgery и World Context перенесены с CPU OpenCV на 100% GPU-тензоры!
 ===================================================================================
 """
 
+from __future__ import annotations
+from typing import Optional
 import sys
 import argparse
 import time
@@ -27,17 +25,54 @@ for p in [CURRENT_DIR, CURRENT_DIR / "src", CURRENT_DIR.parent / "src"]:
     if p.exists() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from neuro_heterarchy_core import HeterarchicalBrainEngine, DEVICE
-from neuro_workers import apply_color_surgery
+from neuro_heterarchy_core import DEVICE
 from neuro_genesis_engine import (
-    MAX_SLOTS_CAPACITY,
     UniversalSemanticSpace,
     SelfSufficientHeterarchyRouter,
-    HeterarchyDeltaProcessor
+)
+from neuro_amodal_engine import (
+    SharedAmodalCognitiveEngine,
+    project_amodal_bus_to_diffusion_gpu,
 )
 from neuro_recorder import recorder_instance
 
 ipc_lock = threading.Lock()
+
+
+@torch.no_grad()
+def apply_color_surgery_and_blend_gpu(new_rgb_np: np.ndarray, prev_gpu: Optional[torch.Tensor],
+                                      use_color: bool, world_context: float) -> tuple[np.ndarray, torch.Tensor]:
+    """
+    100% GPU-реализация Color Surgery и World Context смешивания (вместо медленного CPU OpenCV).
+    """
+    cur_t = torch.from_numpy(new_rgb_np).to(DEVICE, dtype=torch.float32)
+    if prev_gpu is None or prev_gpu.shape != cur_t.shape:
+        return new_rgb_np, cur_t
+
+    if use_color:
+        mu = torch.mean(cur_t, dim=(0, 1))
+        target_g = 0.5 * (mu[0] + mu[2])
+        excess_g = torch.relu(mu[1] - target_g)
+        cur_t[:, :, 1] -= excess_g
+
+        green_bleed = cur_t[:, :, 1] * 0.015
+        cur_t[:, :, 1] -= green_bleed
+        cur_t[:, :, 0] += green_bleed * 0.5
+        cur_t[:, :, 2] += green_bleed * 0.5
+
+        mu_t = torch.mean(cur_t, dim=(0, 1), keepdim=True)
+        std_t = torch.std(cur_t, dim=(0, 1), keepdim=True) + 1e-5
+        std_s = torch.std(prev_gpu, dim=(0, 1), keepdim=True) + 1e-5
+        t_std = std_t * 0.85 + std_s * 0.15
+        cur_t = (cur_t - mu_t) * (t_std / std_t) + mu_t
+
+    if world_context > 0.01:
+        keep = min(0.65, max(0.0, float(world_context)))
+        cur_t = cur_t * (1.0 - keep) + prev_gpu * keep
+
+    cur_t = torch.clamp(cur_t, 0.0, 255.0)
+    out_np = cur_t.to(torch.uint8).cpu().numpy()
+    return out_np, cur_t
 
 
 class AsyncDiffusionWorker(threading.Thread):
@@ -49,13 +84,14 @@ class AsyncDiffusionWorker(threading.Thread):
         self.use_taesd = use_taesd
         self.use_color = use_color
         self.is_sdxl = is_sdxl
-        self.target_steps = inference_steps  # 0 = Авто-шаги
+        self.target_steps = inference_steps
         self.actual_steps = 2 if inference_steps == 0 else inference_steps
         self.guidance_scale = 1.0
-        self.world_context = 0.18            # Удержание связного мира между кадрами
-        self.target_fps = 8.0                # Целевой FPS для режима Авто-шагов (steps=0)
+        self.world_context = 0.18
+        self.target_fps = 8.0
 
         self.display_rgb = np.zeros((self.img_h, self.img_w, 3), dtype=np.uint8)
+        self.prev_gpu_frame: Optional[torch.Tensor] = None
         self.latest_embeds = None
         self.strength = 0.60
         self.running = True
@@ -75,6 +111,7 @@ class AsyncDiffusionWorker(threading.Thread):
     def flush(self):
         with self.lock:
             self.display_rgb.fill(0)
+            self.prev_gpu_frame = None
 
     def get_canvas(self):
         with self.lock:
@@ -97,7 +134,7 @@ class AsyncDiffusionWorker(threading.Thread):
                 u_color = self.use_color
                 telem = self.latest_telemetry
                 if np.max(self.display_rgb) > 0:
-                    internal_rgb = self.display_rgb.copy()
+                    internal_rgb = self.display_rgb
 
             if embeds is None:
                 time.sleep(0.005)
@@ -105,9 +142,9 @@ class AsyncDiffusionWorker(threading.Thread):
 
             if internal_rgb.shape[:2] != (req_h, req_w):
                 internal_rgb = cv2.resize(internal_rgb, (req_w, req_h), interpolation=cv2.INTER_LINEAR)
+                self.prev_gpu_frame = None
 
             steps_to_run = a_steps if t_steps <= 0 else t_steps
-            # Защита: чтобы int(steps * strength) было >= 1
             eff_s = max(s_val, 1.05 / max(1, steps_to_run)) if steps_to_run >= 2 else max(0.55, s_val)
             eff_s = float(np.clip(eff_s, 0.30, 0.95))
 
@@ -132,18 +169,10 @@ class AsyncDiffusionWorker(threading.Thread):
                     if resp.shape[:2] != (req_h, req_w):
                         resp = cv2.resize(resp, (req_w, req_h))
 
-                    # 1. Коррекция цвета нужна ТОЛЬКО для TAESD (при Full VAE она выключена)
-                    if u_color and np.max(internal_rgb) > 0:
-                        resp = apply_color_surgery(resp, internal_rgb.astype(np.float32))
+                    internal_rgb, self.prev_gpu_frame = apply_color_surgery_and_blend_gpu(
+                        resp, self.prev_gpu_frame, u_color, w_ctx
+                    )
 
-                    # 2. Связность мира (World Context): плавное слияние с предыдущим кадром
-                    if w_ctx > 0.01 and np.max(internal_rgb) > 0:
-                        keep = float(np.clip(w_ctx, 0.0, 0.65))
-                        internal_rgb = cv2.addWeighted(resp, 1.0 - keep, internal_rgb, keep, 0)
-                    else:
-                        internal_rgb = resp
-
-                    # 3. Авто-подбор числа шагов (если target_steps == 0)
                     target_dt = 1.0 / max(1.0, t_fps)
                     if t_steps <= 0:
                         if gen_dt < target_dt * 0.68 and a_steps < 6:
@@ -168,7 +197,6 @@ class AsyncDiffusionWorker(threading.Thread):
                     if self.gateway_conn is not None:
                         try:
                             _, enc_jpg = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                            # Передаем кадр вместе с ID и точным временем генерации для измерения буфера!
                             self.gateway_conn.send({
                                 'frame_id': cur_fid,
                                 'ts': time.time(),
@@ -200,7 +228,7 @@ class AsyncDiffusionWorker(threading.Thread):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NeuroCanvas Decoupled Runner")
+    parser = argparse.ArgumentParser(description="NeuroCanvas 100% GPU Diffusion Runner")
     parser.add_argument('--lore', '--concepts-file', dest='lore_file', type=str, default=None)
     parser.add_argument('--concepts', type=str, default=None)
     parser.add_argument('--vocab-ratio', type=float, default=1.0)
@@ -212,7 +240,7 @@ def main():
 
     parser.add_argument('--mode', type=str, default="lcm", choices=["lcm", "turbo", "sdxl-turbo", "sdxl"])
     parser.add_argument('--speed', type=str, default="quality", choices=["fast", "quality"])
-    parser.add_argument('--steps', type=int, default=0)  # 0 = Авто-шаги по умолчанию
+    parser.add_argument('--steps', type=int, default=0)
     parser.add_argument('--no-taesd', action='store_true', default=False)
     parser.add_argument('--no-color', action='store_true', default=False)
 
@@ -232,7 +260,6 @@ def main():
     args = parser.parse_args()
 
     init_taesd = not args.no_taesd
-    # Авто-правило: с TAESD нужна коррекция цвета, без TAESD — не нужна!
     init_color = init_taesd if not args.no_color else False
 
     conn = None
@@ -253,25 +280,17 @@ def main():
     semantic = UniversalSemanticSpace(lore_file=args.lore_file, concepts_cli=args.concepts, target_k=target_k)
     router = SelfSufficientHeterarchyRouter(args.users)
 
-    processor = HeterarchyDeltaProcessor(
-        semantic=semantic,
+    amodal_engine = SharedAmodalCognitiveEngine(
         router=router,
+        gamma_max=args.gamma_max,
         strength_low=args.strength_low,
-        burst_strength=args.burst_strength,
-        burst_duration=args.burst_duration,
-        seal_cycles=args.seal_cycles,
-        decay_cycles=args.decay_cycles,
-        seal_thresh=args.seal_thresh,
-        refresh_cycles=args.refresh_cycles
+        strength_high=args.burst_strength
     )
 
     hud = None
     if not args.headless:
         from neuro_hud import NeuroCanvasHUD
         hud = NeuroCanvasHUD(initial_minimal=args.minimal_ui, device=DEVICE)
-
-    engine = HeterarchicalBrainEngine(gamma_max=args.gamma_max)
-    engine.start()
 
     canvas_w, canvas_h = (512, 384) if is_sdxl else ((448, 336) if args.speed == "fast" else (512, 384))
     worker = AsyncDiffusionWorker(
@@ -284,12 +303,14 @@ def main():
     init_word = semantic.words[0] if semantic.words else ""
     smoothed_target = semantic.get_77_embedding_gpu(init_word).clone()
     current_ema_smooth = args.ema_smooth
+    strength_low = args.strength_low
+    burst_strength = args.burst_strength
 
     ctrl_conn = None
     ctrl_lock = threading.Lock()
 
     def control_listener_thread():
-        nonlocal current_ema_smooth, ctrl_conn
+        nonlocal current_ema_smooth, strength_low, burst_strength, ctrl_conn
         while worker.running:
             try:
                 if ctrl_conn is None:
@@ -312,7 +333,6 @@ def main():
                         p = msg.get('params', {})
                         if 'mode' in p and p['mode'] != args.mode:
                             new_mode = str(p['mode'])
-                            print(f"🔄 [DIFFUSION] Переключение архитектуры: {args.mode} -> {new_mode}...")
                             with ipc_lock:
                                 conn.send({'cmd': 'init_mode', 'mode': new_mode, 'use_taesd': worker.use_taesd})
                                 resp = conn.recv()
@@ -336,14 +356,13 @@ def main():
                                     worker.img_h = max(192, min(768, (rh // 8) * 8))
                             if 'use_taesd' in p:
                                 worker.use_taesd = bool(p['use_taesd'])
-                                # Авто-связка: TAESD включает коррекцию цвета, Full VAE выключает!
                                 worker.use_color = worker.use_taesd if 'use_color' not in p else bool(p['use_color'])
                             elif 'use_color' in p:
                                 worker.use_color = bool(p['use_color'])
                         if 'strength_low' in p:
-                            processor.strength_low = max(0.30, min(0.85, float(p['strength_low'])))
+                            strength_low = max(0.30, min(0.85, float(p['strength_low'])))
                         if 'strength_high' in p:
-                            processor.burst_strength = max(processor.strength_low + 0.05, min(0.95, float(p['strength_high'])))
+                            burst_strength = max(strength_low + 0.05, min(0.95, float(p['strength_high'])))
                         if 'ema_smooth' in p:
                             current_ema_smooth = max(0.02, min(0.50, float(p['ema_smooth'])))
                     elif cmd == 'start_recording':
@@ -372,38 +391,38 @@ def main():
             t_now = time.time()
 
             if hud:
-                dt, commands = hud.poll_events(len(engine.get_frame().nodes))
+                dt, commands = hud.poll_events(16)
                 for cmd, payload in commands:
                     if cmd == "set_role":
                         router.set_role(payload[0], payload[1])
                     elif cmd == "reset_seals":
-                        for eng in processor.engines.values():
-                            eng.seals.charge.fill(0)
-                            eng.seals.mask = [False] * MAX_SLOTS_CAPACITY
+                        amodal_engine.reset_seals()
                         hud.spiral.rings.clear()
                     elif cmd == "flush_canvas":
                         worker.flush()
             else:
-                # Фикс 100% загрузки CPU и забивания сокета управления в headless-режиме!
                 time.sleep(0.016)
 
-            frame = engine.get_frame()
-            if frame.num_live == 0:
+            bus, has_live = amodal_engine.step(dt)
+            if not has_live:
                 if hud:
                     hud.render_waiting()
                 time.sleep(0.02)
                 continue
 
-            target_77, dyn_str, telemetry = processor.step(frame, dt)
+            need_telem = (hud is not None) or ((t_now - last_telem_t) >= 0.15) or recorder_instance.is_recording
+            target_77, dyn_str, telemetry = project_amodal_bus_to_diffusion_gpu(
+                bus, semantic, strength_low=strength_low, burst_strength=burst_strength,
+                need_ui_telemetry=need_telem
+            )
 
-            if (t_now - last_telem_t) >= 0.15:
+            if (t_now - last_telem_t) >= 0.15 and telemetry:
                 last_telem_t = t_now
                 with ctrl_lock:
                     if ctrl_conn is not None:
                         try:
                             puck = [telemetry.get("f3_x_local", 0.0), telemetry.get("f3_y_global", 0.0)]
                             active_w = telemetry.get("dag_log_parts", [""])[0]
-                            sat_mask = frame.nodes[0].saturation_mask if len(frame.nodes) > 0 else [False] * 16
                             ctrl_conn.send({
                                 "cmd": "telemetry",
                                 "puck": puck,
@@ -416,12 +435,12 @@ def main():
                                 "use_taesd": worker.use_taesd,
                                 "use_color": worker.use_color,
                                 "world_context": worker.world_context,
-                                "ladder_stage": telemetry.get("ladder_stage", 4),
+                                "ladder_stage": 4,
                                 "monty_loss": telemetry.get("monty_loss", 0.0),
                                 "persistence": telemetry.get("persistence", 0.0),
                                 "surprise": telemetry.get("surprise", 0.0),
-                                "regions": telemetry.get("regions_telemetry", {}),
-                                "gpu_sat_mask": sat_mask
+                                "regions": {},
+                                "gpu_sat_mask": [False] * 16
                             })
                         except Exception:
                             ctrl_conn = None
@@ -438,7 +457,7 @@ def main():
     finally:
         worker.running = False
         recorder_instance.stop_session()
-        engine.stop()
+        amodal_engine.stop()
         if hud:
             hud.close()
 

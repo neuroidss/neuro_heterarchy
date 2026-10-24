@@ -500,7 +500,7 @@ sse.addEventListener('ble_cmd', async (e) => {
 });
 
 // =============================================================================
-// БЕСШОВНЫЙ WEB AUDIO API ПЛЕЕР (20 МС СЛАЙСЫ = 1 ТОКЕН ENCODEC)
+// ПРЯМОЙ ПРИЕМНИК ГОТОВОГО АУДИО С СЕРВЕРА (НОЛЬ ВЫЧИСЛЕНИЙ В БРАУЗЕРЕ)
 // =============================================================================
 async function startWebAudioStream() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -510,34 +510,15 @@ async function startWebAudioStream() {
     }
 
     audioAbortCtrl = new AbortController();
-    const response = await fetch('/audio.wav?t=' + Date.now(), { signal: audioAbortCtrl.signal });
+    const response = await fetch('/audio.wav?t=' + Date.now(), {
+        signal: audioAbortCtrl.signal,
+        cache: 'no-store'
+    });
     const reader = response.body.getReader();
 
     let headerBytesRemaining = 44;
     let leftoverByte = null;
     let nextPlayTime = 0;
-    let pendingSamples = [];
-    let hasStarted = false;
-    const prebufferSamples = Math.floor(AUDIO_SR * 0.06);
-    const sliceSamples = Math.floor(AUDIO_SR * 0.02);
-
-    function scheduleSlice(float32Arr) {
-        if (!audioCtx || !isAudioPlaying) return;
-        const now = audioCtx.currentTime;
-        if (nextPlayTime < now + 0.015) {
-            nextPlayTime = now + 0.05;
-        } else if (nextPlayTime > now + 1.2) {
-            nextPlayTime = now + 0.12;
-        }
-        const audioBuf = audioCtx.createBuffer(1, float32Arr.length, AUDIO_SR);
-        audioBuf.getChannelData(0).set(float32Arr);
-
-        const src = audioCtx.createBufferSource();
-        src.buffer = audioBuf;
-        src.connect(audioCtx.destination);
-        src.start(nextPlayTime);
-        nextPlayTime += float32Arr.length / AUDIO_SR;
-    }
 
     (async () => {
         try {
@@ -572,32 +553,33 @@ async function startWebAudioStream() {
                 const numSamples = chunk.byteLength >> 1;
                 if (numSamples === 0) continue;
 
+                const float32Arr = new Float32Array(numSamples);
                 const view = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
                 for (let i = 0; i < numSamples; i++) {
-                    const s16 = view.getInt16(i * 2, true);
-                    pendingSamples.push(s16 / 32768.0);
+                    float32Arr[i] = view.getInt16(i * 2, true) / 32768.0;
                 }
 
-                if (!hasStarted) {
-                    if (pendingSamples.length >= prebufferSamples) {
-                        hasStarted = true;
-                        nextPlayTime = audioCtx.currentTime + 0.04;
-                        while (pendingSamples.length >= sliceSamples) {
-                            scheduleSlice(new Float32Array(pendingSamples.splice(0, sliceSamples)));
-                        }
-                    }
-                } else {
-                    while (pendingSamples.length >= sliceSamples) {
-                        scheduleSlice(new Float32Array(pendingSamples.splice(0, sliceSamples)));
-                    }
+                if (!audioCtx || !isAudioPlaying) break;
+                const now = audioCtx.currentTime;
+                // Только начальная привязка к текущему времени при старте или обрыве сети:
+                if (nextPlayTime < now) {
+                    nextPlayTime = now + 0.06;
                 }
+
+                const audioBuf = audioCtx.createBuffer(1, float32Arr.length, AUDIO_SR);
+                audioBuf.getChannelData(0).set(float32Arr);
+
+                const src = audioCtx.createBufferSource();
+                src.buffer = audioBuf;
+                src.connect(audioCtx.destination);
+                src.start(nextPlayTime);
+                nextPlayTime += float32Arr.length / AUDIO_SR;
             }
         } catch (err) {
-            if (isAudioPlaying) console.warn("WebAudio stream interrupted:", err);
+            if (isAudioPlaying) console.warn("WebAudio stream closed:", err);
         }
     })();
 }
-
 function stopWebAudioStream() {
     if (audioAbortCtrl) {
         try { audioAbortCtrl.abort(); } catch (e) {}

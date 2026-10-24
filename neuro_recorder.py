@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS SESSION RECORDER (TRUE 1:1 REAL-TIME TIMELINE SYNCHRONIZER)
+NEUROCANVAS SESSION RECORDER (AUTO-RECONNECTING ZERO-LOSS MULTIMODAL CAPTURE)
 ===================================================================================
-- ИСТИННЫЙ 1:1 ХРОНОМЕТРАЖ: Кадры удерживаются в MP4 ровно столько, сколько они
-  висели на экране у человека (нулевое ускорение, воспроизведение в реальном темпе).
-- ZERO-CUMULATIVE-DRIFT: Привязка тиков видео к аппаратному LSL local_clock().
-- БЕЗОПАСНЫЙ ИМПОРТ: В окружении MusicGen cv2 опционален и не требует установки.
+- НЕПРЕРЫВНЫЙ АВТО-ПОИСК LSL (resolve_streams каждые 0.5с):
+  Поток ЭЭГ подхватывается на лету, даже если донгл/BLE включили ПОСЛЕ старта записи!
+- БУФЕР 360 СЕКУНД: Ноль потерь пакетов при любой нагрузке GPU.
+- ИСТИННЫЙ 1:1 ХРОНОМЕТРАЖ: Видео и ЭЭГ привязаны к аппаратному local_clock().
 ===================================================================================
 """
 
@@ -18,7 +18,7 @@ import csv
 import threading
 import numpy as np
 from pathlib import Path
-from pylsl import local_clock, StreamInfo, StreamOutlet, resolve_byprop, StreamInlet
+from pylsl import local_clock, StreamInfo, StreamOutlet, resolve_streams, StreamInlet
 
 try:
     import cv2
@@ -61,27 +61,49 @@ class NeuroSessionRecorder:
 
     def _eeg_capture_loop(self):
         inlets = []
-        try:
-            streams = resolve_byprop('type', 'EEG', timeout=2.0)
-            for s in streams:
-                inlets.append(StreamInlet(s, max_buflen=1, max_chunklen=32, recover=True))
-        except Exception:
-            pass
+        connected_uids = set()
+        last_resolve_t = 0.0
 
         while not self.stop_eeg_event.is_set():
-            pulled_any = False
-            for inl in inlets:
+            now = time.time()
+            # Каждые 0.5с проверяем наличие новых/переподключенных LSL потоков ЭЭГ!
+            if now - last_resolve_t >= 0.50:
+                last_resolve_t = now
                 try:
-                    chunk, timestamps = inl.pull_chunk(timeout=0.0, max_samples=64)
-                    if timestamps:
+                    all_streams = resolve_streams(wait_time=0.05)
+                    live_uids = {s.source_id() for s in all_streams}
+                    
+                    # Убираем отключенные
+                    inlets = [inl for inl in inlets if inl.info().source_id() in live_uids]
+                    connected_uids = {inl.info().source_id() for inl in inlets}
+
+                    for s in all_streams:
+                        uid = s.source_id()
+                        stype = s.type().upper()
+                        sname = s.name().upper()
+                        if uid not in connected_uids and (stype == 'EEG' or 'FREEEEG' in sname or 'USER' in sname):
+                            # Буфер 360 секунд, чтобы ни один сэмпл не пропал!
+                            inl = StreamInlet(s, max_buflen=360, max_chunklen=64, recover=True)
+                            inlets.append(inl)
+                            connected_uids.add(uid)
+                            print(f"⚡ [RECORDER LSL] Захвачен поток ЭЭГ: '{s.name()}' ({s.channel_count()} кан, {s.nominal_srate():.0f} Гц)")
+                except Exception:
+                    pass
+
+            pulled_any = False
+            for inl in list(inlets):
+                try:
+                    chunk, timestamps = inl.pull_chunk(timeout=0.0, max_samples=128)
+                    if timestamps and len(timestamps) > 0:
                         pulled_any = True
                         with self.lock:
                             self.eeg_timestamps.extend(timestamps)
                             self.eeg_samples.extend(chunk)
                 except Exception:
                     pass
+
             if not pulled_any:
-                time.sleep(0.002)
+                time.sleep(0.005)
 
     def start_session(self, session_name=None):
         with self.lock:
@@ -109,8 +131,8 @@ class NeuroSessionRecorder:
             self.video_writer = None
             self.video_dims = None
             
-            self.eeg_timestamps = []
-            self.eeg_samples = []
+            self.eeg_timestamps.clear()
+            self.eeg_samples.clear()
             
             self.t_session_start = local_clock()
             self.last_frame_bgr = None
@@ -127,7 +149,7 @@ class NeuroSessionRecorder:
             self.eeg_thread.start()
 
             self.marker_outlet.push_sample([f"SESSION_START|{s_name}"], timestamp=self.t_session_start)
-            print(f"\n🔴 [RECORDER] Сессия запущена (Хронометраж 1:1, {self.video_fps} FPS): {self.session_dir}")
+            print(f"\n🔴 [RECORDER] Сессия запущена: {self.session_dir}")
             return str(self.session_dir)
 
     def _flush_previous_frame_ticks(self, current_t: float):
@@ -235,8 +257,20 @@ class NeuroSessionRecorder:
             if cv2 is not None and self.video_path.exists() and self.video_path.stat().st_size < 1000 and self.unique_frames_count > 0:
                 self._rebuild_timeline_video()
 
-            eeg_arr = np.array(self.eeg_samples, dtype=np.float32)
-            ts_arr = np.array(self.eeg_timestamps, dtype=np.float64)
+            # Сохранение массива ЭЭГ
+            n_samples = len(self.eeg_samples)
+            if n_samples > 0:
+                eeg_arr = np.array(self.eeg_samples, dtype=np.float32)
+                ts_arr = np.array(self.eeg_timestamps, dtype=np.float64)
+                eeg_dur = float(ts_arr[-1] - ts_arr[0]) if len(ts_arr) > 1 else 0.0
+                ch_count = eeg_arr.shape[1] if eeg_arr.ndim > 1 else 16
+                print(f"💾 [RECORDER] Успешно записано ЭЭГ: {n_samples} сэмплов ({ch_count} каналов, {eeg_dur:.2f} сек)")
+            else:
+                print(f"⚠️ [RECORDER ПРЕДУПРЕЖДЕНИЕ] За сессию не пришло ни одного сэмпла ЭЭГ! (Проверьте, что LSL-поток был активен)")
+                eeg_arr = np.zeros((0, 16), dtype=np.float32)
+                ts_arr = np.zeros(0, dtype=np.float64)
+                eeg_dur = 0.0
+
             np.savez_compressed(
                 self.session_dir / "eeg_raw.npz",
                 data=eeg_arr,
@@ -251,14 +285,14 @@ class NeuroSessionRecorder:
                 "video_fps": self.video_fps,
                 "duration_seconds": total_sec,
                 "video_duration_seconds": self.total_video_ticks / self.video_fps,
-                "eeg_samples_count": len(ts_arr),
-                "eeg_duration_seconds": float(ts_arr[-1] - ts_arr[0]) if len(ts_arr) > 1 else 0.0,
+                "eeg_samples_count": n_samples,
+                "eeg_duration_seconds": eeg_dur,
                 "created_at": time.ctime()
             }
             with open(self.session_dir / "manifest.json", "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=2, ensure_ascii=False)
 
-            print(f"⏹️ [RECORDER] Сессия сохранена: {self.session_dir}")
+            print(f"⏹️ [RECORDER] Сессия полностью закрыта и запечатана: {self.session_dir}")
             res_dir = str(self.session_dir)
             self.session_dir = None
             return res_dir

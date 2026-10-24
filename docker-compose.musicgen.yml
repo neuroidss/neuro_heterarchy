@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  neuro-all:
+    image: neuroidss/neuro_heterarchy_musicgen:latest
+    container_name: neuro_musicgen_local
+    working_dir: /app
+    network_mode: host
+    ipc: host
+    shm_size: "4gb"
+    environment:
+      - HF_HOME=/workspace/hf_cache
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ~/.cache/huggingface:/workspace/hf_cache
+      - .:/app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      bash -c "
+      mkdir -p /workspace/hf_cache /workspace/logs &&
+      python3 -u /app/musicgen_server.py --port 6005 --model facebook/musicgen-small --quiet-step &
+      python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem &
+      sleep 3 &&
+      python3 -u /app/neuro_heterarchy_musicgen.py --headless --mode semantic --concepts "psychedelic drums" --gateway-port 6003 &
+      wait
+      "

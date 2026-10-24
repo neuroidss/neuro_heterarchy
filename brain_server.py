@@ -15,11 +15,14 @@ from render_logic import NeuroRender
 def main():
     parser = argparse.ArgumentParser(description="NeuroCanvas Fast Brain Server")
     parser.add_argument('--mode', type=str, default="lcm", choices=["lcm", "turbo", "sdxl-turbo"])
+    parser.add_argument('--stochastic', action='store_true', default=False,
+                        help="Вернуть старый стохастический (случайный) шум на каждом кадре вместо детерминированного")
     args = parser.parse_args()
 
-    print("🧠 STARTING FAST NEURAL BRAIN SERVER (CUDA BACKEND) 🧠")
+    deterministic = not args.stochastic
+    print(f"🧠 STARTING FAST NEURAL BRAIN SERVER (CUDA BACKEND | Deterministic={deterministic}) 🧠")
     current_mode = args.mode
-    render = NeuroRender(mode=current_mode, use_taesd=True)
+    render = NeuroRender(mode=current_mode, use_taesd=True, deterministic=deterministic)
 
     listener = Listener(('localhost', 6000), authkey=b'brain')
     print(f"🧠 Server is ACTIVE in [{current_mode.upper()}] mode on localhost:6000...")
@@ -35,11 +38,14 @@ def main():
                     if cmd == 'init_mode':
                         req_mode = msg.get('mode', current_mode)
                         req_taesd = msg.get('use_taesd', render.use_taesd)
+                        if 'deterministic' in msg:
+                            render.deterministic = bool(msg['deterministic'])
 
                         if req_mode != current_mode:
+                            det_flag = render.deterministic
                             del render
                             torch.cuda.empty_cache()
-                            render = NeuroRender(mode=req_mode, use_taesd=req_taesd)
+                            render = NeuroRender(mode=req_mode, use_taesd=req_taesd, deterministic=det_flag)
                             current_mode = req_mode
                         else:
                             render.set_taesd(req_taesd)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: REAL-TIME MUSICGEN GENERATIVE RUNNER (AUTO-MIN BLOCK = 0 DEFAULT)
+NEUROCANVAS: REAL-TIME MUSICGEN RUNNER (POWERED BY SHARED AMODAL GPU BUS)
 ===================================================================================
 """
 
@@ -29,9 +29,13 @@ for p in [CURRENT_DIR, CURRENT_DIR / "src", CURRENT_DIR.parent / "src"]:
     if p.exists() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from neuro_heterarchy_core import HeterarchicalBrainEngine, DEVICE
-from neuro_genesis_engine import SelfSufficientHeterarchyRouter, MAX_SLOTS_CAPACITY
-from music_genesis_engine import UniversalMusicSemanticSpace, MusicHeterarchyDeltaProcessor
+from neuro_heterarchy_core import DEVICE
+from neuro_genesis_engine import SelfSufficientHeterarchyRouter
+from music_genesis_engine import UniversalMusicSemanticSpace
+from neuro_amodal_engine import (
+    SharedAmodalCognitiveEngine,
+    project_amodal_bus_to_musicgen_gpu,
+)
 
 SAMPLE_RATE = 32000
 audio_playback_queue = queue.Queue(maxsize=100)
@@ -286,7 +290,7 @@ def parse_initial_music_concepts(lore_file: str | None, concepts_cli: str | None
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NeuroCanvas Dynamic MusicGen Heterarchy")
+    parser = argparse.ArgumentParser(description="NeuroCanvas Dynamic MusicGen Heterarchy (Shared Amodal Bus)")
     parser.add_argument('--lore', '--concepts-file', dest='lore_file', type=str, default=None)
     parser.add_argument('--concepts', type=str, default=None)
     parser.add_argument('--users', type=str, default=None)
@@ -297,7 +301,6 @@ def main():
     parser.add_argument('--mode', type=str, default="semantic", choices=["semantic", "turbo"])
     parser.add_argument('--gateway-port', type=int, default=6003)
 
-    # По умолчанию target_block = 0.0 (Авто-минимизация блока до предела ускорителя)
     parser.add_argument('--target-block', type=float, default=0.0)
     parser.add_argument('--target-context', type=float, default=3.6)
     parser.add_argument('--target-buffer-count', type=int, default=2)
@@ -348,12 +351,13 @@ def main():
         global_svd_bases=resp.get('global_svd_bases')
     )
     router = SelfSufficientHeterarchyRouter(args.users)
-    processor = MusicHeterarchyDeltaProcessor(
-        semantic=semantic,
+
+    # Подключаемся к единому амодальному движку рабочей памяти (или поднимаем его, если мы первые)
+    amodal_engine = SharedAmodalCognitiveEngine(
         router=router,
+        gamma_max=args.gamma_max,
         strength_low=args.strength_low,
-        strength_high=args.strength_high,
-        seal_thresh=args.seal_thresh
+        strength_high=args.strength_high
     )
 
     hud = None
@@ -363,9 +367,6 @@ def main():
 
     if enable_local_sound:
         threading.Thread(target=audio_playback_worker, args=(runtime_config['target_buffer_count'],), daemon=True).start()
-
-    engine = HeterarchicalBrainEngine(gamma_max=args.gamma_max)
-    engine.start()
 
     worker = AsyncMusicWorker(
         conn, runtime_config, semantic=semantic,
@@ -380,14 +381,12 @@ def main():
         while True:
             dt = 0.016 if hud else 0.05
             if hud:
-                dt, commands = hud.poll_events(len(engine.get_frame().nodes))
+                dt, commands = hud.poll_events(16)
                 for cmd, payload in commands:
                     if cmd == "set_role":
                         router.set_role(payload[0], payload[1])
                     elif cmd == "reset_seals":
-                        for eng in processor.engines.values():
-                            eng.seals.charge.fill(0)
-                            eng.seals.mask = [False] * MAX_SLOTS_CAPACITY
+                        amodal_engine.reset_seals()
                     elif cmd == "flush_audio":
                         worker.flush()
                     elif cmd == "adj_param":
@@ -397,21 +396,21 @@ def main():
                         elif p_name == "temp":
                             runtime_config['temp'] = float(np.clip(runtime_config['temp'] + delta, 0.3, 1.8))
 
-            frame = engine.get_frame()
-            if frame.num_live == 0:
+            bus, has_live = amodal_engine.step(dt)
+            if not has_live:
                 time.sleep(0.05)
                 continue
 
-            target_out, b_sec, c_sec, t_val, k_val, cfg_c, telem = processor.step(
-                frame, dt,
-                mode=args.mode,
+            target_out, b_sec, c_sec, t_val, k_val, cfg_c, telem = project_amodal_bus_to_musicgen_gpu(
+                bus, semantic,
                 target_block=runtime_config['target_block'],
                 target_context=runtime_config['target_context'],
                 base_temp=runtime_config['temp'],
                 base_top_k=runtime_config['top_k'],
                 cfg_coef=runtime_config['cfg_coef'],
                 strength_low=runtime_config['strength_low'],
-                strength_high=runtime_config['strength_high']
+                strength_high=runtime_config['strength_high'],
+                need_ui_telemetry=(hud is not None or args.minimal_ui)
             )
 
             cur_ema_param = float(runtime_config.get('ema_smooth', 0.20))
@@ -452,7 +451,7 @@ def main():
     finally:
         stop_playback.set()
         worker.running = False
-        engine.stop()
+        amodal_engine.stop()
         if hud:
             hud.close()
 
