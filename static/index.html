@@ -21,7 +21,7 @@
             margin-bottom: 14px; 
         }
         h1 { font-size: 17px; margin: 0; color: #00ffc8; }
-        .layout { display: grid; grid-template-columns: 1fr 460px; gap: 16px; }
+        .layout { display: grid; grid-template-columns: 1fr 480px; gap: 16px; }
 
         .canvas-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
         .toolbar-label { font-size: 11px; color: #64748b; }
@@ -58,6 +58,10 @@
             border: 1px solid #1e293b; 
             margin-bottom: 12px; 
         }
+        .panel-video {
+            border: 1px solid #00ffc8;
+            background: #0b1526;
+        }
         h3 { 
             color: #38bdf8; 
             margin-top: 0; 
@@ -89,12 +93,14 @@
         }
         .btn-green { background: #059669; color: #fff; }
         .btn-green:hover { background: #10b981; }
+        .btn-blue { background: #0284c7; color: #fff; }
+        .btn-blue:hover { background: #38bdf8; color: #000; }
         .btn-audio { background: #e11d48; color: #fff; margin-bottom: 8px; }
         .btn-audio.playing { background: #059669; }
         .btn-red { background: #e11d48; color: #fff; }
         .btn-red:hover { background: #f43f5e; }
         .btn-gray { background: #334155; color: #fff; }
-        .btn-fixed { width: 90px; }
+        .btn-fixed { width: 95px; }
 
         .device-card { 
             background: #131d2e; 
@@ -139,6 +145,7 @@
         }
         .concept-chip span { color: #00ffc8; font-weight: bold; margin-right: 5px; }
         .concept-chip.music span { color: #f43f5e; }
+        .concept-chip.video-active { border-color: #fbbf24; background: #2e2612; }
         .concept-chip button { background: none; border: none; color: #f43f5e; cursor: pointer; font-weight: bold; }
 
         .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; }
@@ -160,6 +167,15 @@
         }
         .probe-switch input { width: 20px; height: 20px; }
 
+        .reg-gain-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-top: 4px; }
+        .reg-gain-box { background: #131d2e; border: 1px solid #334155; border-radius: 4px; padding: 4px; text-align: center; }
+        .reg-gain-box.user-on { border-color: #00ffc8; background: #0c2b2e; }
+        .reg-gain-box b { font-size: 10px; color: #00ffc8; display: block; margin-bottom: 2px; }
+
+        .bar-wrap { background: #1e293b; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 3px; }
+        .bar-fill-stage { background: #38bdf8; height: 100%; width: 0%; transition: width 0.2s; }
+        .bar-fill-psi { background: #d946ef; height: 100%; width: 0%; transition: width 0.2s; }
+
         .empty-state { color: #64748b; font-size: 11px; text-align: center; margin-top: 6px; }
         .empty-concepts { color: #64748b; font-size: 10px; }
         .concept-container { min-height: 24px; }
@@ -168,6 +184,7 @@
         .row-between { display: flex; justify-content: space-between; align-items: center; }
         .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
         .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+        .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
         .lag-status { font-size: 11px; color: #38bdf8; font-weight: bold; margin-bottom: 6px; }
         .monty-bar { background: #131d2e; border: 1px solid #334155; padding: 6px 8px; border-radius: 4px; font-size: 11px; color: #00ffc8; margin: 6px 0; }
         .rec-status { font-size: 10px; color: #64748b; margin-top: 4px; }
@@ -181,7 +198,7 @@
 </head>
 <body>
     <header class="header">
-        <h1>🧠 NeuroCanvas Production Studio (Unified Multimodal)</h1>
+        <h1>🧠 NeuroCanvas Production Studio (3D-DiT Video World × 2D Diffusion × MusicGen)</h1>
         <div>
             <span class="badge badge-blue" id="netBadge">HTTPS SECURE</span>
             <span class="badge badge-gray" id="recBadge">ЗАПИСЬ: ВЫКЛ</span>
@@ -214,14 +231,128 @@
                 </div>
             </div>
 
+            <!-- ========================================================================= -->
+            <!-- НОВАЯ СПЕЦИФИЧЕСКАЯ ПАНЕЛЬ УПРАВЛЕНИЯ 3D-DiT ВИДЕО-ТРАНСФОРМЕРОМ          -->
+            <!-- ========================================================================= -->
+            <div class="panel panel-video">
+                <h3 style="color:#00ffc8;">🎬 3D-DiT Видео-Трансформер (Порегионная 4096-D Гетерархия)</h3>
+                <div id="videoLagStatus" class="lag-status">
+                    3D-DiT: Ожидание подключения порта 6007...
+                </div>
+
+                <label>Источник концептов (Пусто = Свободный 4096-D дрейф по матрице T5):</label>
+                <div class="input-row">
+                    <select id="videoLoreSelect">
+                        <option value="">[Пусто — Свободный 4096-D дрейф без лор-файла]</option>
+                    </select>
+                    <button type="button" class="btn btn-blue btn-fixed" id="btnVideoResetGenesis">🔄 СБРОС</button>
+                </div>
+                
+                <label>Стартовая Карта / Картинка Мира (PNG/JPG — держит стены даже с пустым лором):</label>
+                <div class="input-row">
+                    <input type="file" id="videoInitImageInput" accept="image/*">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnUploadInitImage">🖼️ В МИР</button>
+                </div>
+
+                <div class="grid-2 mt-4">
+                    <div>
+                        <label>AFz Интеграция (tau=1.2s): <b id="afzStageTxt" style="color:#38bdf8;">0%</b></label>
+                        <div class="bar-wrap"><div class="bar-fill-stage" id="afzStageBar"></div></div>
+                    </div>
+                    <div>
+                        <label>Fpz Мета-Заряд (tau=5.0s): <b id="fpzPsiTxt" style="color:#d946ef;">0%</b></label>
+                        <div class="bar-wrap"><div class="bar-fill-psi" id="fpzPsiBar"></div></div>
+                    </div>
+                </div>
+
+                <label class="mt-6">Порегионная Динамика / Стабильность (0.04 = Стабилен, 0.92 = Супер-Реалтайм):</label>
+                <div class="reg-gain-grid">
+                    <div class="reg-gain-box" id="vBoxFpz"><b>Fpz</b><input type="number" id="vGainFpz" value="0.06" min="0" max="1" step="0.04"></div>
+                    <div class="reg-gain-box" id="vBoxAfz"><b>AFz</b><input type="number" id="vGainAfz" value="0.08" min="0" max="1" step="0.04"></div>
+                    <div class="reg-gain-box" id="vBoxF3"><b>F3</b><input type="number" id="vGainF3" value="0.08" min="0" max="1" step="0.04"></div>
+                    <div class="reg-gain-box" id="vBoxF4"><b>F4</b><input type="number" id="vGainF4" value="0.10" min="0" max="1" step="0.04"></div>
+                    <div class="reg-gain-box user-on" id="vBoxFcz"><b>FCz</b><input type="number" id="vGainFcz" value="0.92" min="0" max="1" step="0.04"></div>
+                </div>
+
+                <div class="grid-3 mt-4">
+                    <div>
+                        <label>Авто-Буст Девайса:</label>
+                        <select id="vAutoBoost">
+                            <option value="1" selected>ВКЛ (Где девайс = Max)</option>
+                            <option value="0">Ручной по регионам</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Gain с девайсом:</label>
+                        <input type="number" id="vActiveUserGain" value="0.92" min="0.20" max="0.98" step="0.04">
+                    </div>
+                    <div>
+                        <label>Gain без девайса:</label>
+                        <input type="number" id="vInactiveBaseGain" value="0.06" min="0.00" max="0.50" step="0.02">
+                    </div>
+                </div>
+
+                <label class="mt-6">Пул концептов выбранного региона коры (Пусто = Свободный дрейф региона):</label>
+                <select id="videoRegionSelect">
+                    <option value="FCZ" selected>[FCZ] — SMA (Гамма-динамика действий, tau=0.025s)</option>
+                    <option value="F3">[F3] — L-dlPFC (ON-подпространство структуры, tau=0.35s)</option>
+                    <option value="F4">[F4] — R-dlPFC (OFF-подпространство контекста, tau=0.35s)</option>
+                    <option value="AFZ">[AFZ] — dmPFC (Композиционные правила A ⊃ B, tau=1.20s)</option>
+                    <option value="FPZ">[FPZ] — BA10 (Смена мета-правил, tau=5.00s)</option>
+                    <option value="NEGATIVE">[NEGATIVE] — Исключаемое подпространство</option>
+                </select>
+                <div id="videoRegionConceptList" class="concept-container mt-4"></div>
+                <div class="input-row">
+                    <input type="text" id="newVideoRegionInput" placeholder="Добавить вектор-концепт в выбранный регион...">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnAddVideoConcept">+ В РЕГИОН</button>
+                </div>
+
+                <div class="grid-4 mt-6">
+                    <div>
+                        <label>Микро-Блок:</label>
+                        <select id="vNumFrames">
+                            <option value="5" selected>5 кадр (0.16с)</option>
+                            <option value="9">9 кадр (0.35с)</option>
+                            <option value="17">17 кадр (0.70с)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Контекст (кадр):</label>
+                        <input type="number" id="vContextRing" value="16" min="4" max="32" step="2">
+                    </div>
+                    <div>
+                        <label>Geodesic Lock:</label>
+                        <input type="number" id="vGeodesicLock" value="0.18" min="0.04" max="0.65" step="0.02">
+                    </div>
+                    <div>
+                        <label>Шаги DiT:</label>
+                        <input type="number" id="vSteps" value="4" min="2" max="10" step="1">
+                    </div>
+                </div>
+                <div class="grid-3 mt-4">
+                    <div>
+                        <label>Проникновение:</label>
+                        <input type="number" id="vCrossBleed" value="0.25" min="0.00" max="0.80" step="0.05">
+                    </div>
+                    <div>
+                        <label>Каскад FCz➔Верх:</label>
+                        <input type="number" id="vCascadeRate" value="1.0" min="0.1" max="3.0" step="0.2">
+                    </div>
+                    <div>
+                        <label>Порог Fpz:</label>
+                        <input type="number" id="vPsiThresh" value="0.55" min="0.20" max="0.90" step="0.05">
+                    </div>
+                </div>
+            </div>
+
             <div class="panel">
                 <h3>🪜 Межрегиональная Гетерархия Монти (FCz ➔ Fpz)</h3>
                 <label>Ступень разморозки регионов (Лестница обучения):</label>
                 <select id="ladderStageSelect">
-                    <option value="1">Ступень 1: FCz Действия (20с тест, верх заморожен)</option>
+                    <option value="1" selected>Ступень 1: FCz Действия (Верх стабилен, только FCz мега-быстрый)</option>
                     <option value="2">Ступень 2: +F3/F4 Структурная Форма и Стиль</option>
                     <option value="3">Ступень 3: +AFz Композиционная Матрёшка (A ⊃ B)</option>
-                    <option value="4" selected>Ступень 4: +Fpz Полная Гетерархия и Колесо Эпох</option>
+                    <option value="4">Ступень 4: +Fpz Полная Гетерархия и Колесо Эпох</option>
                 </select>
                 <div id="montyStatusBar" class="monty-bar">
                     Loss (MSE): 0.0200 | Persistence: 0.00 | Surprise: 0.00
@@ -229,28 +360,28 @@
             </div>
 
             <div class="panel">
-                <h3>🎨 Визуальный мир (Диффузия — Zero-Buffer Realtime)</h3>
+                <h3>🎨 2D-Диффузия Картинок (LCM / SD-Turbo / SDXL — Отдельный режим)</h3>
                 <div id="diffLagStatus" class="lag-status">
                     Буфер: 0.00с (0 кадр) | FPS: 0.0 (0 мс) | Шаги: 2 | 512×384 | TAESD+Color 🟢
                 </div>
 
-                <label>Активный пул образов (Пусто = Свободный дрейф):</label>
+                <label>Активный пул 2D-образов (Пусто = Свободный дрейф):</label>
                 <div id="visionConceptList" class="concept-container"></div>
                 <div class="input-row">
-                    <input type="text" id="newVisionInput" placeholder="Новый визуальный образ...">
+                    <input type="text" id="newVisionInput" placeholder="Новый 2D визуальный образ...">
                     <button type="button" class="btn btn-green btn-fixed" id="btnAddVision">+ ОБРАЗ</button>
                 </div>
                 
-                <label class="mt-6">Архитектура модели (GPU VRAM):</label>
+                <label class="mt-6">Архитектура 2D-модели (GPU VRAM):</label>
                 <select id="diffModel">
-                    <option value="lcm" selected>⚡ LCM Dreamshaper v7 (SD 1.5 | 2.2 GB VRAM — Быстрая классика)</option>
-                    <option value="sd-turbo">🚀 SD-Turbo (SD 2.1 | 2.8 GB VRAM — 1-шаговая резкость)</option>
-                    <option value="sdxl-turbo">💎 SDXL-Turbo (SDXL 1.0 | 6.5 GB VRAM — Кинематограф для 4090/5090)</option>
+                    <option value="lcm" selected>⚡ LCM Dreamshaper v7 (SD 1.5 | 2.2 GB VRAM)</option>
+                    <option value="sd-turbo">🚀 SD-Turbo (SD 2.1 | 2.8 GB VRAM)</option>
+                    <option value="sdxl-turbo">💎 SDXL-Turbo (SDXL 1.0 | 6.5 GB VRAM)</option>
                 </select>
 
-                <label class="mt-8">Режим динамики (Пресеты):</label>
+                <label class="mt-8">Режим динамики 2D-диффузии (Пресеты):</label>
                 <select id="diffPreset">
-                    <option value="meditation">🧘 Глубокая медитация (Плавный связный мир: Steps 0, Ctx 0.30, EMA 0.28)</option>
+                    <option value="meditation">🧘 Глубокая медитация (Steps 0, Ctx 0.30, EMA 0.28)</option>
                     <option value="balanced" selected>⚖️ Баланс / Авто-Реалтайм (Steps 0 Авто, Ctx 0.18, EMA 0.12)</option>
                     <option value="dynamic">⚡ Мгновенный отклик (Steps 2, Ctx 0.05, EMA 0.05)</option>
                     <option value="custom">🛠️ Пользовательский (Ручная настройка)</option>
@@ -287,17 +418,10 @@
                     <div><label>Связность:</label><input type="number" id="diffWorldContext" value="0.18" min="0.00" max="0.60" step="0.04"></div>
                 </div>
                 <div class="mt-4">
-                    <label>EMA Плавность мысли (0.04 = резкая смена, 0.35 = плавный морфинг):</label>
+                    <label>EMA Плавность мысли:</label>
                     <input type="number" id="diffEmaSmooth" value="0.12" min="0.02" max="0.50" step="0.02">
                 </div>
             </div>
-
-                <label>Активные музыкальные темы (Пусто = Свободный дрейф по словарю T5):</label>
-                <div id="musicConceptList" class="concept-container"></div>
-                <div class="input-row">
-                    <input type="text" id="newMusicInput" placeholder="Новая музыкальная тема...">
-                    <button type="button" class="btn btn-green btn-fixed" id="btnAddMusic">+ ТЕМА</button>
-                </div>
 
             <div class="panel">
                 <h3>🔊 Музыкальный генератор (MusicGen 32 kHz)</h3>
@@ -307,18 +431,25 @@
                 <div id="musicLagStatus" class="lag-status">
                     Буфер: 0.0 с (0 чанков) | RTF: 1.0x | DynStr: 0.25
                 </div>
+
+                <label>Активные музыкальные темы (Пусто = Свободный дрейф по словарю T5):</label>
+                <div id="musicConceptList" class="concept-container"></div>
+                <div class="input-row">
+                    <input type="text" id="newMusicInput" placeholder="Новая музыкальная тема...">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnAddMusic">+ ТЕМА</button>
+                </div>
                 
                 <label class="mt-6">Модель MusicGen (GPU VRAM):</label>
                 <select id="musicModel">
-                    <option value="facebook/musicgen-small" selected>⚡ MusicGen Small (300M | 1.5 GB VRAM — Сверхбыстрый отклик)</option>
-                    <option value="facebook/musicgen-medium">🎵 MusicGen Medium (1.5B | 4.2 GB VRAM — Богатая аранжировка)</option>
-                    <option value="facebook/musicgen-melody">🎹 MusicGen Melody (1.5B | 4.5 GB VRAM — Выразительные мелодии)</option>
-                    <option value="facebook/musicgen-large">💎 MusicGen Large (3.3B | 8.5 GB VRAM — Максимум для 4090/5090)</option>
+                    <option value="facebook/musicgen-small" selected>⚡ MusicGen Small (300M | 1.5 GB VRAM)</option>
+                    <option value="facebook/musicgen-medium">🎵 MusicGen Medium (1.5B | 4.2 GB VRAM)</option>
+                    <option value="facebook/musicgen-melody">🎹 MusicGen Melody (1.5B | 4.5 GB VRAM)</option>
+                    <option value="facebook/musicgen-large">💎 MusicGen Large (3.3B | 8.5 GB VRAM)</option>
                 </select>
 
                 <label class="mt-8">Сила влияния рабочей памяти на музыку (Пресеты):</label>
                 <select id="musicPreset">
-                    <option value="meditation">🧘 Удержание темы (Связная песня: Ctx 2.8с, Str 0.12-0.45, EMA 0.35)</option>
+                    <option value="meditation">🧘 Удержание темы (Ctx 2.8с, Str 0.12-0.45, EMA 0.35)</option>
                     <option value="balanced" selected>⚖️ Баланс / Морфинг (Ctx 2.4с, Str 0.25-0.80, EMA 0.20)</option>
                     <option value="dynamic">⚡ Быстрый отклик на мозг (Ctx 1.6с, Str 0.40-0.95, EMA 0.08)</option>
                     <option value="custom">🛠️ Пользовательский (Ручная настройка)</option>
@@ -365,11 +496,11 @@
             
             <label>Кортикальная зона (10-20 EEG):</label>
             <select class="device-role-select">
-                <option value="AFz">AFz — Макросцена / Связи (A ⊃ B)</option>
-                <option value="Fpz">Fpz — BA 10 Колесо Эпох / Смена правил</option>
-                <option value="F3">F3  — Левый dlPFC (ON-Структура формы)</option>
-                <option value="F4">F4  — Правый dlPFC (OFF-Контекст / Сила)</option>
-                <option value="FCz">FCz — SMA (SVD-Действия смысла)</option>
+                <option value="FCz" selected>FCz — SMA (SVD-Действия смысла / Движение)</option>
+                <option value="AFz">AFz — Макросцена / Связи (A ⊃ B / Квест-стадии)</option>
+                <option value="Fpz">Fpz — BA 10 Правила правил (⚡ Ψ-Атака / Домен)</option>
+                <option value="F3">F3  — Левый dlPFC (ON-Структура формы / Стихия)</option>
+                <option value="F4">F4  — Правый dlPFC (OFF-Контекст / Свет)</option>
             </select>
 
             <div class="row-between mt-5">
@@ -403,3 +534,4 @@
     <script src="/static/app.js"></script>
 </body>
 </html>
+

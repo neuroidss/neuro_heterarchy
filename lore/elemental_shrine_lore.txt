@@ -1,0 +1,37 @@
+# ===================================================================================
+# LORE 2: ELEMENTAL SHRINE TRIAL & DOMAIN EXPANSION (SINGLE-SCREEN QUEST / DUEL)
+# ===================================================================================
+# Никакого лабиринта! Один фиксированный экран древнего святилища стихий:
+# - Fpz (Правила правил): Переход между Физическим Святилищем и Астральным Измерением (Психическая атака).
+# - AFz (Правила сцены): Стадии открытия древних каменных врат (Запечатаны -> Левый факел -> Оба факела и открытие врат).
+# - F3  (Форма стихии): Геометрия манифестации (Огненные клинки / Водяные вихри / Молнии).
+# - F4  (Стиль и атмосфера): Энергетическое свечение и частицы вокруг мага и жаровен.
+# - FCz (Быстрые действия): Мгновенные касты, удары стихией в левую/правую жаровню и концентрация.
+
+[FPZ]
+wide stationary camera view of an ancient stone elemental temple courtyard, two large unlit bronze braziers on left and right in foreground, giant sealed carved stone gate in background, clear composition
+surreal cosmic astral domain expansion, inverted gravity floating temple ruins, glowing purple psychic energy sky, reality-warping mental attack dimension, high contrast
+
+[AFZ]
+sealed ancient stone gate with dormant grey runes, two dark unlit bronze braziers on left and right sides of the altar
+left bronze brazier erupting with bright roaring fire, half of the stone gate runes glowing golden, right brazier still unlit
+both left and right bronze braziers blazing with elemental fire, giant stone gate glowing brightly and sliding open to reveal a blinding golden portal
+
+[F3]
+sharp crystalline pyro flame blades and geometric fire arcs, crisp structural edges, solid stone pillars
+spiraling hydro water vortexes and sharp ice lances, crisp refractive geometry, solid stone pillars
+jagged electro lightning bolts and plasma arcs, sharp high-contrast geometry, solid stone pillars
+
+[F4]
+warm amber firelight reflections on dark wet basalt floor, floating glowing embers, cinematic dramatic lighting, 8k sharp focus
+cool bioluminescent cyan mist and glowing water droplets, mystical temple illumination, 8k sharp focus
+intense violet electrical aura, glowing ozone sparks, high voltage atmospheric lighting, 8k sharp focus
+
+[FCZ]
+robes-clad elemental mage in center casting a blazing fireball strike towards the left bronze brazier
+robes-clad elemental mage in center unleashing atwin elemental surge towards the right bronze brazier
+robes-clad elemental mage in center raising hands to channel a massive vertical pillar of light into the stone gate
+robes-clad elemental mage in center standing in calm meditative stance with orbiting elemental spheres
+
+[NEGATIVE]
+maze, labyrinth, top-down map, blurry, morphed gate, disappearing braziers, camera shake, extreme close-up, low resolution, washed out colors, text, watermark

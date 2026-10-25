@@ -6,8 +6,13 @@ NEUROCANVAS: 100% GPU VRAM-RESIDENT AMODAL COGNITIVE ENGINE (ZERO CPU / ZERO NUM
 - НИКАКОГО NUMPY ИЛИ /dev/shm MEMMAP В КОНВЕЙЕРЕ:
   Вся математика и вся передача состояния между процессами одного окружения (Video /
   Diffusion) идет исключительно через видеопамять GPU (CUDA IPC _share_cuda_).
-- Компактные матрицы Монти W_out (32*120 x 4096 = 60 МБ) и in-place операция addr_()
-  гарантируют малое потребление VRAM (~280 МБ на все 5 регионов коры).
+- ПОРЕГИОННЫЙ КОНТРОЛЬ АКТИВНОСТИ ЮЗЕРА И МЕЖРЕГИОНАЛЬНОГО ПРОНИКНОВЕНИЯ:
+  * В meta_64[21:26] в реальном времени публикуется точная маска физических девайсов
+    по 5 регионам (AFz, FCz, F3, F4, Fpz) с мгновенным подхватом переключений роли
+    из веб-интерфейса!
+  * В регионы без физического девайса проникает живая активность из активного региона
+    юзера через каузальную гетерархию SDR Монти (W_topdown_sdr и upward_sdr_anomaly)
+    и фазовое поле рабочей памяти.
 ===================================================================================
 """
 
@@ -46,7 +51,7 @@ BAND_RIPPLES = 4
 
 REGION_ROLES = ["AFz", "FCz", "F3", "F4", "Fpz"]
 REGION_TAU_SEC = {
-    "FCz": 0.04,
+    "FCz": 0.025,  # Сверхбыстрый гамма-отклик действий в супер-реалтайме
     "F3":  0.35,
     "F4":  0.35,
     "AFz": 1.20,
@@ -149,7 +154,6 @@ class HardwareVRAMBus:
             with open(IPC_HANDLE_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
             owner_pid = int(d["pid"])
-            # Проверяем, что процесс-владелец действительно жив и файл свежий
             if owner_pid == os.getpid() or not os.path.exists(f"/proc/{owner_pid}"):
                 return False
             if int(d.get("total_floats", 0)) != TOTAL_AMODAL_FLOATS:
@@ -227,7 +231,9 @@ class DirectGPUSpectralFrontend(nn.Module):
         self.gamma_max = gamma_max
         self.inlets = [None] * NUM_MAX_DEVICES
         self.stream_uids = [""] * NUM_MAX_DEVICES
+        self.stream_names = [""] * NUM_MAX_DEVICES
         self.stream_roles = ["AFz"] * NUM_MAX_DEVICES
+        self.last_pull_time = [0.0] * NUM_MAX_DEVICES
         self.device_fs = [250.0] * NUM_MAX_DEVICES
         self.connected_uids = set()
         self.last_resolve_t = 0.0
@@ -246,17 +252,20 @@ class DirectGPUSpectralFrontend(nn.Module):
 
     def _poll_lsl_hotplug(self):
         now = time.time()
-        if now - self.last_resolve_t < 1.0:
+        if now - self.last_resolve_t < 0.8:
             return
         self.last_resolve_t = now
         try:
             streams = resolve_streams(wait_time=0.02)
             live_uids = {s.source_id() for s in streams}
             for i in range(NUM_MAX_DEVICES):
-                if self.inlets[i] is not None and self.stream_uids[i] not in live_uids:
-                    self.connected_uids.discard(self.stream_uids[i])
-                    self.inlets[i] = None
-                    self.stream_uids[i] = ""
+                if self.inlets[i] is not None:
+                    # Если стрим исчез из LSL или молчит дольше 2.5с (юзер переключил роль в браузере!), освобождаем слот
+                    if self.stream_uids[i] not in live_uids or (now - self.last_pull_time[i] > 2.5):
+                        self.connected_uids.discard(self.stream_uids[i])
+                        self.inlets[i] = None
+                        self.stream_uids[i] = ""
+                        self.stream_names[i] = ""
 
             for s in streams:
                 uid = s.source_id()
@@ -268,6 +277,8 @@ class DirectGPUSpectralFrontend(nn.Module):
                     self.inlets[slot] = inl
                     self.connected_uids.add(uid)
                     self.stream_uids[slot] = uid
+                    self.stream_names[slot] = s.name()
+                    self.last_pull_time[slot] = now
                     nom_sps = inl.info().nominal_srate()
                     self.device_fs[slot] = 500.0 if nom_sps > 350.0 else 250.0
                     _, r = parse_stream_identity(s.name())
@@ -396,6 +407,7 @@ class DirectGPUSpectralFrontend(nn.Module):
     @torch.no_grad()
     def pull_and_compute_gpu(self, router) -> Optional[dict]:
         self._poll_lsl_hotplug()
+        now = time.time()
         active_slots = [i for i, inl in enumerate(self.inlets) if inl is not None]
         if not active_slots:
             return None
@@ -404,6 +416,7 @@ class DirectGPUSpectralFrontend(nn.Module):
             try:
                 chunk, _ = self.inlets[i].pull_chunk(timeout=0.0, max_samples=BUF_SIZE)
                 if chunk:
+                    self.last_pull_time[i] = now
                     t_chunk = torch.tensor(chunk, dtype=torch.float32, device=DEVICE).T
                     n = t_chunk.shape[1]
                     if n >= BUF_SIZE:
@@ -415,17 +428,33 @@ class DirectGPUSpectralFrontend(nn.Module):
                 self.connected_uids.discard(self.stream_uids[i])
                 self.inlets[i] = None
 
-        active_slots = [i for i, inl in enumerate(self.inlets) if inl is not None]
-        if not active_slots:
+        # Оставляем только те слоты, куда реально приходят свежие пакеты (в пределах 1.5 сек)
+        fresh_slots = [
+            i for i, inl in enumerate(self.inlets)
+            if inl is not None and (now - self.last_pull_time[i] <= 1.5)
+        ]
+        if not fresh_slots:
+            fresh_slots = [i for i, inl in enumerate(self.inlets) if inl is not None]
+        if not fresh_slots:
             return None
 
-        sub_buf = self.raw_buf_gpu[active_slots]
+        sub_buf = self.raw_buf_gpu[fresh_slots]
         D = sub_buf.shape[0]
-        fs_vec = torch.tensor([self.device_fs[i] for i in active_slots], device=DEVICE).view(D, 1, 1)
-        roles = [
-            (router.overrides.get(s_i) or router.static_map.get(s_i) or self.stream_roles[s_i])
-            for s_i in active_slots
-        ]
+        fs_vec = torch.tensor([self.device_fs[i] for i in fresh_slots], device=DEVICE).view(D, 1, 1)
+
+        # ПРИОРИТЕТ РОЛИ: 1) явный override с клавиш HUD, 2) роль из имени LSL-стрима (динамическое переключение в Web UI!), 3) static_map CLI
+        roles = []
+        for s_i in fresh_slots:
+            stream_r = self.stream_roles[s_i]
+            sname = self.stream_names[s_i]
+            has_explicit_stream_role = any(r.lower() in sname.lower() for r in REGION_ROLES)
+            if s_i in router.overrides and router.overrides[s_i] is not None:
+                roles.append(router.overrides[s_i])
+            elif has_explicit_stream_role:
+                roles.append(stream_r)
+            else:
+                roles.append(router.static_map.get(s_i) or stream_r)
+
         return self.compute_from_buffer_gpu(sub_buf, fs_vec, roles)
 
 
@@ -471,7 +500,7 @@ class GPUSealEngine(nn.Module):
 
 
 class AmodalActionIntegratorGPU(nn.Module):
-    def __init__(self, sensitivity: float = 0.06, intent_gain: float = 1.6):
+    def __init__(self, sensitivity: float = 0.09, intent_gain: float = 2.2):
         super().__init__()
         self.sensitivity = sensitivity
         self.intent_gain = intent_gain
@@ -491,26 +520,26 @@ class AmodalActionIntegratorGPU(nn.Module):
         last_mag = torch.norm(self.last_chord_768)
         cos_th = torch.sum(chord * self.last_chord_768) / (mag * last_mag + 1e-6)
 
-        grow = (mag > 0.02) & (last_mag > 1e-4) & (cos_th > 0.75)
+        grow = (mag > 0.015) & (last_mag > 1e-4) & (cos_th > 0.65)
         new_pers = torch.where(
             grow,
-            torch.clamp(self.persistence + 0.05, max=1.0),
-            self.persistence * 0.94
+            torch.clamp(self.persistence + 0.08, max=1.0),
+            self.persistence * 0.92
         )
         self.persistence.copy_(new_pers)
         self.last_chord_768.copy_(chord)
 
-        smooth = 0.96 - (self.sensitivity * 0.1)
+        smooth = 0.92 - (self.sensitivity * 0.1)
         gain = self.sensitivity * self.intent_gain
-        ry_clamped = torch.clamp(temp_ry * 0.4, -0.4, 0.8)
-        active_boost = (1.0 + self.persistence * 4.0) * (1.0 + ry_clamped)
+        ry_clamped = torch.clamp(temp_ry * 0.5, -0.4, 0.9)
+        active_boost = (1.0 + self.persistence * 5.0) * (1.0 + ry_clamped)
 
         step_delta = projected * (gain * active_boost * (1.0 - smooth))
         self.state_16x768.mul_(smooth).add_(step_delta)
 
         s_norm = torch.norm(self.state_16x768, dim=-1, keepdim=True)
         self.state_16x768.copy_(
-            torch.where(s_norm > 6.0, (self.state_16x768 / (s_norm + 1e-6)) * 6.0, self.state_16x768)
+            torch.where(s_norm > 8.0, (self.state_16x768 / (s_norm + 1e-6)) * 8.0, self.state_16x768)
         )
         return self.state_16x768, self.persistence
 
@@ -550,32 +579,38 @@ class AmodalMontyColumnGPU(nn.Module):
         self.buf_ptr = 0
 
     @torch.no_grad()
-    def synthesize_virtual_gpu(self, master_iplv: torch.Tensor, master_rip: torch.Tensor, master_5x32x120: torch.Tensor):
+    def synthesize_virtual_gpu(self, master_iplv: torch.Tensor, master_rip: torch.Tensor,
+                               master_5x32x120: torch.Tensor, bleed_scale: float = 0.25):
+        """
+        Межрегиональное проникновение: когда на этом регионе нет прямого девайса юзера,
+        активность из регионов с девайсом проникает сюда с контролируемым коэффициентом bleed_scale,
+        фильтруясь через пространственную топологию диполей региона!
+        """
         if self.role == "Fpz":
             mask = self.geom["macro_mask"]
-            tgt = master_iplv * mask * 0.85
-            alpha = 0.08
+            tgt = master_iplv * mask * (0.85 * bleed_scale)
+            alpha = 0.06
         elif self.role == "F3":
             mask = self.geom["left_mask"]
-            tgt = torch.relu(master_iplv) * mask * 1.4
-            alpha = 0.25
+            tgt = torch.relu(master_iplv) * mask * (1.2 * bleed_scale)
+            alpha = 0.15
         elif self.role == "F4":
             mask = self.geom["right_mask"]
-            tgt = -torch.relu(-master_iplv) * mask * 1.4
-            alpha = 0.25
+            tgt = -torch.relu(-master_iplv) * mask * (1.2 * bleed_scale)
+            alpha = 0.15
         elif self.role == "FCz":
             mask = self.geom["micro_mask"]
             fast_diff = torch.roll(master_iplv, shifts=-1, dims=0) - master_iplv
-            tgt = (fast_diff * 0.6 + master_iplv * 0.4) * mask * 1.5
-            alpha = 0.50
+            tgt = (fast_diff * 0.6 + master_iplv * 0.4) * mask * (1.4 * bleed_scale)
+            alpha = 0.35
         else:
             mask = self.geom["meso_mask"] + self.geom["macro_mask"] * 0.5
-            tgt = master_iplv
-            alpha = 0.30
+            tgt = master_iplv * (1.0 * bleed_scale)
+            alpha = 0.18
 
         self.virtual_iplv.mul_(1.0 - alpha).add_(tgt, alpha=alpha)
-        self.virtual_rip.mul_(1.0 - alpha).add_(master_rip, alpha=alpha)
-        self.virtual_5x32x120.mul_(1.0 - alpha).add_(master_5x32x120 * mask.unsqueeze(0), alpha=alpha)
+        self.virtual_rip.mul_(1.0 - alpha).add_(master_rip * bleed_scale, alpha=alpha)
+        self.virtual_5x32x120.mul_(1.0 - alpha).add_(master_5x32x120 * mask.unsqueeze(0) * bleed_scale, alpha=alpha)
         return self.virtual_iplv, self.virtual_rip, self.virtual_5x32x120
 
     @torch.no_grad()
@@ -716,11 +751,13 @@ class AmodalMontyColumnGPU(nn.Module):
 
 
 class SharedAmodalCognitiveEngine:
-    def __init__(self, router, gamma_max: float = 100.0, strength_low: float = 0.50, strength_high: float = 0.85):
+    def __init__(self, router, gamma_max: float = 100.0, strength_low: float = 0.50,
+                 strength_high: float = 0.85, cross_region_bleed: float = 0.25):
         self.router = router
         self.gamma_max = gamma_max
         self.strength_low = strength_low
         self.strength_high = strength_high
+        self.cross_region_bleed = cross_region_bleed
         self.bus = HardwareVRAMBus()
         self.high_pri_stream = torch.cuda.Stream(device=DEVICE, priority=-1) if DEVICE.type == "cuda" else None
 
@@ -788,12 +825,17 @@ class SharedAmodalCognitiveEngine:
         child_map  = {"FCz": None, "F3": anom_fcz, "F4": anom_fcz, "AFz": anom_f34, "Fpz": anom_afz}
 
         res = {}
+        meta = self.bus.meta_64
         for r_idx, r in enumerate(REGION_ROLES):
-            if r in real_iplv:
+            is_phys = (r in real_iplv)
+            meta[21 + r_idx] = 1.0 if is_phys else 0.0
+            if is_phys:
                 ip_r, rp_r = real_iplv[r], real_rip[r]
                 b_5x32x120 = real_bands[r]
             else:
-                ip_r, rp_r, b_5x32x120 = self.columns[r].synthesize_virtual_gpu(master_iplv, master_rip, master_5x32x120)
+                ip_r, rp_r, b_5x32x120 = self.columns[r].synthesize_virtual_gpu(
+                    master_iplv, master_rip, master_5x32x120, bleed_scale=self.cross_region_bleed
+                )
 
             res[r] = self.columns[r].forward_gpu(
                 ip_r, rp_r, n_sec=n_sec, cur_sec=cur_sec, is_tick=is_tick, dt=dt,
@@ -808,8 +850,8 @@ class SharedAmodalCognitiveEngine:
             self.bus.seals_and_stabs_5x3x16[r_idx, 1, :n_sec].copy_(self.columns[r].seals.charge[:n_sec])
             self.bus.seals_and_stabs_5x3x16[r_idx, 2, :n_sec].copy_(self.columns[r].seals.mask[:n_sec])
 
-        apex_idx = next((i for i, r in enumerate(["AFz", "FCz", "F3", "F4", "Fpz"]) if r in real_iplv), 0)
-        apex_role = ["AFz", "FCz", "F3", "F4", "Fpz"][apex_idx]
+        apex_idx = next((i for i, r in enumerate(REGION_ROLES) if r in real_iplv), 0)
+        apex_role = REGION_ROLES[apex_idx]
         primary = res[apex_role]
         fcz_kin = real_kin.get("FCz", eeg_out["default_kin"])
 
@@ -842,7 +884,6 @@ class SharedAmodalCognitiveEngine:
         self.bus.slot_seals_16[:n_sec].copy_(self.columns[apex_role].seals.mask[:n_sec])
         self.bus.slot_norm_coord_16[:n_sec].copy_(primary["slot_norm_coord"])
 
-        meta = self.bus.meta_64
         meta[0]  = float(eeg_out["th_freq"].item())
         meta[1]  = float(n_sec)
         meta[2]  = float(cur_sec)

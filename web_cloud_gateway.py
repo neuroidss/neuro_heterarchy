@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v9.0 (SERVER-SIDE ENGINE BUFFER CLOCK)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v10.0
+(DEDICATED 3D-DiT VIDEO TRANSFORMER CONTROL — DECUPLED FROM 2D-DIFFUSION & MUSICGEN)
 ===================================================================================
-- Буфер музыки принадлежит СТРОГО серверному движку (расходуется на сервере
-  с точной частотой 32 000 Гц независимо от того, включен ли звук в браузере).
-- Браузер подключается к /audio.wav как к готовому радиоэфиру и ничего сам не считает.
+- Полностью разделены 3 конвейера управления:
+  1) Порт 6003 (authkey=b'audio')      -> MusicGen 32 kHz
+  2) Порт 6004 (authkey=b'diff_ctrl')  -> 2D Image Diffusion (LCM / SD-Turbo / SDXL)
+  3) Порт 6007 (authkey=b'video_ctrl') -> 3D-DiT Video World Transformer (LTX / Wan)
+- Специфическое для 3D-DiT управление в video_state:
+  * Горячее переключение файлов лора (maze_lore.txt <-> elemental_shrine_lore.txt) без рестарта!
+  * Порегионные банки концептов sections: {FPZ, AFZ, F3, F4, FCZ, NEGATIVE}.
+  * Порегионные коэффициенты динамики/стабильности region_gains: {Fpz, AFz, F3, F4, FCz}.
+  * Параметры видео-трансформера: num_frames (микро-блок), context_ring_len, geodesic_lock,
+    cascade_rate, psi_threshold, steps, genesis_steps, cfg_scale.
 ===================================================================================
 """
 
@@ -35,11 +43,13 @@ IPC_AUDIO_PORT = 6003
 IPC_AUDIO_AUTHKEY = b'audio'
 IPC_DIFF_CONTROL_PORT = 6004
 IPC_DIFF_AUTHKEY = b'diff_ctrl'
+IPC_VIDEO_CONTROL_PORT = 6007
+IPC_VIDEO_AUTHKEY = b'video_ctrl'
 
 NUM_CHANNELS = 16
 DEFAULT_SPS = 250.0
 SAMPLE_RATE = 32000
-TICK_SEC = 0.040  # 40 мс серверный квант вещания (1280 сэмплов = 2560 байт int16)
+TICK_SEC = 0.040
 TICK_SAMPLES = int(SAMPLE_RATE * TICK_SEC)
 TICK_FLOAT_BYTES = TICK_SAMPLES * 4
 
@@ -52,11 +62,9 @@ last_served_jpeg_id = 0
 jpeg_lock = threading.Lock()
 jpeg_cond = threading.Condition(jpeg_lock)
 
-# Внутренний буфер аудио-движка на сервере: список байтовых чанков float32
 engine_audio_chunks: list[bytearray] = []
 engine_audio_lock = threading.Lock()
 
-# Подписчики живого аудио-потока (браузеры с включенным звуком)
 audio_listeners: list[queue.Queue] = []
 audio_listeners_lock = threading.Lock()
 
@@ -68,6 +76,9 @@ music_conn_lock = threading.Lock()
 
 active_diff_ctrl_conn = None
 diff_ctrl_lock = threading.Lock()
+
+active_video_ctrl_conn = None
+video_ctrl_lock = threading.Lock()
 
 music_state = {
     "concepts": [],
@@ -119,12 +130,92 @@ world_state = {
 }
 world_state_lock = threading.Lock()
 
+
 sse_clients = []
 sse_lock = threading.Lock()
 
 
+def normalize_lore_relpath(p: str | None) -> str:
+    if not p or not str(p).strip():
+        return ""
+    s = str(p).strip()
+    base_prefix = BASE_DIR.rstrip("/") + "/"
+    if s.startswith(base_prefix):
+        s = s[len(base_prefix):]
+    elif s.startswith("/app/"):
+        s = s[len("/app/"):]
+    return s
+
+
+def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
+    sections = {"FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []}
+    rel_p = normalize_lore_relpath(lore_path)
+    if not rel_p:
+        return sections
+    full_p = os.path.join(BASE_DIR, rel_p)
+    if os.path.isfile(full_p):
+        cur = "FPZ"
+        with open(full_p, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if s.startswith("[") and s.endswith("]"):
+                    cur = s[1:-1].strip().upper()
+                    if cur not in sections:
+                        sections[cur] = []
+                else:
+                    sections[cur].append(s)
+    return sections
+
+
+def discover_available_lore_files() -> list[str]:
+    lore_dir = os.path.join(BASE_DIR, "lore")
+    found = [""]
+    if os.path.isdir(lore_dir):
+        for fname in sorted(os.listdir(lore_dir)):
+            if fname.endswith(".txt") or fname.endswith(".json"):
+                found.append(f"lore/{fname}")
+    return found
+
+# Специфическое состояние 3D-DiT Видео-Трансформера (отвязанное от 2D-Diffusion и MusicGen)
+video_state = {
+    "connected": False,
+    "lore_file": "",
+    "available_lores": discover_available_lore_files(),
+    "sections": {
+        "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
+    },
+    "region_gains": {
+        "Fpz": 0.06,
+        "AFz": 0.08,
+        "F3":  0.08,
+        "F4":  0.10,
+        "FCz": 0.92
+    },
+    "auto_active_boost": True,
+    "active_user_gain": 0.92,
+    "inactive_base_gain": 0.06,
+    "cross_region_bleed": 0.25,
+    "cascade_rate": 1.0,
+    "psi_threshold": 0.55,
+    "geodesic_lock": 0.18,
+    "num_frames": 5,
+    "context_ring_len": 16,
+    "steps": 4,
+    "genesis_steps": 12,
+    "cfg_scale": 3.2,
+    "fps": 0.0,
+    "gen_ms": 0.0,
+    "debug_tokens": "",
+    "fpz_meta_charge": 0.0,
+    "afz_stage_progress": 0.0,
+    "active_region_mask": {"Fpz": False, "AFz": False, "F3": False, "F4": False, "FCz": True},
+    "active_concept_idx": {"Fpz": 0, "AFz": 0, "F3": 0, "F4": 0, "FCz": 0}
+}
+video_state_lock = threading.Lock()
+
 def _recalc_and_push_buffer_locked():
-    """Пересчитывает реальный остаток серверного буфера движка и сообщает в MusicGen."""
     total_bytes = sum(len(c) for c in engine_audio_chunks)
     total_sec = total_bytes / float(SAMPLE_RATE * 4)
     total_chunks = len(engine_audio_chunks)
@@ -146,11 +237,6 @@ def _recalc_and_push_buffer_locked():
 
 
 def server_realtime_audio_clock():
-    """
-    Аппаратный серверный метроном 32 000 Гц.
-    Непрерывно расходует буфер движка со скоростью 1:1 реального времени на сервере,
-    даже если в браузере выключен звук. Браузер получает уже готовый поток!
-    """
     next_tick = time.perf_counter()
     last_sse_broadcast = 0.0
 
@@ -424,8 +510,8 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             with sse_lock:
                 sse_clients.append(client_q)
 
-            with world_state_lock, music_state_lock:
-                combo = {"world": world_state, "music": music_state}
+            with world_state_lock, music_state_lock, video_state_lock:
+                combo = {"world": world_state, "music": music_state, "video": video_state}
                 init_msg = f"event: state\ndata: {json.dumps(combo)}\n\n".encode('utf-8')
             self.wfile.write(init_msg)
             self.wfile.flush()
@@ -448,6 +534,11 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             with music_state_lock:
                 self._send_json(200, {"concepts": music_state["concepts"]})
 
+        elif clean_path == '/api/video/state':
+            with video_state_lock:
+                video_state["available_lores"] = discover_available_lore_files()
+                self._send_json(200, video_state)
+
         elif clean_path == '/api/world/telemetry':
             with world_state_lock:
                 self._send_json(200, {
@@ -457,6 +548,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     "monty_loss": world_state["monty_loss"],
                     "persistence": world_state["persistence"],
                     "surprise": world_state["surprise"],
+                    "regions": world_state["regions"],
                     "concepts": world_state["concepts"]
                 })
         else:
@@ -477,6 +569,124 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             )
             self._send_json(200, {"status": "ok"})
 
+        elif clean_path == '/api/device/register':
+            role = str(data.get('role', 'FCz')).strip()
+            payload = {"cmd": "set_device_role", "role": role, "device_id": data.get("device_id", "dev_0")}
+            send_diff_ipc(payload)
+            send_video_ipc(payload)
+            self._send_json(200, {"status": "ok"})
+
+        elif clean_path == '/api/device/command':
+            cmd_type = data.get('cmd')
+            val = data.get('val')
+            if cmd_type == 'set_role' and val:
+                payload = {"cmd": "set_device_role", "role": str(val).strip(), "device_id": data.get("device_id", "dev_0")}
+                send_diff_ipc(payload)
+                send_video_ipc(payload)
+            broadcast_sse("ble_cmd", data)
+            self._send_json(200, {"status": "ok"})
+
+        elif clean_path == '/api/preset/ladder':
+            stg = int(data.get('stage', 4))
+            with world_state_lock:
+                world_state["ladder_stage"] = stg
+            send_diff_ipc({"cmd": "set_ladder_stage", "stage": stg})
+            send_video_ipc({"cmd": "set_ladder_stage", "stage": stg})
+            broadcast_full_state()
+            self._send_json(200, {"status": "ok", "ladder_stage": stg})
+
+        # ──────────────────────────────────────────────────────────────────────
+        # СПЕЦИФИЧЕСКИЕ ЭНДПОИНТЫ ВИДЕО-ТРАНСФОРМЕРА (3D-DiT)
+        # ──────────────────────────────────────────────────────────────────────
+        elif clean_path == '/api/video/config':
+            with video_state_lock:
+                if "region_gains" in data and isinstance(data["region_gains"], dict):
+                    for k, v in data["region_gains"].items():
+                        video_state["region_gains"][k] = float(np.clip(float(v), 0.0, 1.0))
+                for k in (
+                    "auto_active_boost", "active_user_gain", "inactive_base_gain",
+                    "cross_region_bleed", "cascade_rate", "psi_threshold",
+                    "geodesic_lock", "num_frames", "context_ring_len",
+                    "steps", "genesis_steps", "cfg_scale"
+                ):
+                    if k in data:
+                        video_state[k] = data[k]
+                cfg_copy = {
+                    "region_gains": dict(video_state["region_gains"]),
+                    "auto_active_boost": bool(video_state["auto_active_boost"]),
+                    "active_user_gain": float(video_state["active_user_gain"]),
+                    "inactive_base_gain": float(video_state["inactive_base_gain"]),
+                    "cross_region_bleed": float(video_state["cross_region_bleed"]),
+                    "cascade_rate": float(video_state["cascade_rate"]),
+                    "psi_threshold": float(video_state["psi_threshold"]),
+                    "geodesic_lock": float(video_state["geodesic_lock"]),
+                    "num_frames": int(video_state["num_frames"]),
+                    "context_ring_len": int(video_state["context_ring_len"]),
+                    "steps": int(video_state["steps"]),
+                    "genesis_steps": int(video_state["genesis_steps"]),
+                    "cfg_scale": float(video_state["cfg_scale"]),
+                }
+            send_video_ipc({"cmd": "update_video_config", "config": cfg_copy})
+            broadcast_full_state()
+            self._send_json(200, {"status": "ok", "video": cfg_copy})
+
+        elif clean_path == '/api/video/switch_lore':
+            lore_file = str(data.get("lore_file", "lore/maze_lore.txt")).strip()
+            new_sections = parse_regional_lore_file(lore_file)
+            with video_state_lock:
+                video_state["lore_file"] = lore_file
+                video_state["sections"] = new_sections
+                video_state["available_lores"] = discover_available_lore_files()
+            send_video_ipc({
+                "cmd": "switch_lore",
+                "lore_file": lore_file,
+                "sections": new_sections,
+                "reset_genesis": True
+            })
+            broadcast_full_state()
+            self._send_json(200, {"status": "ok", "lore_file": lore_file, "sections": new_sections})
+
+        elif clean_path == '/api/video/reset_genesis':
+            send_video_ipc({"cmd": "reset_genesis"})
+            self._send_json(200, {"status": "ok"})
+            
+        elif clean_path == '/api/video/init_image':
+            import base64
+            b64_str = data.get("image_base64", "")
+            if "," in b64_str:
+                b64_str = b64_str.split(",", 1)[1]
+            raw_img_bytes = base64.b64decode(b64_str) if b64_str else b""
+            if raw_img_bytes:
+                send_video_ipc({"cmd": "set_init_image", "image_bytes": raw_img_bytes})
+            self._send_json(200, {"status": "ok", "bytes": len(raw_img_bytes)})
+
+        elif clean_path == '/api/video/region_concepts':
+            region_key = str(data.get("region", "FCZ")).strip().upper()
+            action = str(data.get("action", "add")).strip().lower()
+            concept = str(data.get("concept", "")).strip()
+
+            with video_state_lock:
+                if region_key not in video_state["sections"]:
+                    video_state["sections"][region_key] = []
+                cur_list = video_state["sections"][region_key]
+
+                if action == "add" and concept and concept not in cur_list:
+                    cur_list.append(concept)
+                elif action == "remove" and concept in cur_list:
+                    cur_list.remove(concept)
+                elif action == "set" and isinstance(data.get("concepts"), list):
+                    video_state["sections"][region_key] = [
+                        str(x).strip() for x in data["concepts"] if str(x).strip()
+                    ]
+                sec_copy = {k: list(v) for k, v in video_state["sections"].items()}
+
+            send_video_ipc({"cmd": "update_lore_sections", "sections": sec_copy})
+            broadcast_full_state()
+            self._send_json(200, {"status": "ok", "sections": sec_copy})
+
+        # ──────────────────────────────────────────────────────────────────────
+        # МУЗЫКА И 2D-ДИФФУЗИЯ (НЕЗАВИСИМЫЕ)
+        # ──────────────────────────────────────────────────────────────────────
         elif clean_path == '/api/music_config':
             with music_state_lock:
                 music_state.update(data)
@@ -540,8 +750,8 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     try:
                         active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
                     except Exception:
-                            pass
-                broadcast_full_state()
+                        pass
+            broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
         elif clean_path == '/api/music/concepts/remove':
@@ -555,7 +765,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                         active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
                     except Exception:
                         pass
-                broadcast_full_state()
+            broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
         elif clean_path == '/api/diffusion/config':
@@ -584,6 +794,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 world_state["is_recording"] = True
                 world_state["active_session_path"] = actual_session_dir
             send_diff_ipc({"cmd": "start_recording", "session_name": req_name})
+            send_video_ipc({"cmd": "start_recording", "session_name": req_name})
             broadcast_full_state()
             self._send_json(200, {"status": "recording_started", "session_path": actual_session_dir})
 
@@ -601,6 +812,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 world_state["is_recording"] = False
                 saved_p = saved_dir or world_state.get("active_session_path", "sessions/latest")
             send_diff_ipc({"cmd": "stop_recording"})
+            send_video_ipc({"cmd": "stop_recording"})
             broadcast_full_state()
             self._send_json(200, {"status": "recording_stopped", "saved_path": saved_p})
         else:
@@ -611,8 +823,12 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
 
 
 def broadcast_full_state():
-    with world_state_lock, music_state_lock:
-        st = {"world": world_state.copy(), "music": music_state.copy()}
+    with world_state_lock, music_state_lock, video_state_lock:
+        st = {
+            "world": world_state.copy(),
+            "music": music_state.copy(),
+            "video": video_state.copy()
+        }
     broadcast_sse("state", st)
 
 
@@ -624,6 +840,16 @@ def send_diff_ipc(payload):
                 active_diff_ctrl_conn.send(payload)
             except Exception:
                 active_diff_ctrl_conn = None
+
+
+def send_video_ipc(payload):
+    global active_video_ctrl_conn
+    with video_ctrl_lock:
+        if active_video_ctrl_conn is not None:
+            try:
+                active_video_ctrl_conn.send(payload)
+            except Exception:
+                active_video_ctrl_conn = None
 
 
 class ThreadedHTTPServer(ThreadingHTTPServer):
@@ -679,6 +905,7 @@ def ipc_frame_receiver():
 
 
 def ipc_control_listener():
+    """Слушатель для 2D Image Diffusion (порт 6004)"""
     global active_diff_ctrl_conn
     last_sse_push = 0.0
     try:
@@ -720,6 +947,69 @@ def ipc_control_listener():
         finally:
             with diff_ctrl_lock:
                 active_diff_ctrl_conn = None
+
+
+def ipc_video_control_listener():
+    """Выделенный слушатель для 3D-DiT Видео-Трансформера (порт 6007)"""
+    global active_video_ctrl_conn
+    last_sse_push = 0.0
+    try:
+        listener = Listener(('localhost', IPC_VIDEO_CONTROL_PORT), authkey=IPC_VIDEO_AUTHKEY)
+    except Exception:
+        return
+    while True:
+        try:
+            conn = listener.accept()
+            with video_ctrl_lock:
+                active_video_ctrl_conn = conn
+            with video_state_lock:
+                video_state["connected"] = True
+            broadcast_full_state()
+
+            while True:
+                msg = conn.recv()
+                if isinstance(msg, dict):
+                    cmd = msg.get("cmd")
+                    if cmd == "sync_from_video_runner":
+                        with video_state_lock:
+                            video_state["connected"] = True
+                            if "lore_file" in msg:
+                                video_state["lore_file"] = msg["lore_file"]
+                            if "sections" in msg and isinstance(msg["sections"], dict):
+                                video_state["sections"] = msg["sections"]
+                            video_state["available_lores"] = discover_available_lore_files()
+                        broadcast_full_state()
+                    elif cmd == "video_telemetry":
+                        with video_state_lock:
+                            video_state["connected"] = True
+                            video_state["fps"] = msg.get("fps", 0.0)
+                            video_state["gen_ms"] = msg.get("gen_ms", 0.0)
+                            video_state["debug_tokens"] = msg.get("debug_tokens", "")
+                            video_state["fpz_meta_charge"] = msg.get("fpz_meta_charge", 0.0)
+                            video_state["afz_stage_progress"] = msg.get("afz_stage_progress", 0.0)
+                            if "active_region_mask" in msg:
+                                video_state["active_region_mask"] = msg["active_region_mask"]
+                            if "region_gains" in msg:
+                                video_state["region_gains"] = msg["region_gains"]
+                            if "active_concept_idx" in msg:
+                                video_state["active_concept_idx"] = msg["active_concept_idx"]
+                        with world_state_lock:
+                            world_state["active_thought"] = msg.get("debug_tokens", "")
+                            world_state["monty_loss"] = msg.get("monty_loss", 0.0)
+                            world_state["persistence"] = msg.get("persistence", 0.0)
+                            world_state["surprise"] = msg.get("surprise", 0.0)
+
+                        now = time.time()
+                        if now - last_sse_push > 0.20:
+                            last_sse_push = now
+                            broadcast_full_state()
+        except Exception:
+            time.sleep(0.5)
+        finally:
+            with video_ctrl_lock:
+                active_video_ctrl_conn = None
+            with video_state_lock:
+                video_state["connected"] = False
 
 
 def ipc_audio_receiver():
@@ -791,7 +1081,10 @@ def ipc_audio_receiver():
 def load_initial_lore(lore_path):
     if lore_path and os.path.exists(lore_path):
         with open(lore_path, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            return [
+                line.strip() for line in f
+                if line.strip() and not line.startswith('#') and not (line.strip().startswith('[') and line.strip().endswith(']'))
+            ]
     return []
 
 
@@ -807,17 +1100,24 @@ def main():
 
     port = args.port or args.pos_port or int(os.environ.get("HTTP_PORT", HTTP_PORT))
 
-    initial_world_words = load_initial_lore(args.lore or os.environ.get("LORE_PATH"))
+    raw_cli_lore = args.lore if args.lore is not None else os.environ.get("LORE_PATH", "")
+    initial_lore_path = normalize_lore_relpath(raw_cli_lore)
+    initial_world_words = load_initial_lore(os.path.join(BASE_DIR, initial_lore_path)) if initial_lore_path else []
     initial_music_words = load_initial_lore(args.music_lore or os.environ.get("MUSIC_LORE_PATH"))
 
     with world_state_lock:
         world_state["concepts"] = initial_world_words
     with music_state_lock:
         music_state["concepts"] = initial_music_words
+    with video_state_lock:
+        video_state["lore_file"] = initial_lore_path
+        video_state["sections"] = parse_regional_lore_file(initial_lore_path)
+        video_state["available_lores"] = discover_available_lore_files()
 
     threading.Thread(target=ipc_frame_receiver, daemon=True).start()
     threading.Thread(target=ipc_audio_receiver, daemon=True).start()
     threading.Thread(target=ipc_control_listener, daemon=True).start()
+    threading.Thread(target=ipc_video_control_listener, daemon=True).start()
     threading.Thread(target=server_realtime_audio_clock, daemon=True).start()
 
     server = ThreadedHTTPServer(('0.0.0.0', port), UnifiedCloudHandler)
@@ -832,7 +1132,7 @@ def main():
         except Exception:
             pass
 
-    print(f"🚀 [GATEWAY] Веб-терминал: {scheme}://0.0.0.0:{port}/")
+    print(f"🚀 [GATEWAY] Веб-терминал: {scheme}://0.0.0.0:{port}/ (Video IPC:6007 | Diff IPC:6004 | Music IPC:6003)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

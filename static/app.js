@@ -16,7 +16,6 @@ let audioAbortCtrl = null;
 const myClientId = "client_" + Math.random().toString(36).substring(2, 9);
 let isProbeMode = false;
 
-// Переменные высокоскоростного видео-стрима (Server-Push + Latest-Frame Mailbox)
 let videoStreamAbortCtrl = null;
 let latestJpegBytes = null;
 let latestFrameSeq = 0;
@@ -26,6 +25,12 @@ let currentBlobUrl = null;
 let clientRenderCount = 0;
 let clientScreenFps = 0.0;
 let clientDroppedFrames = 0;
+
+// Локальный кэш порегионных секций 3D-DiT видео-мира
+let cachedVideoSections = {
+    FPZ: [], AFZ: [], F3: [], F4: [], FCZ: [], NEGATIVE: []
+};
+let cachedActiveConceptIdx = { Fpz: 0, AFz: 0, F3: 0, F4: 0, FCz: 0 };
 
 const dom = {
     diffModel: document.getElementById('diffModel'),
@@ -38,6 +43,39 @@ const dom = {
     btnConnectBle: document.getElementById('btnConnectBle'),
     deviceList: document.getElementById('deviceList'),
     noDevicesMsg: document.getElementById('noDevicesMsg'),
+
+    // Элементы панели 3D-DiT Видео-Трансформера
+    videoLagStatus: document.getElementById('videoLagStatus'),
+    videoLoreSelect: document.getElementById('videoLoreSelect'),
+    btnVideoResetGenesis: document.getElementById('btnVideoResetGenesis'),
+    afzStageTxt: document.getElementById('afzStageTxt'),
+    afzStageBar: document.getElementById('afzStageBar'),
+    fpzPsiTxt: document.getElementById('fpzPsiTxt'),
+    fpzPsiBar: document.getElementById('fpzPsiBar'),
+    vBoxFpz: document.getElementById('vBoxFpz'),
+    vBoxAfz: document.getElementById('vBoxAfz'),
+    vBoxF3: document.getElementById('vBoxF3'),
+    vBoxF4: document.getElementById('vBoxF4'),
+    vBoxFcz: document.getElementById('vBoxFcz'),
+    vGainFpz: document.getElementById('vGainFpz'),
+    vGainAfz: document.getElementById('vGainAfz'),
+    vGainF3: document.getElementById('vGainF3'),
+    vGainF4: document.getElementById('vGainF4'),
+    vGainFcz: document.getElementById('vGainFcz'),
+    vAutoBoost: document.getElementById('vAutoBoost'),
+    vActiveUserGain: document.getElementById('vActiveUserGain'),
+    vInactiveBaseGain: document.getElementById('vInactiveBaseGain'),
+    videoRegionSelect: document.getElementById('videoRegionSelect'),
+    videoRegionConceptList: document.getElementById('videoRegionConceptList'),
+    newVideoRegionInput: document.getElementById('newVideoRegionInput'),
+    btnAddVideoConcept: document.getElementById('btnAddVideoConcept'),
+    vNumFrames: document.getElementById('vNumFrames'),
+    vContextRing: document.getElementById('vContextRing'),
+    vGeodesicLock: document.getElementById('vGeodesicLock'),
+    vSteps: document.getElementById('vSteps'),
+    vCrossBleed: document.getElementById('vCrossBleed'),
+    vCascadeRate: document.getElementById('vCascadeRate'),
+    vPsiThresh: document.getElementById('vPsiThresh'),
 
     ladderStageSelect: document.getElementById('ladderStageSelect'),
     montyStatusBar: document.getElementById('montyStatusBar'),
@@ -83,14 +121,13 @@ const dom = {
 };
 
 // =============================================================================
-// HIGH-FPS SERVER-PUSH STREAMER С ПЕРЕЗАПИСЬЮ УСТАРЕВШИХ КАДРОВ В ОЗУ (ДО 60 FPS)
+// HIGH-FPS SERVER-PUSH STREAMER
 // =============================================================================
 function paintLatestFrameFromRam() {
     if (isProbeMode || isImgDecoding || latestFrameSeq === renderedFrameSeq || !latestJpegBytes) {
         return;
     }
     isImgDecoding = true;
-    // Если за время декодирования(1.5 мс) прилетело >1 кадра, промежуточные сразу отбрасываются
     const skipped = (latestFrameSeq - renderedFrameSeq) - 1;
     if (skipped > 0) clientDroppedFrames += skipped;
     renderedFrameSeq = latestFrameSeq;
@@ -103,7 +140,6 @@ function paintLatestFrameFromRam() {
         currentBlobUrl = nextUrl;
         isImgDecoding = false;
         clientRenderCount++;
-        // Если пока рисовали, из сокета уже прилетел новый кадр — рисуем мгновенно (0 мс ожидания)!
         if (latestFrameSeq !== renderedFrameSeq) {
             requestAnimationFrame(paintLatestFrameFromRam);
         }
@@ -130,7 +166,6 @@ async function startPushVideoStream() {
             cache: 'no-store'
         });
         if (!response.body) {
-            // Fallback если браузер не поддерживает ReadableStream
             dom.videoStreamImg.src = '/stream.mjpg';
             return;
         }
@@ -143,20 +178,17 @@ async function startPushVideoStream() {
             if (done || signal.aborted) break;
             if (!value || value.byteLength === 0) continue;
 
-            // Доклеиваем прилетевший сетевой чанк в рабочий буфер
             const merged = new Uint8Array(buffer.byteLength + value.byteLength);
             merged.set(buffer, 0);
             merged.set(value, buffer.byteLength);
             buffer = merged;
 
-            // Ищем ВСЕ полные JPEG-кадры (от маркера SOI 0xFFD8 до EOI 0xFFD9) в буфере
             let lastValidJpeg = null;
             let lastEndPos = -1;
             let framesInBurst = 0;
             let searchPos = 0;
 
             while (searchPos < buffer.byteLength - 1) {
-                // Ищем начало JPEG (0xFF 0xD8)
                 let soi = -1;
                 for (let i = searchPos; i < buffer.byteLength - 1; i++) {
                     if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
@@ -166,7 +198,6 @@ async function startPushVideoStream() {
                 }
                 if (soi === -1) break;
 
-                // Ищем конец JPEG (0xFF 0xD9)
                 let eoi = -1;
                 for (let i = soi + 2; i < buffer.byteLength - 1; i++) {
                     if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9) {
@@ -175,14 +206,12 @@ async function startPushVideoStream() {
                     }
                 }
                 if (eoi === -1) {
-                    // Кадр еще докачивается — оставляем хвост начиная с SOI
                     if (soi > 0 && lastEndPos === -1) {
                         buffer = buffer.slice(soi);
                     }
                     break;
                 }
 
-                // Полный кадр найден! Перезаписываем им более старый кадр из этой же пачки
                 lastValidJpeg = buffer.slice(soi, eoi);
                 lastEndPos = eoi;
                 searchPos = eoi;
@@ -195,7 +224,6 @@ async function startPushVideoStream() {
                 latestFrameSeq += framesInBurst;
                 paintLatestFrameFromRam();
             } else if (buffer.byteLength > 2 * 1024 * 1024) {
-                // Защита от переполнения при поврежденном пакете
                 buffer = new Uint8Array(0);
             }
         }
@@ -314,7 +342,140 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
 }
 
 // =============================================================================
-// ПРЕСЕТЫ И НАСТРОЙКИ ДИФФУЗИИ И МУЗЫКИ
+// УПРАВЛЕНИЕ 3D-DiT ВИДЕО-ТРАНСФОРМЕРОМ (ОТВЯЗАННОЕ ОТ 2D И MUSICGEN)
+// =============================================================================
+function renderSelectedVideoRegionConcepts() {
+    if (!dom.videoRegionSelect || !dom.videoRegionConceptList) return;
+    const regKey = dom.videoRegionSelect.value.toUpperCase();
+    const list = cachedVideoSections[regKey] || [];
+    const roleMap = { FPZ: "Fpz", AFZ: "AFz", F3: "F3", F4: "F4", FCZ: "FCz" };
+    const activeIdx = cachedActiveConceptIdx[roleMap[regKey] || "FCz"] || 0;
+
+    dom.videoRegionConceptList.replaceChildren();
+    if (list.length === 0) {
+        const empty = document.createElement('span');
+        empty.className = 'empty-concepts';
+        empty.textContent = `В регионе [${regKey}] нет концептов`;
+        dom.videoRegionConceptList.appendChild(empty);
+        return;
+    }
+
+    list.forEach((c, idx) => {
+        const clone = dom.conceptChipTemplate.content.cloneNode(true);
+        const chip = clone.querySelector('.concept-chip');
+        if (idx === activeIdx) {
+            chip.classList.add('video-active');
+        }
+        const txt = chip.querySelector('.concept-text');
+        txt.textContent = `${idx === activeIdx ? '★ ' : ''}[${regKey}#${idx + 1}] ${c.length > 44 ? c.slice(0, 44) + '…' : c}`;
+        txt.title = c;
+
+        const rmBtn = chip.querySelector('.concept-remove-btn');
+        rmBtn.addEventListener('click', () => removeVideoRegionConcept(regKey, c));
+
+        dom.videoRegionConceptList.appendChild(chip);
+    });
+}
+
+async function addVideoRegionConcept() {
+    const regKey = dom.videoRegionSelect.value.toUpperCase();
+    const val = dom.newVideoRegionInput.value.trim();
+    if (!val) return;
+    const res = await fetch('/api/video/region_concepts', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ region: regKey, action: 'add', concept: val })
+    });
+    const d = await res.json();
+    dom.newVideoRegionInput.value = '';
+    if (d.sections) {
+        cachedVideoSections = d.sections;
+        renderSelectedVideoRegionConcepts();
+    }
+}
+
+async function removeVideoRegionConcept(regKey, conceptStr) {
+    const res = await fetch('/api/video/region_concepts', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ region: regKey, action: 'remove', concept: conceptStr })
+    });
+    const d = await res.json();
+    if (d.sections) {
+        cachedVideoSections = d.sections;
+        renderSelectedVideoRegionConcepts();
+    }
+}
+
+async function switchVideoLoreFile() {
+    const loreFile = dom.videoLoreSelect.value;
+    const res = await fetch('/api/video/switch_lore', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ lore_file: loreFile })
+    });
+    const d = await res.json();
+    if (d.sections) {
+        cachedVideoSections = d.sections;
+        renderSelectedVideoRegionConcepts();
+    }
+}
+
+async function resetVideoGenesis() {
+    await fetch('/api/video/reset_genesis', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({})
+    });
+}
+
+async function updateVideoTransformerConfig() {
+    const payload = {
+        region_gains: {
+            Fpz: parseFloat(dom.vGainFpz.value) || 0.06,
+            AFz: parseFloat(dom.vGainAfz.value) || 0.08,
+            F3:  parseFloat(dom.vGainF3.value)  || 0.08,
+            F4:  parseFloat(dom.vGainF4.value)  || 0.10,
+            FCz: parseFloat(dom.vGainFcz.value) || 0.92,
+        },
+        auto_active_boost: dom.vAutoBoost.value === "1",
+        active_user_gain: parseFloat(dom.vActiveUserGain.value) || 0.92,
+        inactive_base_gain: parseFloat(dom.vInactiveBaseGain.value) || 0.06,
+        cross_region_bleed: parseFloat(dom.vCrossBleed.value) || 0.25,
+        cascade_rate: parseFloat(dom.vCascadeRate.value) || 1.0,
+        psi_threshold: parseFloat(dom.vPsiThresh.value) || 0.55,
+        geodesic_lock: parseFloat(dom.vGeodesicLock.value) || 0.18,
+        num_frames: parseInt(dom.vNumFrames.value) || 5,
+        context_ring_len: parseInt(dom.vContextRing.value) || 16,
+        steps: parseInt(dom.vSteps.value) || 4,
+    };
+    await fetch('/api/video/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    });
+}
+
+async function uploadVideoInitImage() {
+    const fileInp = document.getElementById('videoInitImageInput');
+    if (!fileInp || !fileInp.files || fileInp.files.length === 0) {
+        alert("Выберите файл картинки (PNG/JPG)!");
+        return;
+    }
+    const file = fileInp.files[0];
+    const reader = new FileReader();
+    reader.onload = async () => {
+        await fetch('/api/video/init_image', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ image_base64: reader.result })
+        });
+    };
+    reader.readAsDataURL(file);
+}
+
+// =============================================================================
+// ПРЕСЕТЫ И НАСТРОЙКИ 2D-ДИФФУЗИИ И МУЗЫКИ
 // =============================================================================
 const PRESETS = {
     meditation: { steps: 0, cfg: 1.0, strLow: 0.45, strHigh: 0.70, ctx: 0.30, ema: 0.28 },
@@ -398,7 +559,7 @@ function onManualParamChange(presetOverride = 'custom') {
 }
 
 async function onLadderStageChange() {
-    const stg = parseInt(dom.ladderStageSelect.value) || 4;
+    const stg = parseInt(dom.ladderStageSelect.value) || 1;
     await fetch('/api/preset/ladder', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -413,6 +574,69 @@ const sse = new EventSource('/api/state_stream');
 
 sse.addEventListener('state', (e) => {
     const st = JSON.parse(e.data);
+
+    // 1. Обновление специфической панели 3D-DiT Видео-Трансформера
+    if (st.video) {
+        const v = st.video;
+        if (v.sections) {
+            cachedVideoSections = v.sections;
+        }
+        if (v.active_concept_idx) {
+            cachedActiveConceptIdx = v.active_concept_idx;
+        }
+        renderSelectedVideoRegionConcepts();
+
+        if (dom.videoLoreSelect && Array.isArray(v.available_lores)) {
+            const currentOpts = Array.from(dom.videoLoreSelect.options).map(o => o.value);
+            if (JSON.stringify(currentOpts) !== JSON.stringify(v.available_lores)) {
+                dom.videoLoreSelect.replaceChildren();
+                v.available_lores.forEach(pathStr => {
+                    const opt = document.createElement('option');
+                    opt.value = pathStr;
+                    opt.textContent = pathStr ? pathStr : '[Пусто — Свободный 4096-D дрейф без лор-файла]';
+                    dom.videoLoreSelect.appendChild(opt);
+                });
+            }
+            if (document.activeElement !== dom.videoLoreSelect && v.lore_file !== undefined) {
+                dom.videoLoreSelect.value = v.lore_file;
+            }
+        }
+
+        const stagePct = Math.round((v.afz_stage_progress || 0) * 100);
+        const psiPct = Math.round((v.fpz_meta_charge || 0) * 100);
+        if (dom.afzStageTxt) dom.afzStageTxt.textContent = `${stagePct}%`;
+        if (dom.afzStageBar) dom.afzStageBar.style.width = `${stagePct}%`;
+        if (dom.fpzPsiTxt) dom.fpzPsiTxt.textContent = `${psiPct}%`;
+        if (dom.fpzPsiBar) dom.fpzPsiBar.style.width = `${psiPct}%`;
+
+        if (v.region_gains) {
+            if (document.activeElement !== dom.vGainFpz) dom.vGainFpz.value = v.region_gains.Fpz ?? 0.06;
+            if (document.activeElement !== dom.vGainAfz) dom.vGainAfz.value = v.region_gains.AFz ?? 0.08;
+            if (document.activeElement !== dom.vGainF3)  dom.vGainF3.value  = v.region_gains.F3  ?? 0.08;
+            if (document.activeElement !== dom.vGainF4)  dom.vGainF4.value  = v.region_gains.F4  ?? 0.10;
+            if (document.activeElement !== dom.vGainFcz) dom.vGainFcz.value = v.region_gains.FCz ?? 0.92;
+        }
+
+        if (v.active_region_mask) {
+            dom.vBoxFpz.classList.toggle('user-on', !!v.active_region_mask.Fpz);
+            dom.vBoxAfz.classList.toggle('user-on', !!v.active_region_mask.AFz);
+            dom.vBoxF3.classList.toggle('user-on',  !!v.active_region_mask.F3);
+            dom.vBoxF4.classList.toggle('user-on',  !!v.active_region_mask.F4);
+            dom.vBoxFcz.classList.toggle('user-on', !!v.active_region_mask.FCz);
+        }
+
+        if (dom.videoLagStatus) {
+            if (v.connected) {
+                const vFps = (v.fps || 0).toFixed(1);
+                const vMs = (v.gen_ms || 0).toFixed(0);
+                dom.videoLagStatus.textContent = `3D-DiT: ${vFps} FPS (${vMs} мс/блок) | ${v.debug_tokens || 'ONLINE'} 🟢`;
+            } else {
+                dom.videoLagStatus.textContent = `3D-DiT: Автономный режим / Ожидание порта 6007`;
+            }
+        }
+    }
+
+    // 2. Обновление панели 2D-Диффузии и глобальной телеметрии
     if (st.world) {
         renderVisionConcepts(st.world.concepts || []);
         if (document.activeElement !== dom.diffSteps) dom.diffSteps.value = st.world.steps ?? 0;
@@ -442,8 +666,7 @@ sse.addEventListener('state', (e) => {
             const genMs = (st.world.gen_ms || 0).toFixed(0);
             const actSteps = st.world.actual_steps || st.world.steps || 2;
             const res = st.world.resolution || "512x384";
-            const encLabel = st.world.use_taesd ? "TAESD+Color" : "Full-VAE";
-            dom.diffLagStatus.textContent = `Экран: ${scrFps} FPS | GPU: ${gpuFps} FPS (${genMs} мс) | Буфер: 0 кадр | Шаги: ${actSteps} | ${res} | ${encLabel} 🟢`;
+            dom.diffLagStatus.textContent = `Экран: ${scrFps} FPS | Поток: ${gpuFps} FPS (${genMs} мс) | Шаги: ${actSteps} | ${res} 🟢`;
         }
 
         const mLoss = (st.world.monty_loss || 0.0).toFixed(4);
@@ -461,6 +684,8 @@ sse.addEventListener('state', (e) => {
             dom.recBadge.textContent = "ЗАПИСЬ: ВЫКЛ";
         }
     }
+
+    // 3. Обновление панели MusicGen
     if (st.music) {
         renderMusicConcepts(st.music.concepts || []);
         if (document.activeElement !== dom.mBlock) dom.mBlock.value = st.music.target_block ?? 0;
@@ -500,7 +725,7 @@ sse.addEventListener('ble_cmd', async (e) => {
 });
 
 // =============================================================================
-// ПРЯМОЙ ПРИЕМНИК ГОТОВОГО АУДИО С СЕРВЕРА (НОЛЬ ВЫЧИСЛЕНИЙ В БРАУЗЕРЕ)
+// ПРЯМОЙ ПРИЕМНИК ГОТОВОГО АУДИО С СЕРВЕРА
 // =============================================================================
 async function startWebAudioStream() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -561,7 +786,6 @@ async function startWebAudioStream() {
 
                 if (!audioCtx || !isAudioPlaying) break;
                 const now = audioCtx.currentTime;
-                // Только начальная привязка к текущему времени при старте или обрыве сети:
                 if (nextPlayTime < now) {
                     nextPlayTime = now + 0.06;
                 }
@@ -580,6 +804,7 @@ async function startWebAudioStream() {
         }
     })();
 }
+
 function stopWebAudioStream() {
     if (audioAbortCtrl) {
         try { audioAbortCtrl.abort(); } catch (e) {}
@@ -647,6 +872,11 @@ function createDeviceCardDOM(devObj) {
 
     roleSelect.addEventListener('change', () => {
         devObj.role = roleSelect.value;
+        // Синхронно переключаем выбранный регион в редакторе 3D-DiT!
+        if (dom.videoRegionSelect) {
+            dom.videoRegionSelect.value = devObj.role.toUpperCase();
+            renderSelectedVideoRegionConcepts();
+        }
         sendDeviceCommand(devObj.id, 'set_role', devObj.role);
     });
 
@@ -689,9 +919,9 @@ async function connectNewBleDevice() {
             device: device,
             cmdChar: cmdChar,
             user: "User" + (activeDevices.length + 1),
-            role: activeDevices.length === 0 ? "AFz" : "FCz",
-            gain: 4,
-            uvScale: calcUvScale(4),
+            role: activeDevices.length === 0 ? "FCz" : "AFz",
+            gain: 32,
+            uvScale: calcUvScale(32),
             packetCount: 0,
             sampleBuffer: [],
             sending: false,
@@ -721,7 +951,7 @@ async function connectNewBleDevice() {
             }
         });
 
-        await writeAndVerifyGain(devObj, 4);
+        await writeAndVerifyGain(devObj, 32);
 
         await fetch('/api/device/register', {
             method: 'POST',
@@ -835,7 +1065,7 @@ setInterval(() => {
 }, 1000);
 
 // =============================================================================
-// УПРАВЛЕНИЕ КОНЦЕПТАМИ И ЗАПИСЬЮ СЕССИЙ
+// УПРАВЛЕНИЕ 2D-КОНЦЕПТАМИ, МУЗЫКОЙ И ЗАПИСЬЮ СЕССИЙ
 // =============================================================================
 function renderConceptList(containerEl, list, isMusic, onRemove) {
     containerEl.replaceChildren();
@@ -966,6 +1196,29 @@ window.addEventListener('DOMContentLoaded', async () => {
     dom.btnConnectBle.addEventListener('click', connectNewBleDevice);
     dom.btnAudio.addEventListener('click', toggleAudio);
 
+    // Обработчики специфической панели 3D-DiT Видео-Трансформера
+    document.getElementById('btnUploadInitImage')?.addEventListener('click', uploadVideoInitImage);
+    if (dom.videoLoreSelect) {
+        dom.videoLoreSelect.addEventListener('change', switchVideoLoreFile);
+    }
+    if (dom.btnVideoResetGenesis) {
+        dom.btnVideoResetGenesis.addEventListener('click', resetVideoGenesis);
+    }
+    if (dom.videoRegionSelect) {
+        dom.videoRegionSelect.addEventListener('change', renderSelectedVideoRegionConcepts);
+    }
+    if (dom.btnAddVideoConcept) {
+        dom.btnAddVideoConcept.addEventListener('click', addVideoRegionConcept);
+    }
+    [
+        dom.vGainFpz, dom.vGainAfz, dom.vGainF3, dom.vGainF4, dom.vGainFcz,
+        dom.vAutoBoost, dom.vActiveUserGain, dom.vInactiveBaseGain,
+        dom.vNumFrames, dom.vContextRing, dom.vGeodesicLock, dom.vSteps,
+        dom.vCrossBleed, dom.vCascadeRate, dom.vPsiThresh
+    ].forEach(inp => {
+        if (inp) inp.addEventListener('change', updateVideoTransformerConfig);
+    });
+
     dom.btnAddVision.addEventListener('click', addVisionConcept);
     dom.btnAddMusic.addEventListener('click', addMusicConcept);
 
@@ -1001,19 +1254,25 @@ window.addEventListener('DOMContentLoaded', async () => {
     dom.btnRecStart.addEventListener('click', () => toggleRecording(true));
     dom.btnRecStop.addEventListener('click', () => toggleRecording(false));
 
-    // Запускаем непрерывный Server-Push видео-поток (0 запросов от клиента, до 60 FPS)
     startPushVideoStream();
 
     try {
-        const [rV, rM] = await Promise.all([
+        const [rV, rM, rVid] = await Promise.all([
             fetch('/api/world/concepts'),
-            fetch('/api/music/concepts')
+            fetch('/api/music/concepts'),
+            fetch('/api/video/state')
         ]);
         const dV = await rV.json();
         const dM = await rM.json();
+        const dVid = await rVid.json();
         renderVisionConcepts(dV.concepts || []);
         renderMusicConcepts(dM.concepts || []);
+        if (dVid && dVid.sections) {
+            cachedVideoSections = dVid.sections;
+            renderSelectedVideoRegionConcepts();
+        }
     } catch (err) {
         console.error("Ошибка начальной загрузки:", err);
     }
 });
+
