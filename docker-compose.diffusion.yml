@@ -25,8 +25,8 @@ services:
       bash -c "
       mkdir -p /workspace/hf_cache /workspace/logs &&
       python3 -u /app/brain_server.py --mode lcm --stochastic &
-      python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem --music-lore /app/lore/music_lore.txt --lore /app/lore/world_lore.txt &
+      python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem --music-lore /app/lore/music_lore.txt --lore /app/lore/world_lore_psy.txt &
       sleep 3 &&
-      python3 -u /app/neuro_heterarchy_diffusion.py --headless --mode lcm --steps 2 --lore /app/lore/world_lore.txt &
+      python3 -u /app/neuro_heterarchy_diffusion.py --headless --mode lcm --steps 2 --lore /app/lore/world_lore_psy.txt --deterministic &
       wait
       "

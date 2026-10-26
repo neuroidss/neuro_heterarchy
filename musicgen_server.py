@@ -3,25 +3,15 @@
 ===================================================================================
 NEUROCANVAS: CONTINUOUS DIAGONAL STREAM MUSICGEN SERVER (ULTRA-OPTIMIZED KERNELS)
 ===================================================================================
-- РЕЖИМ БЛОК = 0 (ПО УМОЛЧАНИЮ):
-  Динамически снижает размер блока вплоть до 1 токена EnCodec (0.02с = 20 мс),
-  утилизируя 100% мощности GPU, и увеличивает блок только при опустошении буфера.
-- ПОДДЕРЖКА СЛАБЫХ GPU (RTX 3060 и др.):
-  Если при заданном контексте (например 3.6с) и блоке (например 1.2с) RTF < 1.0,
-  сервер плавно замедляет темп музыки (play_speed < 1.0, без ускорения > 1.0x),
-  чтобы буфер никогда не пустел.
-- УЛЬТРА-ОПТИМИЗАЦИЯ ШАГА ТРАНСФОРМЕРА:
-  * Удален холостой вызов _get_mask (LowerTriangularMask) при SDPA.
-  * 4 таблицы эмбеддингов кодбуков слиты в один батчевый вызов (_fused_emb_weight).
-  * Веса кросс-аттеншна q_weight предкэшированы без нарезки view на каждом шаге.
-- РЕЖИМ СТОХАСТИКИ / ДЕТЕРМИНИЗМА:
-  По умолчанию стохастика включена (100% как в классическом сервере). При флаге
-  --deterministic (или --no-stochastic) стохастика отключается.
+- РЕЖИМ --stochastic (ПО УМОЛЧАНИЮ): 100% оригинальный рабочий конвейер!
+- РЕЖИМ --deterministic: Детерминированный сэмплинг от состояния рабочей памяти
+  в cross_attn_src с центрированием (без вырождения в тишину).
 ===================================================================================
 """
 from __future__ import annotations
 
 import os
+import math
 import time
 import argparse
 from multiprocessing.connection import Listener
@@ -194,7 +184,7 @@ _CACHED_TOKENIZED = None
 
 
 def prepare_lm_fast_weights(lm: LMModel):
-    """Предкэширует срезы весов MHA, эмбеддингов и выходных голов (убирает тысячи аллокаций в цикле)."""
+    """Предкэширует срезы весов MHA, эмбеддингов и выходных голов."""
     for layer in lm.transformer.layers:
         if layer.cross_attention is not None:
             ca = layer.cross_attention
@@ -298,12 +288,18 @@ def step_continuous_diagonal_stream(
             if temp > 0.0:
                 top_logits, top_indices = torch.topk(logits * inv_temp, k=k_eff, dim=-1)
                 if deterministic and cross_attn_src is not None:
-                    # Детерминированный режим (без случайного генератора)
+                    # Детерминированный режим от 64 токенов гетерархии (Fpz/AFz/F3/F4/FCz):
+                    # Центрируем и поворачиваем срез по шагу offset, чтобы распределение u было
+                    # полноценным Uniform(0, 1) и никогда не вырождалось в константный токен тишины!
                     t_idx = offset % cross_attn_src.shape[1]
-                    eeg_slice_4xk = cross_attn_src[:, t_idx, :K * k_eff].contiguous().view(B, K, k_eff)
-                    u = torch.sigmoid(eeg_slice_4xk).clamp(1e-6, 1.0 - 1e-6)
+                    raw_slice = cross_attn_src[:, t_idx, :K * k_eff].float().contiguous().view(B, K, k_eff)
+                    raw_rolled = torch.roll(raw_slice, shifts=(offset * 7) % k_eff, dims=-1)
+                    z_std = (raw_rolled - raw_rolled.mean(dim=-1, keepdim=True)) / (raw_rolled.std(dim=-1, keepdim=True) + 1e-5)
+                    k_grid = torch.arange(k_eff, device=device, dtype=torch.float32).view(1, 1, k_eff)
+                    phase_mod = torch.sin(z_std * 3.14159 + offset * 1.61803 + k_grid * 0.7071)
+                    u = (0.5 * (1.0 + phase_mod)).to(top_logits.dtype).clamp(1e-6, 1.0 - 1e-6)
                 else:
-                    # Стохастический режим (100% как было в вашем оригинальном сервере)
+                    # Стохастический режим (100% как в твоем оригинальном рабочем сервере!)
                     u = torch.empty_like(top_logits).uniform_(1e-6, 1.0 - 1e-6)
                 gumbel = top_logits - torch.log(-torch.log(u))
                 sample_idx = torch.argmax(gumbel, dim=-1, keepdim=True)
@@ -746,3 +742,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

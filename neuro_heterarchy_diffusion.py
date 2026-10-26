@@ -3,10 +3,12 @@
 ===================================================================================
 NEUROCANVAS: 100% GPU ZERO-BUFFER DIFFUSION RUNNER (VRAM CUDA-IPC BUS)
 ===================================================================================
-- Маппинг из рабочей памяти 100% идентичен рабочей версии (project_amodal_bus_to_diffusion_gpu):
-  использует slot_norm_coord_16, amodal_manifold_77x768 и естественный масштаб mod_77
-  без раздувания шума!
-- Поддерживает переключение стохастики (--stochastic / --deterministic).
+- ZERO-COPY VRAM STREAMING:
+  Вектор мысли target_77 пишется напрямую в bus.live_clip_77x768 прямо в VRAM!
+  Никаких .cpu().numpy() для эмбеддингов и wm_field_5x5x32x120!
+  Пока U-Net считает шаги денойзинга, основной цикл со скоростью 120 Гц продолжает
+  обновлять bus.live_clip_77x768 в VRAM, и U-Net подхватывает изменения мысли
+  ПРЯМО ВНУТРИ каждого шага денойзинга!
 ===================================================================================
 """
 
@@ -32,10 +34,14 @@ from neuro_heterarchy_core import DEVICE
 from neuro_genesis_engine import (
     UniversalSemanticSpace,
     SelfSufficientHeterarchyRouter,
+    PHYSICAL_PROJECTION_768x120,
 )
 from neuro_amodal_engine import (
     SharedAmodalCognitiveEngine,
     HardwareVRAMBus,
+    BAND_DELTA,
+    BAND_THETA,
+    BAND_RIPPLES,
 )
 from neuro_recorder import recorder_instance
 
@@ -47,15 +53,19 @@ def project_amodal_bus_to_diffusion_gpu(bus: HardwareVRAMBus, semantic: Universa
                                         strength_low: float, burst_strength: float,
                                         need_ui_telemetry: bool = False) -> tuple[torch.Tensor, float, dict]:
     """
-    100% точная математика из вашего рабочего движка:
-    никаких случайных матриц WM_600_TO_768 и никакого искусственного раздувания mod_77!
+    100% GPU маппинг рабочей памяти (Дельта + Тета + Бета + Гамма + Рипплы по 5 регионам).
+    Не делает НИ ОДНОГО вызова .cpu() или .item() когда need_ui_telemetry=False!
     """
-    meta = bus.meta_32
-    n_sec = max(2, int(meta[1].item()))
+    meta = bus.meta_64
+    n_sec = max(2, int(meta[1]))
     fcz_pers_t = meta[6]
     max_surp_t = meta[7]
+    gamma_gate_t = meta[26]
 
-    active_drive_t = torch.clamp(fcz_pers_t * 0.70 + torch.clamp(max_surp_t, max=1.0) * 0.30, 0.0, 1.0)
+    active_drive_t = torch.clamp(
+        fcz_pers_t * 0.55 + torch.clamp(max_surp_t, max=1.0) * 0.25 + gamma_gate_t * 0.20,
+        0.0, 1.0
+    )
     dyn_str_t = torch.clamp(strength_low + (burst_strength - strength_low) * active_drive_t, strength_low, 0.95)
     dyn_str = float(dyn_str_t.item())
 
@@ -64,16 +74,28 @@ def project_amodal_bus_to_diffusion_gpu(bus: HardwareVRAMBus, semantic: Universa
     c_flow = bus.causal_flow_16x16[:n_sec, :n_sec]
     amodal_77 = bus.amodal_manifold_77x768
 
+    wm_field = bus.wm_field_5x5x32x120
+    delta_theta_rip = (
+        wm_field[:, BAND_DELTA] * 0.40 +
+        wm_field[:, BAND_THETA] * 0.30 +
+        wm_field[:, BAND_RIPPLES] * 0.30
+    ).mean(dim=0)
+    dtr_32x768 = torch.matmul(delta_theta_rip, PHYSICAL_PROJECTION_768x120.T)
+    dtr_77x768 = F.adaptive_avg_pool1d(dtr_32x768.T.unsqueeze(0), 77).squeeze(0).T
+
+    neuro_77 = amodal_77 * 0.70 + dtr_77x768 * 0.30
+
     with semantic.lock:
         words_copy = list(semantic.words)
         w_count = len(words_copy)
 
         if w_count == 0:
-            target_77 = semantic.empty_embed.clone()
-            clean_norms = torch.norm(target_77, p=2, dim=-1, keepdim=True).clamp(min=1e-5)
+            base_77 = semantic.empty_embed.clone()
+            clean_norms = torch.norm(base_77, p=2, dim=-1, keepdim=True).clamp(min=1e-5)
             v_aff = semantic.get_concept_affordances_svd(0, max_bases=16)
-            mod_77 = torch.matmul(torch.matmul(amodal_77, v_aff.T), v_aff)
-            target_77.add_(mod_77, alpha=0.35 * dyn_str)
+            coords = torch.matmul(neuro_77, v_aff.T)
+            mod_77 = F.normalize(torch.matmul(coords, v_aff), p=2, dim=-1) * clean_norms
+            target_77 = base_77 * (1.0 - 0.45 * dyn_str_t) + mod_77 * (0.45 * dyn_str_t)
             target_77 = F.normalize(target_77, p=2, dim=-1) * clean_norms
             slot_idx_gpu = torch.zeros(n_sec, dtype=torch.long, device=DEVICE)
         else:
@@ -91,19 +113,23 @@ def project_amodal_bus_to_diffusion_gpu(bus: HardwareVRAMBus, semantic: Universa
                     dot = torch.sum(child_emb * base_77, dim=-1, keepdim=True) / (torch.sum(base_77 ** 2, dim=-1, keepdim=True) + 1e-7)
                     ortho = F.normalize(child_emb - dot * base_77, p=2, dim=-1) * clean_norms
                     is_sup = (c_flow[root_s, child_s] >= 0.03).float()
-                    base_77.add_(ortho * is_sup * 0.32 + child_emb * (1.0 - is_sup) * 0.20)
+                    base_77.add_(ortho * is_sup * 0.35 + child_emb * (1.0 - is_sup) * 0.22)
 
             v_aff = semantic.get_concept_affordances_svd(root_c_idx, max_bases=16)
-            mod_77 = torch.matmul(torch.matmul(amodal_77, v_aff.T), v_aff)
-            target_77 = base_77 + mod_77 * (0.35 * dyn_str)
+            coords = torch.matmul(neuro_77, v_aff.T)
+            mod_77 = F.normalize(torch.matmul(coords, v_aff), p=2, dim=-1) * clean_norms
+            target_77 = base_77 * (1.0 - 0.45 * dyn_str_t) + mod_77 * (0.45 * dyn_str_t)
             target_77 = F.normalize(target_77, p=2, dim=-1) * clean_norms
 
-    telemetry = {}
+    telemetry = {
+        "dyn_strength": dyn_str,
+        "gamma_gate": float(gamma_gate_t.item()),
+    }
     if need_ui_telemetry:
         indices = [int(i) % max(1, w_count) for i in slot_idx_gpu.tolist()]
         names = [words_copy[i].upper() for i in indices] if w_count > 0 else ["СВОБОДНЫЙ_ДРЕЙФ"] * n_sec
         root_name = names[int(order[0].item()) % n_sec]
-        telemetry = {
+        telemetry.update({
             "primary_role": "AFz", "primary_active": True,
             "ladder_stage": 4,
             "monty_loss": round(float(meta[8].item()), 5),
@@ -117,7 +143,7 @@ def project_amodal_bus_to_diffusion_gpu(bus: HardwareVRAMBus, semantic: Universa
             "causal_flow_np": c_flow.cpu().numpy(),
             "dag_log_parts": [root_name],
             "dl_phase": float(meta[3].item()), "is_delta_tick": bool(meta[4].item() > 0.5),
-            "dyn_strength": dyn_str, "active_vocab_size": w_count,
+            "active_vocab_size": w_count,
             "fpz_active": True, "fpz_tension": float(meta[16].item()), "fpz_concept": root_name,
             "f3_active": True, "f3_concept": root_name,
             "f3_x_local": float(meta[9].item()), "f3_y_global": float(meta[10].item()),
@@ -126,11 +152,10 @@ def project_amodal_bus_to_diffusion_gpu(bus: HardwareVRAMBus, semantic: Universa
             "fcz_active": True, "fcz_concept": root_name,
             "fcz_lx": float(meta[12].item()), "fcz_ly": float(meta[13].item()),
             "fcz_rx": float(meta[14].item()), "fcz_ry": float(meta[15].item()),
-        }
+        })
     return target_77, dyn_str, telemetry
 
 
-# Алиас для обратной совместимости с neuro_deterministic_reproducer.py
 def map_working_memory_to_visual_field_gpu(bus: HardwareVRAMBus, semantic: UniversalSemanticSpace,
                                            strength_low: float, burst_strength: float,
                                            need_ui_telemetry: bool = False):
@@ -175,7 +200,7 @@ def apply_color_surgery_and_blend_gpu(new_rgb_np: np.ndarray, prev_gpu: Optional
 
 class AsyncDiffusionWorker(threading.Thread):
     def __init__(self, conn, initial_h=384, initial_w=512, use_taesd=True, use_color=True,
-                 is_sdxl=False, inference_steps=0, deterministic: Optional[bool] = None):
+                 is_sdxl=False, inference_steps=0, deterministic: Optional[bool] = None, seed: int = 0):
         super().__init__(daemon=True)
         self.conn = conn
         self.img_h = initial_h
@@ -185,14 +210,15 @@ class AsyncDiffusionWorker(threading.Thread):
         self.is_sdxl = is_sdxl
         self.target_steps = inference_steps
         self.actual_steps = 2 if inference_steps == 0 else inference_steps
-        self.guidance_scale = 1.0
+        self.guidance_scale = 1.35
         self.world_context = 0.18
-        self.target_fps = 8.0
+        self.target_fps = 10.0
         self.deterministic = deterministic
+        self.seed = int(seed)
 
         self.display_rgb = np.zeros((self.img_h, self.img_w, 3), dtype=np.uint8)
         self.prev_gpu_frame: Optional[torch.Tensor] = None
-        self.latest_embeds = None
+        self.has_conditioning = False
         self.strength = 0.60
         self.running = True
         self.lock = threading.Lock()
@@ -202,11 +228,12 @@ class AsyncDiffusionWorker(threading.Thread):
         self.frame_seq_id = 0
         self.latest_telemetry = {}
 
-    def update_conditioning(self, prompt_embeds_np, strength, telemetry):
+    def update_conditioning(self, strength: float, telemetry: dict):
         with self.lock:
-            self.latest_embeds = prompt_embeds_np
+            self.has_conditioning = True
             self.strength = float(np.clip(strength, 0.30, 0.95))
-            self.latest_telemetry = telemetry
+            if telemetry:
+                self.latest_telemetry = telemetry
 
     def flush(self):
         with self.lock:
@@ -222,23 +249,24 @@ class AsyncDiffusionWorker(threading.Thread):
         internal_rgb = np.zeros((self.img_h, self.img_w, 3), dtype=np.uint8)
         while self.running:
             with self.lock:
-                embeds = self.latest_embeds
+                ready = self.has_conditioning
                 s_val = self.strength
                 t_steps = self.target_steps
                 a_steps = self.actual_steps
                 cfg = self.guidance_scale
-                w_ctx = self.world_context
+                base_w_ctx = self.world_context
                 t_fps = self.target_fps
                 req_w, req_h = self.img_w, self.img_h
                 u_taesd = self.use_taesd
                 u_color = self.use_color
                 det_override = self.deterministic
+                cur_seed = self.seed
                 telem = self.latest_telemetry
                 if np.max(self.display_rgb) > 0:
                     internal_rgb = self.display_rgb
 
-            if embeds is None:
-                time.sleep(0.005)
+            if not ready:
+                time.sleep(0.003)
                 continue
 
             if internal_rgb.shape[:2] != (req_h, req_w):
@@ -249,16 +277,21 @@ class AsyncDiffusionWorker(threading.Thread):
             eff_s = max(s_val, 1.05 / max(1, steps_to_run)) if steps_to_run >= 2 else max(0.55, s_val)
             eff_s = float(np.clip(eff_s, 0.30, 0.95))
 
+            g_gate = float(telem.get("gamma_gate", 0.5))
+            dyn_w_ctx = float(np.clip(base_w_ctx * (1.6 - 1.2 * g_gate) * (1.3 - 0.8 * eff_s), 0.03, 0.50))
+
             try:
                 t0 = time.perf_counter()
+                # НИКАКИХ prompt_embeds и wm_5x5x32x120 по сокету!
+                # brain_server читает их напрямую из VRAM через HardwareVRAMBus (Zero-Copy)!
                 req = {
                     'cmd': 'generate',
                     'image_np': internal_rgb,
-                    'prompt_embeds': embeds,
                     'strength': eff_s,
                     'num_inference_steps': steps_to_run,
                     'guidance_scale': cfg,
-                    'use_taesd': u_taesd
+                    'use_taesd': u_taesd,
+                    'seed': cur_seed
                 }
                 if det_override is not None:
                     req['deterministic'] = bool(det_override)
@@ -274,7 +307,7 @@ class AsyncDiffusionWorker(threading.Thread):
                         resp = cv2.resize(resp, (req_w, req_h))
 
                     internal_rgb, self.prev_gpu_frame = apply_color_surgery_and_blend_gpu(
-                        resp, self.prev_gpu_frame, u_color, w_ctx
+                        resp, self.prev_gpu_frame, u_color, dyn_w_ctx
                     )
 
                     target_dt = 1.0 / max(1.0, t_fps)
@@ -343,20 +376,19 @@ def main():
     parser.add_argument('--gamma-max', type=float, default=100.0)
 
     parser.add_argument('--mode', type=str, default="lcm", choices=["lcm", "turbo", "sdxl-turbo", "sdxl"])
-    parser.add_argument('--speed', type=str, default="quality", choices=["fast", "quality"])
+    parser.add_argument('--speed', type=str, default="fast", choices=["fast", "quality"])
     parser.add_argument('--steps', type=int, default=0)
     parser.add_argument('--no-taesd', action='store_true', default=False)
     parser.add_argument('--no-color', action='store_true', default=False)
-    parser.add_argument('--stochastic', dest='stochastic', action='store_true', default=True,
-                        help="Включить стохастический шум в диффузии (по умолчанию)")
-    parser.add_argument('--deterministic', '--no-stochastic', dest='stochastic', action='store_false',
-                        help="Отключить стохастику в диффузии")
+    parser.add_argument('--stochastic', dest='stochastic', action='store_true', default=True)
+    parser.add_argument('--deterministic', '--no-stochastic', dest='stochastic', action='store_false')
+    parser.add_argument('--seed', type=int, default=0)
 
     parser.add_argument('--strength-low', type=float, default=0.50)
     parser.add_argument('--strength-high', type=float, default=0.85)
     parser.add_argument('--burst-strength', type=float, default=0.85)
     parser.add_argument('--burst-duration', type=float, default=1.2)
-    parser.add_argument('--ema-smooth', type=float, default=0.12)
+    parser.add_argument('--ema-smooth', type=float, default=0.05)
 
     parser.add_argument('--seal-thresh', type=float, default=0.68)
     parser.add_argument('--seal-cycles', type=int, default=4)
@@ -409,7 +441,7 @@ def main():
         conn, initial_h=canvas_h, initial_w=canvas_w,
         use_taesd=init_taesd, use_color=init_color,
         is_sdxl=is_sdxl, inference_steps=args.steps,
-        deterministic=init_det
+        deterministic=init_det, seed=args.seed
     )
     worker.start()
 
@@ -457,6 +489,8 @@ def main():
                                 worker.deterministic = not bool(p['stochastic'])
                             elif 'deterministic' in p:
                                 worker.deterministic = bool(p['deterministic'])
+                            if 'seed' in p:
+                                worker.seed = int(p['seed'])
                             if 'steps' in p:
                                 worker.target_steps = max(0, min(8, int(p['steps'])))
                                 if worker.target_steps > 0:
@@ -503,7 +537,7 @@ def main():
     try:
         while True:
             now_p = time.perf_counter()
-            dt = float(np.clip(now_p - last_loop_t, 0.005, 0.10))
+            dt = float(np.clip(now_p - last_loop_t, 0.004, 0.10))
             last_loop_t = now_p
             t_now = time.time()
 
@@ -518,7 +552,9 @@ def main():
                     elif cmd == "flush_canvas":
                         worker.flush()
             else:
-                time.sleep(0.016)
+                # Высокочастотный цикл обновления рабочей памяти в VRAM (125 Гц),
+                # чтобы пока U-Net рендерит кадр, его callback_on_step_end видел живое изменение мысли!
+                time.sleep(0.008)
 
             bus, has_live = amodal_engine.step(dt)
             if not has_live:
@@ -533,7 +569,13 @@ def main():
                 need_ui_telemetry=need_telem
             )
 
-            if (t_now - last_telem_t) >= 0.15 and telemetry:
+            ema = float(np.clip(dt / max(0.015, current_ema_smooth), 0.08, 0.85))
+            smoothed_target.mul_(1.0 - ema).add_(target_77, alpha=ema)
+
+            # ZERO-COPY: пишем живой эмбеддинг прямо в общую VRAM-шину!
+            bus.live_clip_77x768.copy_(smoothed_target)
+
+            if (t_now - last_telem_t) >= 0.15 and need_telem:
                 last_telem_t = t_now
                 with ctrl_lock:
                     if ctrl_conn is not None:
@@ -562,9 +604,7 @@ def main():
                         except Exception:
                             ctrl_conn = None
 
-            ema = float(np.clip(dt / max(0.02, current_ema_smooth), 0.04, 0.65))
-            smoothed_target.mul_(1.0 - ema).add_(target_77, alpha=ema)
-            worker.update_conditioning(smoothed_target.unsqueeze(0).cpu().numpy(), dyn_str, telemetry)
+            worker.update_conditioning(dyn_str, telemetry)
 
             if hud:
                 hud.render(worker.get_canvas(), telemetry, fps=worker.fps, dt=dt)

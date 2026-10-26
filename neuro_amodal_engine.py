@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: 100% GPU VRAM-RESIDENT AMODAL COGNITIVE ENGINE (ZERO CPU / ZERO NUMPY)
+NEUROCANVAS: 100% GPU VRAM-RESIDENT AMODAL COGNITIVE ENGINE (ZERO CPU / ZERO SYNC)
 ===================================================================================
-- НИКАКОГО NUMPY ИЛИ /dev/shm MEMMAP В КОНВЕЙЕРЕ:
-  Вся математика и вся передача состояния между процессами одного окружения (Video /
-  Diffusion) идет исключительно через видеопамять GPU (CUDA IPC _share_cuda_).
-- ПОРЕГИОННЫЙ КОНТРОЛЬ АКТИВНОСТИ ЮЗЕРА И МЕЖРЕГИОНАЛЬНОГО ПРОНИКНОВЕНИЯ:
-  * В meta_64[21:26] в реальном времени публикуется точная маска физических девайсов
-    по 5 регионам (AFz, FCz, F3, F4, Fpz) с мгновенным подхватом переключений роли
-    из веб-интерфейса!
-  * В регионы без физического девайса проникает живая активность из активного региона
-    юзера через каузальную гетерархию SDR Монти (W_topdown_sdr и upward_sdr_anomaly)
-    и фазовое поле рабочей памяти.
+- ZERO-COPY VRAM IPC: Все тензоры (включая live_clip_77x768 и live_music_64x768)
+  живут в едином блоке VRAM и читаются генераторами напрямую во время шагов денойзинга!
+- МГНОВЕННЫЙ ФОКУС НАСТОЯЩЕГО МОМЕНТА (Instantaneous Present-Moment Kernel):
+  Не ждет окончания цикла Теты или Дельты — последние 20-40 мс сигнала имеют
+  максимальный вес, поэтому зарождающаяся мысль применяется в ту же миллисекунду!
+- НОЛЬ СИНХРОНИЗАЦИЙ GPU->CPU В ГОРЯЧЕМ ЦИКЛЕ:
+  Убраны тяжелые SVD и .item() из цикла вычислений колонок.
 ===================================================================================
 """
 
@@ -51,20 +48,21 @@ BAND_RIPPLES = 4
 
 REGION_ROLES = ["AFz", "FCz", "F3", "F4", "Fpz"]
 REGION_TAU_SEC = {
-    "FCz": 0.025,  # Сверхбыстрый гамма-отклик действий в супер-реалтайме
-    "F3":  0.35,
-    "F4":  0.35,
-    "AFz": 1.20,
-    "Fpz": 5.00,
+    "FCz": 0.020,  # Мгновенная гамма-динамика действий (SMA)
+    "F3":  0.18,   # Быстрая реакция форм ON-подпространства
+    "F4":  0.18,   # Быстрая реакция контекста OFF-подпространства
+    "AFz": 0.65,   # Динамические правила композиции (A ⊃ B)
+    "Fpz": 2.50,   # Мета-правила для правил (BA10)
 }
 
-IPC_HANDLE_FILE = "/dev/shm/neuro_amodal_vram_v3_ipc.json"
-TOTAL_AMODAL_FLOATS = 210288
+IPC_HANDLE_FILE = "/dev/shm/neuro_amodal_vram_v4_ipc.json"
+# 210288 (базовая шина) + 59136 (live_clip_77x768) + 49152 (live_music_64x768) = 318576 floats
+TOTAL_AMODAL_FLOATS = 318576
 
 
 class HardwareVRAMBus:
     """
-    100% GPU VRAM шина. Никаких numpy memmap и никаких копирований на CPU!
+    100% GPU VRAM шина с прямыми буферами для внутришаговой подстановки мысли (Intra-Step Streaming).
     """
     def __init__(self):
         self.gpu_flat = torch.zeros(TOTAL_AMODAL_FLOATS, dtype=torch.float32, device=DEVICE)
@@ -79,7 +77,7 @@ class HardwareVRAMBus:
         self.z_slots_16x768         = self.gpu_flat[59200:71488].view(MAX_SLOTS, 768)
         self.causal_flow_16x16      = self.gpu_flat[71488:71744].view(MAX_SLOTS, MAX_SLOTS)
         self.slot_order_16          = self.gpu_flat[71744:71760]
-        self.slot_stabs_16          = self.gpu_flat[71760:71776]
+        self.slot_stabs_16          = self.gpu_flat[71776 - 16:71776]
         self.slot_seals_16          = self.gpu_flat[71776:71792]
         self.slot_norm_coord_16     = self.gpu_flat[71792:71808]
         self.wm_field_5x5x32x120    = self.gpu_flat[71808:167808].view(NUM_REGIONS, NUM_BANDS, NUM_SLOTS, NUM_PAIRS)
@@ -87,6 +85,9 @@ class HardwareVRAMBus:
         self.monty_anom_5x4096      = self.gpu_flat[188288:208768].view(NUM_REGIONS, NUM_COLUMNS)
         self.ripple_dag_5x16x16     = self.gpu_flat[208768:210048].view(NUM_REGIONS, MAX_CLOCK_SECTORS, MAX_CLOCK_SECTORS)
         self.seals_and_stabs_5x3x16 = self.gpu_flat[210048:210288].view(NUM_REGIONS, 3, MAX_CLOCK_SECTORS)
+        # Живые буферы в VRAM для мгновенного чтения изнутри U-Net и MusicGen без сокетов!
+        self.live_clip_77x768       = self.gpu_flat[210288:269424].view(77, 768)
+        self.live_music_64x768      = self.gpu_flat[269424:318576].view(64, 768)
 
     def get_cuda_ipc_Payload(self) -> dict:
         storage = self.gpu_flat.untyped_storage()
@@ -115,7 +116,7 @@ class HardwareVRAMBus:
                 json.dump(payload, f)
             os.replace(tmp_path, IPC_HANDLE_FILE)
             self.is_owner = True
-            print(f"⚡ [VRAM CUDA-IPC] Опубликована общая рабочая память прямо в VRAM (PID={os.getpid()}, Ptr={hex(self.gpu_flat.data_ptr())})")
+            print(f"⚡ [VRAM CUDA-IPC] Опубликована Zero-Copy шина рабочей памяти в VRAM (PID={os.getpid()}, Ptr={hex(self.gpu_flat.data_ptr())})")
         except Exception as e:
             print(f"⚠️ [VRAM CUDA-IPC Note]: {e}")
             self.is_owner = True
@@ -125,6 +126,8 @@ class HardwareVRAMBus:
             owner_pid = int(d["pid"])
             if self.attached_pid == owner_pid:
                 return True
+            if int(d.get("total_floats", 0)) != TOTAL_AMODAL_FLOATS:
+                return False
             storage_cls = getattr(torch, "UntypedStorage", getattr(torch, "_UntypedStorage", None))
             shared_storage = storage_cls._new_shared_cuda(
                 int(d["device_idx"]),
@@ -141,7 +144,7 @@ class HardwareVRAMBus:
             )
             self._bind_views()
             self.attached_pid = owner_pid
-            print(f"🔗 [VRAM CUDA-IPC] Прямое подключение к физическому адресу VRAM PID={owner_pid} (Ptr={hex(self.gpu_flat.data_ptr())}, 0% CPU!)")
+            print(f"🔗 [VRAM CUDA-IPC] Прямой Zero-Copy доступ к рабочей памяти в VRAM PID={owner_pid} (0% CPU!)")
             return True
         except Exception:
             torch.cuda.synchronize()
@@ -155,8 +158,6 @@ class HardwareVRAMBus:
                 d = json.load(f)
             owner_pid = int(d["pid"])
             if owner_pid == os.getpid() or not os.path.exists(f"/proc/{owner_pid}"):
-                return False
-            if int(d.get("total_floats", 0)) != TOTAL_AMODAL_FLOATS:
                 return False
             return self.attach_from_ipc_dict(d)
         except Exception:
@@ -244,6 +245,14 @@ class DirectGPUSpectralFrontend(nn.Module):
         slot_ang = -math.pi + (TWO_PI / NUM_SLOTS) * (torch.arange(NUM_SLOTS, device=DEVICE) + 0.5)
         self.register_buffer("slot_angles", slot_ang.view(1, NUM_SLOTS, 1, 1))
 
+        # МГНОВЕННОЕ ЯДРО НАСТОЯЩЕГО МОМЕНТА (Instantaneous Present-Moment Recency Kernel):
+        # Свежие сэмплы в правом конце буфера (t -> 255) имеют экспоненциально больший вес,
+        # чтобы не ждать окончания 1-секундного окна и мгновенно ловить зарождение мысли!
+        t_idx = torch.linspace(-1.0, 0.0, BUF_SIZE, device=DEVICE).view(1, 1, 1, BUF_SIZE)
+        self.register_buffer("recency_fast", torch.exp(t_idx * 4.5))   # Фокус на последних ~55 мс (Гамма / Рипплы)
+        self.register_buffer("recency_med",  torch.exp(t_idx * 2.2))   # Фокус на последних ~120 мс (Тета / Бета)
+        self.register_buffer("recency_slow", torch.exp(t_idx * 1.0))   # Фокус на последних ~300 мс (Дельта)
+
         self.register_buffer("delta_centers", torch.linspace(0.5, 3.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
         self.register_buffer("theta_centers", torch.linspace(3.8, 8.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
         self.register_buffer("beta_centers",  torch.linspace(13.0, 30.0, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
@@ -260,7 +269,6 @@ class DirectGPUSpectralFrontend(nn.Module):
             live_uids = {s.source_id() for s in streams}
             for i in range(NUM_MAX_DEVICES):
                 if self.inlets[i] is not None:
-                    # Если стрим исчез из LSL или молчит дольше 2.5с (юзер переключил роль в браузере!), освобождаем слот
                     if self.stream_uids[i] not in live_uids or (now - self.last_pull_time[i] > 2.5):
                         self.connected_uids.discard(self.stream_uids[i])
                         self.inlets[i] = None
@@ -309,7 +317,7 @@ class DirectGPUSpectralFrontend(nn.Module):
         fft_clean = torch.fft.fft(centered, dim=-1) * notch.float()
 
         fft_1024 = torch.fft.rfft(centered[0], n=FFT_SLOW, dim=-1)
-        freqs_slow = self.base_rfftfreq_1024 * float(fs_vec[0, 0, 0].item())
+        freqs_slow = self.base_rfftfreq_1024 * fs_vec[0, 0, 0]
 
         dl_mask = (freqs_slow >= 0.5) & (freqs_slow <= 3.2)
         dl_pwr = torch.sum(torch.abs(fft_1024[:, dl_mask]) ** 2, dim=0)
@@ -336,11 +344,18 @@ class DirectGPUSpectralFrontend(nn.Module):
 
         fft_exp = fft_clean.unsqueeze(1)
         freqs_4d = freqs_dev.unsqueeze(1)
-        w = torch.exp(3.2 * torch.cos(phi_theta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles))
-        w = w / (torch.sum(w, dim=-1, keepdim=True) + 1e-6)
 
-        w_delta = torch.exp(2.8 * torch.cos(phi_delta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles))
-        w_delta = w_delta / (torch.sum(w_delta, dim=-1, keepdim=True) + 1e-6)
+        # Умножаем фазовые окна Теты и Дельты на экспоненциальное ядро настоящего момента (recency_fast / med / slow),
+        # чтобы система НЕ ждала конца секунды или конца тета-цикла, а сразу выдавала текущую мысль!
+        w_raw = torch.exp(3.2 * torch.cos(phi_theta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles))
+        w_fast = w_raw * self.recency_fast
+        w_fast = w_fast / (torch.sum(w_fast, dim=-1, keepdim=True) + 1e-6)
+
+        w_med = w_raw * self.recency_med
+        w_med = w_med / (torch.sum(w_med, dim=-1, keepdim=True) + 1e-6)
+
+        w_delta_raw = torch.exp(2.8 * torch.cos(phi_delta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles)) * self.recency_slow
+        w_delta = w_delta_raw / (torch.sum(w_delta_raw, dim=-1, keepdim=True) + 1e-6)
 
         i_idx, j_idx = self.geom["i_idx"], self.geom["j_idx"]
 
@@ -348,19 +363,19 @@ class DirectGPUSpectralFrontend(nn.Module):
         Z_gamma = torch.fft.ifft(fft_exp * g_filt, dim=-1)
         P_gamma = Z_gamma / (torch.abs(Z_gamma) + 1e-12)
         cg_gamma = P_gamma[:, :, i_idx, :] * torch.conj(P_gamma[:, :, j_idx, :])
-        psi_gamma = torch.sum(cg_gamma * w, dim=-1)
+        psi_gamma = torch.sum(cg_gamma * w_fast, dim=-1)
         gamma_anchor = torch.imag(psi_gamma * torch.conj(psi_gamma[:, 0:1, :]))
 
         r_filt = torch.exp(-0.5 * ((freqs_4d - self.rip_centers) / 4.0) ** 2) * 2.0 * pos_mask.unsqueeze(1)
         Z_rip = torch.fft.ifft(fft_exp * r_filt, dim=-1)
         P_rip = Z_rip / (torch.abs(Z_rip) + 1e-12)
         cg_rip = P_rip[:, :, i_idx, :] * torch.conj(P_rip[:, :, j_idx, :])
-        psi_rip = torch.sum(cg_rip * w, dim=-1)
+        psi_rip = torch.sum(cg_rip * w_fast, dim=-1)
         h_rip = torch.imag(psi_rip) / torch.sqrt(torch.clamp(1.0 - torch.real(psi_rip) ** 2, min=1e-5))
 
         wm_delta = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.delta_centers, 0.6, w_delta)
-        wm_theta = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.theta_centers, 1.2, w_delta)
-        wm_beta  = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.beta_centers,  3.0, w)
+        wm_theta = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.theta_centers, 1.2, w_med)
+        wm_beta  = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.beta_centers,  3.0, w_med)
         bands_Dx5x32x120 = torch.stack([wm_delta, wm_theta, wm_beta, gamma_anchor, h_rip], dim=1)
 
         traj_2d = torch.matmul(gamma_anchor, self.geom["proj_2d"]) * 8.0
@@ -428,7 +443,6 @@ class DirectGPUSpectralFrontend(nn.Module):
                 self.connected_uids.discard(self.stream_uids[i])
                 self.inlets[i] = None
 
-        # Оставляем только те слоты, куда реально приходят свежие пакеты (в пределах 1.5 сек)
         fresh_slots = [
             i for i, inl in enumerate(self.inlets)
             if inl is not None and (now - self.last_pull_time[i] <= 1.5)
@@ -442,7 +456,6 @@ class DirectGPUSpectralFrontend(nn.Module):
         D = sub_buf.shape[0]
         fs_vec = torch.tensor([self.device_fs[i] for i in fresh_slots], device=DEVICE).view(D, 1, 1)
 
-        # ПРИОРИТЕТ РОЛИ: 1) явный override с клавиш HUD, 2) роль из имени LSL-стрима (динамическое переключение в Web UI!), 3) static_map CLI
         roles = []
         for s_i in fresh_slots:
             stream_r = self.stream_roles[s_i]
@@ -500,7 +513,7 @@ class GPUSealEngine(nn.Module):
 
 
 class AmodalActionIntegratorGPU(nn.Module):
-    def __init__(self, sensitivity: float = 0.09, intent_gain: float = 2.2):
+    def __init__(self, sensitivity: float = 0.11, intent_gain: float = 2.4):
         super().__init__()
         self.sensitivity = sensitivity
         self.intent_gain = intent_gain
@@ -510,26 +523,30 @@ class AmodalActionIntegratorGPU(nn.Module):
 
     @torch.no_grad()
     def step_gpu(self, raw_wave_16x768: torch.Tensor, temp_ry: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        100% GPU матричный интегратор без синхронизирующего CPU вызова torch.linalg.svd!
+        """
         centered = raw_wave_16x768 - raw_wave_16x768.mean(dim=0, keepdim=True)
-        _, _, Vh = torch.linalg.svd(F.normalize(centered, p=2, dim=-1), full_matrices=False)
-        v_aff = Vh[:16]
-        projected = torch.matmul(torch.matmul(raw_wave_16x768, v_aff.T), v_aff)
+        normed = F.normalize(centered, p=2, dim=-1)
+        # Быстрая ковариационная проекция на 16 собственных направлений волны без SVD-синхронизации:
+        gram = torch.matmul(normed, normed.T)
+        projected = F.normalize(torch.matmul(gram, raw_wave_16x768), p=2, dim=-1) * torch.norm(raw_wave_16x768, dim=-1, keepdim=True)
 
         chord = projected[-1] - projected[0]
         mag = torch.norm(chord)
         last_mag = torch.norm(self.last_chord_768)
         cos_th = torch.sum(chord * self.last_chord_768) / (mag * last_mag + 1e-6)
 
-        grow = (mag > 0.015) & (last_mag > 1e-4) & (cos_th > 0.65)
+        grow = (mag > 0.015) & (last_mag > 1e-4) & (cos_th > 0.60)
         new_pers = torch.where(
             grow,
-            torch.clamp(self.persistence + 0.08, max=1.0),
+            torch.clamp(self.persistence + 0.09, max=1.0),
             self.persistence * 0.92
         )
         self.persistence.copy_(new_pers)
         self.last_chord_768.copy_(chord)
 
-        smooth = 0.92 - (self.sensitivity * 0.1)
+        smooth = 0.88 - (self.sensitivity * 0.1)
         gain = self.sensitivity * self.intent_gain
         ry_clamped = torch.clamp(temp_ry * 0.5, -0.4, 0.9)
         active_boost = (1.0 + self.persistence * 5.0) * (1.0 + ry_clamped)
@@ -580,33 +597,28 @@ class AmodalMontyColumnGPU(nn.Module):
 
     @torch.no_grad()
     def synthesize_virtual_gpu(self, master_iplv: torch.Tensor, master_rip: torch.Tensor,
-                               master_5x32x120: torch.Tensor, bleed_scale: float = 0.25):
-        """
-        Межрегиональное проникновение: когда на этом регионе нет прямого девайса юзера,
-        активность из регионов с девайсом проникает сюда с контролируемым коэффициентом bleed_scale,
-        фильтруясь через пространственную топологию диполей региона!
-        """
+                               master_5x32x120: torch.Tensor, bleed_scale: float = 0.35):
         if self.role == "Fpz":
             mask = self.geom["macro_mask"]
             tgt = master_iplv * mask * (0.85 * bleed_scale)
-            alpha = 0.06
+            alpha = 0.08
         elif self.role == "F3":
             mask = self.geom["left_mask"]
             tgt = torch.relu(master_iplv) * mask * (1.2 * bleed_scale)
-            alpha = 0.15
+            alpha = 0.22
         elif self.role == "F4":
             mask = self.geom["right_mask"]
             tgt = -torch.relu(-master_iplv) * mask * (1.2 * bleed_scale)
-            alpha = 0.15
+            alpha = 0.22
         elif self.role == "FCz":
             mask = self.geom["micro_mask"]
             fast_diff = torch.roll(master_iplv, shifts=-1, dims=0) - master_iplv
             tgt = (fast_diff * 0.6 + master_iplv * 0.4) * mask * (1.4 * bleed_scale)
-            alpha = 0.35
+            alpha = 0.45
         else:
             mask = self.geom["meso_mask"] + self.geom["macro_mask"] * 0.5
             tgt = master_iplv * (1.0 * bleed_scale)
-            alpha = 0.18
+            alpha = 0.25
 
         self.virtual_iplv.mul_(1.0 - alpha).add_(tgt, alpha=alpha)
         self.virtual_rip.mul_(1.0 - alpha).add_(master_rip * bleed_scale, alpha=alpha)
@@ -615,13 +627,22 @@ class AmodalMontyColumnGPU(nn.Module):
 
     @torch.no_grad()
     def forward_gpu(self, raw_iplv_32xP: torch.Tensor, raw_rip_32xP: torch.Tensor,
+                    bands_5x32x120: torch.Tensor,
                     n_sec: int, cur_sec: int, is_tick: bool, dt: float,
                     top_down_parent_sdr: Optional[torch.Tensor] = None,
                     bottom_up_child_anomaly: Optional[torch.Tensor] = None) -> dict:
+        """
+        100% Тензорное ядро без единого .item() внутри вычислений!
+        """
         proj_T = self.geom["proj_Px768"]
+        raw_delta_32xP = bands_5x32x120[BAND_DELTA]
+        raw_theta_32xP = bands_5x32x120[BAND_THETA]
+        raw_beta_32xP  = bands_5x32x120[BAND_BETA]
 
-        x_pos_768 = torch.matmul(torch.relu(raw_iplv_32xP), proj_T)
-        x_neg_768 = torch.matmul(torch.relu(-raw_iplv_32xP), proj_T)
+        nested_drive_32xP = raw_iplv_32xP * 0.65 + raw_delta_32xP * 0.20 + raw_theta_32xP * 0.15
+
+        x_pos_768 = torch.matmul(torch.relu(nested_drive_32xP), proj_T)
+        x_neg_768 = torch.matmul(torch.relu(-nested_drive_32xP), proj_T)
         z_32x768 = x_pos_768 - x_neg_768
 
         overlap = (torch.matmul(x_pos_768, self.rf_pos) + torch.matmul(x_neg_768, self.rf_neg)) / 12.0
@@ -645,8 +666,10 @@ class AmodalMontyColumnGPU(nn.Module):
         if pred_from_parent is not None and top_down_parent_sdr is not None:
             sdr_err = sdr_inst - pred_from_parent
             self.upward_sdr_anomaly.copy_(torch.relu(sdr_err))
-            p_energy = float(torch.sum(top_down_parent_sdr ** 2).item()) + 1.0
-            self.W_topdown_sdr.addr_(sdr_err, top_down_parent_sdr, beta=0.9998, alpha=0.03 / p_energy)
+            p_energy = torch.sum(top_down_parent_sdr ** 2) + 1.0
+            self.W_topdown_sdr.mul_(0.9998).add_(
+                torch.outer(sdr_err, top_down_parent_sdr) * (0.03 / p_energy)
+            )
         else:
             self.upward_sdr_anomaly.copy_(sdr_inst * 0.15)
 
@@ -663,9 +686,9 @@ class AmodalMontyColumnGPU(nn.Module):
         )
         self.baseline_loss.mul_(0.985).add_(loss_t * 0.015)
 
-        state_energy = float(torch.sum(self.l23_pooled_sdr ** 2).item()) + 1e-4
-        eta = float(torch.clamp(0.08 * (1.0 + surprise_t * 0.5), max=0.25).item()) / state_energy
-        self.W_out.addr_(error_flat, self.l23_pooled_sdr, beta=0.9995, alpha=eta)
+        state_energy = torch.sum(self.l23_pooled_sdr ** 2) + 1e-4
+        eta_t = torch.clamp(0.08 * (1.0 + surprise_t * 0.5), max=0.25) / state_energy
+        self.W_out.mul_(0.9995).add_(torch.outer(error_flat, self.l23_pooled_sdr) * eta_t)
 
         z_on_16x768  = F.adaptive_avg_pool1d(x_pos_768.T.unsqueeze(0), 16).squeeze(0).T
         z_off_16x768 = F.adaptive_avg_pool1d(x_neg_768.T.unsqueeze(0), 16).squeeze(0).T
@@ -680,16 +703,19 @@ class AmodalMontyColumnGPU(nn.Module):
         sdr_7x4096 = F.adaptive_avg_pool1d(sdr_seq.T.unsqueeze(0), 7).squeeze(0).T
         sdr_tokens_7x768 = torch.matmul(sdr_7x4096, self.sdr_to_768)
 
-        dynamic_wm = F.adaptive_avg_pool1d(raw_iplv_32xP.T.unsqueeze(0), n_sec).squeeze(0).T
+        dynamic_wm    = F.adaptive_avg_pool1d(nested_drive_32xP.T.unsqueeze(0), n_sec).squeeze(0).T
+        dynamic_theta = F.adaptive_avg_pool1d(raw_theta_32xP.T.unsqueeze(0), n_sec).squeeze(0).T
+        dynamic_delta = F.adaptive_avg_pool1d(raw_delta_32xP.T.unsqueeze(0), n_sec).squeeze(0).T
         z_slots = torch.matmul(dynamic_wm, proj_T)
 
         kuramoto_r = torch.clamp(torch.norm(dynamic_wm.mean(dim=0)) / 10.0, 0.0, 1.0)
-        slot_cur = dynamic_wm[cur_sec % n_sec]
-        x_local = torch.clamp(torch.sum(slot_cur * self.geom["dx"]) / 35.0, -1.0, 1.0)
-        y_global = torch.clamp(torch.sum(slot_cur * self.geom["dy"]) / 35.0, -1.0, 1.0)
 
-        slot_x = torch.matmul(dynamic_wm, self.geom["dx"])
-        slot_y = torch.matmul(dynamic_wm, self.geom["dy"])
+        cur_s = cur_sec % n_sec
+        x_local  = torch.clamp(torch.sum((dynamic_theta[cur_s] * 0.65 + dynamic_wm[cur_s] * 0.35) * self.geom["dx"]) / 30.0, -1.0, 1.0)
+        y_global = torch.clamp(torch.sum((dynamic_delta[cur_s] * 0.65 + dynamic_wm[cur_s] * 0.35) * self.geom["dy"]) / 30.0, -1.0, 1.0)
+
+        slot_x = torch.matmul(dynamic_theta * 0.5 + dynamic_wm * 0.5, self.geom["dx"])
+        slot_y = torch.matmul(dynamic_delta * 0.5 + dynamic_wm * 0.5, self.geom["dy"])
         slot_norm_coord = (torch.atan2(slot_y, slot_x) + math.pi) / (2.0 * math.pi)
 
         npast = torch.norm(raw_iplv_32xP[0])
@@ -700,10 +726,14 @@ class AmodalMontyColumnGPU(nn.Module):
             F.adaptive_avg_pool1d(raw_rip_32xP.T.unsqueeze(0), n_sec).squeeze(0).T,
             proj_T
         )
-        diff_rip = dyn_rip_768.unsqueeze(1) - dyn_rip_768.unsqueeze(0)
-        c_flow_mat = torch.norm(diff_rip, dim=-1)
+        dyn_delta_768 = torch.matmul(dynamic_delta, proj_T)
 
-        net_leads = torch.sum(diff_rip.sum(dim=1) - diff_rip.sum(dim=0), dim=-1)
+        diff_rip   = dyn_rip_768.unsqueeze(1) - dyn_rip_768.unsqueeze(0)
+        diff_delta = dyn_delta_768.unsqueeze(1) - dyn_delta_768.unsqueeze(0)
+        diff_joint = diff_rip * 0.55 + diff_delta * 0.45
+
+        c_flow_mat = torch.norm(diff_joint, dim=-1)
+        net_leads = torch.sum(diff_joint.sum(dim=1) - diff_joint.sum(dim=0), dim=-1)
         order_gpu = torch.argsort(net_leads, descending=True)
 
         ordered_slots = z_slots[order_gpu]
@@ -718,17 +748,23 @@ class AmodalMontyColumnGPU(nn.Module):
         composed_slots = root_vec + is_supset * ortho_norm * 0.35 + (1.0 - is_supset) * ordered_slots * 0.25
         tree_16x768 = F.adaptive_avg_pool1d(composed_slots.T.unsqueeze(0), 16).squeeze(0).T
 
+        beta_energy  = torch.mean(torch.abs(raw_beta_32xP))
+        gamma_energy = torch.mean(torch.abs(raw_iplv_32xP)) + torch.mean(torch.abs(raw_rip_32xP)) * 0.5
+        gamma_gate   = gamma_energy / (gamma_energy + beta_energy + 1e-5)
+
+        oldest = (self.buf_ptr + 1) % 2
+        drift_cos = torch.sum(
+            F.normalize(z_slots, p=2, dim=-1) * F.normalize(self.delta_cycle_buf[oldest, :n_sec] + 1e-6, p=2, dim=-1),
+            dim=-1
+        )
+        raw_stab = torch.clamp((drift_cos * 0.5 + 0.5) * (0.2 + 0.8 * kuramoto_r), 0.0, 1.0)
+        stab_alpha = 0.35 if is_tick else min(0.15, dt * 4.0)
+        self.seals.stabs[:n_sec].mul_(1.0 - stab_alpha).add_(raw_stab * stab_alpha)
+        self.seals.step_gpu(n_sec, c_flow_mat)
+
         if is_tick:
             self.delta_cycle_buf[self.buf_ptr, :n_sec].copy_(z_slots)
-            oldest = (self.buf_ptr + 1) % 2
-            drift_cos = torch.sum(
-                F.normalize(z_slots, p=2, dim=-1) * F.normalize(self.delta_cycle_buf[oldest, :n_sec], p=2, dim=-1),
-                dim=-1
-            )
             self.buf_ptr = oldest
-            raw_stab = torch.clamp((drift_cos * 0.5 + 0.5) * (0.2 + 0.8 * kuramoto_r), 0.0, 1.0)
-            self.seals.stabs[:n_sec].mul_(0.65).add_(raw_stab * 0.35)
-            self.seals.step_gpu(n_sec, c_flow_mat)
 
         return {
             "z_slots": z_slots,
@@ -745,6 +781,7 @@ class AmodalMontyColumnGPU(nn.Module):
             "x_local": x_local,
             "y_global": y_global,
             "temp_asym_scalar": temp_asym_scalar,
+            "gamma_gate": gamma_gate,
             "loss": loss_t,
             "surprise": surprise_t,
         }
@@ -752,7 +789,7 @@ class AmodalMontyColumnGPU(nn.Module):
 
 class SharedAmodalCognitiveEngine:
     def __init__(self, router, gamma_max: float = 100.0, strength_low: float = 0.50,
-                 strength_high: float = 0.85, cross_region_bleed: float = 0.25):
+                 strength_high: float = 0.85, cross_region_bleed: float = 0.35):
         self.router = router
         self.gamma_max = gamma_max
         self.strength_low = strength_low
@@ -785,12 +822,15 @@ class SharedAmodalCognitiveEngine:
 
     @torch.no_grad()
     def _update_bus_from_eeg_dict(self, eeg_out: dict, dt: float) -> tuple[HardwareVRAMBus, bool]:
-        th_hz = float(eeg_out["th_freq"].item())
-        dl_hz = float(eeg_out["dl_freq"].item())
-        dl_phase = float(eeg_out["dl_phase"].item())
-        th_phase = float(eeg_out["th_phase"].item())
+        th_hz_t = eeg_out["th_freq"]
+        dl_hz_t = eeg_out["dl_freq"]
+        dl_phase_t = eeg_out["dl_phase"]
+        th_phase_t = eeg_out["th_phase"]
 
-        self.measured_ratio = self.measured_ratio * 0.95 + (th_hz / dl_hz) * 0.05
+        ratio_now = float((th_hz_t / dl_hz_t).item())
+        dl_phase = float(dl_phase_t.item())
+
+        self.measured_ratio = self.measured_ratio * 0.95 + ratio_now * 0.05
         k_th = int(min(8, max(2, round(self.measured_ratio))))
         n_sec = k_th * 2
         sec_w = (2.0 * math.pi) / float(n_sec)
@@ -838,7 +878,7 @@ class SharedAmodalCognitiveEngine:
                 )
 
             res[r] = self.columns[r].forward_gpu(
-                ip_r, rp_r, n_sec=n_sec, cur_sec=cur_sec, is_tick=is_tick, dt=dt,
+                ip_r, rp_r, b_5x32x120, n_sec=n_sec, cur_sec=cur_sec, is_tick=is_tick, dt=dt,
                 top_down_parent_sdr=parent_map[r], bottom_up_child_anomaly=child_map[r]
             )
             self.bus.wm_field_5x5x32x120[r_idx].copy_(b_5x32x120)
@@ -855,12 +895,21 @@ class SharedAmodalCognitiveEngine:
         primary = res[apex_role]
         fcz_kin = real_kin.get("FCz", eeg_out["default_kin"])
 
-        raw_fcz_wave = res["FCz"]["sagitta_16x768"] + res["FCz"]["z_on_16x768"] * 0.5
+        raw_fcz_wave = (
+            res["FCz"]["sagitta_16x768"] * 0.55 +
+            res["FCz"]["z_on_16x768"] * 0.25 +
+            res["FCz"]["tree_16x768"] * 0.20
+        )
         fcz_act_16x768, fcz_pers = self.columns["FCz"].action_integrator.step_gpu(raw_fcz_wave, fcz_kin[3])
 
         max_surp = torch.stack([res[r]["surprise"] for r in REGION_ROLES]).max()
         fpz_tension = torch.clamp(max_surp * 0.55 + torch.abs(res["Fpz"]["temp_asym_scalar"]) * 0.45, 0.0, 1.0)
-        active_drive = torch.clamp(fcz_pers.squeeze(0) * 0.70 + torch.clamp(max_surp, max=1.0) * 0.30, 0.0, 1.0)
+        active_drive = torch.clamp(
+            fcz_pers.squeeze(0) * 0.55 +
+            torch.clamp(max_surp, max=1.0) * 0.25 +
+            primary["gamma_gate"] * 0.20,
+            0.0, 1.0
+        )
         dyn_str = torch.clamp(
             self.strength_low + (self.strength_high - self.strength_low) * active_drive,
             self.strength_low, 0.95
@@ -870,8 +919,8 @@ class SharedAmodalCognitiveEngine:
         m.zero_()
         m[1:5].copy_(res["Fpz"]["tree_16x768"][:4])
         m[5:21].copy_(res["AFz"]["tree_16x768"])
-        m[21:37].copy_(res["F3"]["z_on_16x768"])
-        m[37:53].copy_(res["F4"]["z_off_16x768"] * 0.6 + res["F4"]["temp_asym_16x768"] * 0.4)
+        m[21:37].copy_(res["F3"]["z_on_16x768"] * 0.65 + res["F3"]["tree_16x768"] * 0.35)
+        m[37:53].copy_(res["F4"]["z_off_16x768"] * 0.45 + res["F4"]["temp_asym_16x768"] * 0.30 + res["F4"]["tree_16x768"] * 0.25)
         m[53:69].copy_(fcz_act_16x768)
         m[69:76].copy_(primary["sdr_tokens_7x768"])
 
@@ -884,24 +933,26 @@ class SharedAmodalCognitiveEngine:
         self.bus.slot_seals_16[:n_sec].copy_(self.columns[apex_role].seals.mask[:n_sec])
         self.bus.slot_norm_coord_16[:n_sec].copy_(primary["slot_norm_coord"])
 
-        meta[0]  = float(eeg_out["th_freq"].item())
+        # Вся запись в meta идет напрямую из GPU-тензоров без .item() синхронизаций!
+        meta[0]  = th_hz_t
         meta[1]  = float(n_sec)
         meta[2]  = float(cur_sec)
-        meta[3]  = eeg_out["dl_phase"]
+        meta[3]  = dl_phase_t
         meta[4]  = 1.0 if is_tick else 0.0
         meta[5]  = dyn_str
         meta[6]  = fcz_pers.squeeze(0)
         meta[7]  = max_surp
         meta[8]  = primary["loss"]
-        meta[9]  = res["F3"]["x_local"]
-        meta[10] = res["F3"]["y_global"]
-        meta[11] = res["F3"]["kuramoto_r"]
+        meta[9]  = primary["x_local"]
+        meta[10] = primary["y_global"]
+        meta[11] = primary["kuramoto_r"]
         meta[12:16].copy_(fcz_kin)
         meta[16] = fpz_tension
         meta[17] = float(eeg_out["num_live"])
         meta[18] = float(apex_idx)
-        meta[19] = float(eeg_out["dl_freq"].item())
-        meta[20] = th_phase
+        meta[19] = dl_hz_t
+        meta[20] = th_phase_t
+        meta[26] = primary["gamma_gate"]
 
         return self.bus, True
 

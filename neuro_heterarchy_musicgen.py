@@ -58,7 +58,8 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
                                        need_ui_telemetry: bool = False):
     """
     100% точная математика из вашего рабочего файла:
-    использует slot_norm_coord_16, amodal_manifold_77x768[1:65] и SVD-проекцию v_aff!
+    использует slot_norm_coord_16, amodal_manifold_77x768[1:65] (где лежат все 5 регионов
+    Fpz/AFz/F3/F4/FCz) и SVD-проекцию v_aff!
     """
     meta = bus.meta_32
     n_sec = max(2, int(meta[1].item()))
@@ -138,7 +139,6 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
     return final_64, target_block, target_context, temp, top_k, cfg_coef, telemetry
 
 
-# Алиас для обратной совместимости с neuro_deterministic_reproducer.py
 def map_working_memory_to_music_field_gpu(bus: HardwareVRAMBus, semantic: UniversalMusicSemanticSpace,
                                           target_block: float, target_context: float,
                                           base_temp: float, base_top_k: int, cfg_coef: float,
@@ -411,7 +411,7 @@ def main():
     parser.add_argument('--concepts', type=str, default=None)
     parser.add_argument('--users', type=str, default=None)
     parser.add_argument('--gamma-max', type=float, default=100.0)
-    parser.add_argument('--seal-thresh', type=float, default=0.68)
+    parser.add_argument('--seal-thresh', type=float, default=1.0)
     parser.add_argument('--headless', action='store_true', default=False)
     parser.add_argument('--minimal-ui', action='store_true', default=False)
     parser.add_argument('--mode', type=str, default="semantic", choices=["semantic", "turbo"])
@@ -423,7 +423,7 @@ def main():
                         help="Отключить стохастику в MusicGen")
 
     parser.add_argument('--target-block', type=float, default=0.0)
-    parser.add_argument('--target-context', type=float, default=3.6)
+    parser.add_argument('--target-context', type=float, default=6.0)
     parser.add_argument('--target-buffer-count', type=int, default=2)
     parser.add_argument('--speed-safety-factor', type=float, default=1.0)
     parser.add_argument('--temp', type=float, default=1.0)
@@ -581,3 +581,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

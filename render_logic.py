@@ -10,22 +10,25 @@ from diffusers import (
     LCMScheduler,
     AutoencoderTiny
 )
+from neuro_amodal_engine import HardwareVRAMBus
 
 GW, GH = 512, 384
 
 
 class NeuroRender:
-    def __init__(self, mode="lcm", compile_unet=False, remote_conn=None, use_taesd=True, deterministic=False):
+    def __init__(self, mode="lcm", compile_unet=False, remote_conn=None, use_taesd=True, deterministic=False, seed=0):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype = torch.float16
         self.mode = mode.lower().replace("_", "-")
         self.remote_conn = remote_conn
         self.use_taesd = use_taesd
         self.deterministic = bool(deterministic)
+        self.base_seed = int(seed)
+        self.step_counter = 0
         self.vae_full = None
         self.vae_tiny = None
+        self.vram_bus = HardwareVRAMBus()
 
-        # Матрицы семантического моста из [77, 768] (CLIP-L) в SD-Turbo [77, 1024] и SDXL [77, 2048]
         self.proj_768_to_1024 = None
         self.proj_768_to_1280 = None
         self.proj_768_to_pooled = None
@@ -33,7 +36,7 @@ class NeuroRender:
         if self.remote_conn is not None:
             return
 
-        print(f"⏳ [NeuroRender] Загрузка модели [{self.mode.upper()}] на {self.device} (Stochastic={not self.deterministic})...")
+        print(f"⏳ [NeuroRender] Загрузка модели [{self.mode.upper()}] на {self.device} (Stochastic={not self.deterministic}, Seed={self.base_seed})...")
 
         if self.mode in ["sdxl-turbo", "sdxl"]:
             self.mode = "sdxl-turbo"
@@ -63,7 +66,6 @@ class NeuroRender:
 
         self.is_sdxl = hasattr(self.pipe, "text_encoder_2")
 
-        # Кэшируем родной Full VAE и быстрый TAESD (taesd для SD1.5/2.1, taesdxl для SDXL)
         self.vae_full = self.pipe.vae
         try:
             taesd_id = "madebyollin/taesdxl" if self.is_sdxl else "madebyollin/taesd"
@@ -84,19 +86,18 @@ class NeuroRender:
                 pass
 
         self._warmup()
-        print(f"✅ [NeuroRender] Модель {self.mode.upper()} готова! (SDXL: {self.is_sdxl}, TAESD: {self.use_taesd}, Stochastic: {not self.deterministic})")
+        print(f"✅ [NeuroRender] Модель {self.mode.upper()} готова! (Intra-Step VRAM Live Thought Injection включен)")
 
     @torch.no_grad()
     def _build_sdxl_bridge(self):
-        """Строит точный линейный мост между словарями CLIP-L (768) и OpenCLIP-bigG (1280) для SDXL."""
         try:
-            w_l = self.pipe.text_encoder.get_input_embeddings().weight.detach().float()      # [49408, 768]
-            w_g = self.pipe.text_encoder_2.get_input_embeddings().weight.detach().float()    # [49408, 1280]
+            w_l = self.pipe.text_encoder.get_input_embeddings().weight.detach().float()
+            w_g = self.pipe.text_encoder_2.get_input_embeddings().weight.detach().float()
             n = min(w_l.shape[0], w_g.shape[0])
-            sol = torch.linalg.lstsq(w_l[:n], w_g[:n]).solution                              # [768, 1280]
+            sol = torch.linalg.lstsq(w_l[:n], w_g[:n]).solution
             self.proj_768_to_1280 = sol.to(device=self.device, dtype=self.dtype)
             if hasattr(self.pipe.text_encoder_2, "text_projection"):
-                t_proj = self.pipe.text_encoder_2.text_projection.weight.detach().float()    # [1280, 1280]
+                t_proj = self.pipe.text_encoder_2.text_projection.weight.detach().float()
                 self.proj_768_to_pooled = (sol @ t_proj.T).to(device=self.device, dtype=self.dtype)
             else:
                 self.proj_768_to_pooled = self.proj_768_to_1280
@@ -105,13 +106,12 @@ class NeuroRender:
 
     @torch.no_grad()
     def _build_sdturbo_bridge(self):
-        """Строит точный линейный мост между словарями CLIP-L (768) и OpenCLIP-H (1024) для SD-Turbo."""
         try:
             clip_l = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=torch.float32).to(self.device)
-            w_l = clip_l.get_input_embeddings().weight.detach().float()                      # [49408, 768]
-            w_h = self.pipe.text_encoder.get_input_embeddings().weight.detach().float()      # [49408, 1024]
+            w_l = clip_l.get_input_embeddings().weight.detach().float()
+            w_h = self.pipe.text_encoder.get_input_embeddings().weight.detach().float()
             n = min(w_l.shape[0], w_h.shape[0])
-            sol = torch.linalg.lstsq(w_l[:n], w_h[:n]).solution                              # [768, 1024]
+            sol = torch.linalg.lstsq(w_l[:n], w_h[:n]).solution
             self.proj_768_to_1024 = sol.to(device=self.device, dtype=self.dtype)
             del clip_l
             gc.collect()
@@ -128,7 +128,6 @@ class NeuroRender:
 
     @torch.no_grad()
     def adapt_prompt_embeds(self, t_emb: torch.Tensor, pooled_emb: torch.Tensor | None = None):
-        """Автоматически адаптирует [1, 77, 768] под текущую архитектуру U-Net (768, 1024 или 2048)."""
         if t_emb.ndim == 2:
             t_emb = t_emb.unsqueeze(0)
         t_emb = t_emb.to(device=self.device, dtype=self.dtype)
@@ -147,7 +146,7 @@ class NeuroRender:
                         pooled_emb = torch.matmul(t_emb[:, -1, :], self.proj_768_to_pooled)
                     else:
                         pooled_emb = emb_1280.mean(dim=1)
-                t_emb = torch.cat([t_emb, emb_1280], dim=-1)  # [1, 77, 2048]
+                t_emb = torch.cat([t_emb, emb_1280], dim=-1)
             elif pooled_emb is None:
                 pooled_emb = torch.zeros((t_emb.shape[0], 1280), dtype=self.dtype, device=self.device)
             return t_emb, pooled_emb
@@ -193,10 +192,14 @@ class NeuroRender:
         }
 
     def generate(self, **kwargs):
-        # Извлекаем флаги стохастики/детерминизма (чтобы не передавать лишние ключи в diffusers pipe)
         req_det = kwargs.pop('deterministic', None)
         req_stoch = kwargs.pop('stochastic', None)
-        kwargs.pop('wm_5x5x32x120', None)
+        req_seed = kwargs.pop('seed', None)
+        wm_tensor = kwargs.pop('wm_5x5x32x120', None)
+
+        # Подхватываем общую VRAM-шину без сокетов и копирований через CPU!
+        self.vram_bus.try_attach_to_existing_vram()
+        has_vram_bus = (self.vram_bus.attached_pid > 0)
 
         if req_stoch is not None:
             use_det = not bool(req_stoch)
@@ -205,10 +208,19 @@ class NeuroRender:
         else:
             use_det = self.deterministic
 
+        active_seed = int(req_seed) if req_seed is not None else self.base_seed
+
         if 'use_taesd' in kwargs:
             req_t = bool(kwargs.pop('use_taesd'))
             if req_t != self.use_taesd:
                 self.set_taesd(req_t)
+
+        # Если подключена Zero-Copy VRAM шина и prompt_embeds не передан явно с CPU, берем прямо из VRAM!
+        if ('prompt_embeds' not in kwargs or kwargs['prompt_embeds'] is None) and has_vram_bus:
+            kwargs['prompt_embeds'] = self.vram_bus.live_clip_77x768.unsqueeze(0)
+
+        if wm_tensor is None and has_vram_bus:
+            wm_tensor = self.vram_bus.wm_field_5x5x32x120
 
         if 'prompt_embeds' in kwargs and kwargs['prompt_embeds'] is not None:
             t_emb, pool_emb = self.adapt_prompt_embeds(
@@ -228,17 +240,47 @@ class NeuroRender:
         kwargs["num_inference_steps"] = steps
         kwargs["strength"] = strength
 
-        # Для SD-Turbo и SDXL-Turbo guidance_scale обязательно должен быть 0.0 (иначе картинка пережжена)
         if self.mode in ["turbo", "sd-turbo", "sdxl-turbo", "sdxl"]:
             kwargs["guidance_scale"] = 0.0
         else:
-            kwargs.setdefault("guidance_scale", 1.0)
+            kwargs.setdefault("guidance_scale", 1.35)
+
+        self.step_counter += 1
 
         if use_det:
-            # Стохастика ОТКЛЮЧЕНА: фиксированный генератор шума (0 случайности от кадра к кадру)
-            kwargs["generator"] = torch.Generator(device=self.device).manual_seed(42)
+            pe = kwargs.get("prompt_embeds")
+            if wm_tensor is not None:
+                weights = torch.linspace(0.5, 2.5, wm_tensor.numel(), device=wm_tensor.device, dtype=torch.float32).view_as(wm_tensor)
+                sig = float(torch.sum(wm_tensor * weights).item()) * 100000.0
+                wm_seed = (int(abs(round(sig))) + active_seed) % 2147483640 + 1
+            elif pe is not None:
+                weights = torch.linspace(0.5, 2.5, pe.numel(), device=pe.device, dtype=torch.float32).view_as(pe)
+                sig = float(torch.sum(pe.float() * weights).item()) * 10000.0
+                wm_seed = (int(abs(round(sig))) + active_seed) % 2147483640 + 1
+            else:
+                wm_seed = 42
+            kwargs["generator"] = torch.Generator(device=self.device).manual_seed(wm_seed)
         else:
-            # Стохастика ВКЛЮЧЕНА: 100% как в старом файле (свободный стохастический сэмплинг U-Net)
-            kwargs.pop("generator", None)
+            if active_seed > 0:
+                kwargs["generator"] = torch.Generator(device=self.device).manual_seed(active_seed + self.step_counter)
+            else:
+                kwargs.pop("generator", None)
+
+        # ВНУТРИШАГОВАЯ ПОДСТАНОВКА МЫСЛИ (INTRA-STEP LIVE THOUGHT INJECTION):
+        # Между шагами денойзинга U-Net (например, между шагом 1 и шагом 2/3) мы прямо в VRAM
+        # обновляем prompt_embeds из живой рабочей памяти live_clip_77x768, не дожидаясь конца кадра!
+        if has_vram_bus and steps > 1:
+            def _live_wm_step_callback(pipe_obj, step_index, timestep, callback_kwargs):
+                live_77 = self.vram_bus.live_clip_77x768
+                if torch.norm(live_77) > 1e-3:
+                    new_pe, _ = self.adapt_prompt_embeds(live_77.unsqueeze(0))
+                    if "prompt_embeds" in callback_kwargs and callback_kwargs["prompt_embeds"] is not None:
+                        old_pe = callback_kwargs["prompt_embeds"]
+                        if old_pe.shape == new_pe.shape:
+                            callback_kwargs["prompt_embeds"] = old_pe * 0.40 + new_pe * 0.60
+                return callback_kwargs
+
+            kwargs["callback_on_step_end"] = _live_wm_step_callback
+            kwargs["callback_on_step_end_tensor_inputs"] = ["latents", "prompt_embeds"]
 
         return self.pipe(**kwargs).images[0]
