@@ -773,7 +773,12 @@ async function startWebAudioStream() {
                 if (!audioCtx || !isAudioPlaying) break;
                 const now = audioCtx.currentTime;
                 if (nextPlayTime < now) {
-                    nextPlayTime = now + 0.06;
+                    // Если произошел сетевой провал (underrun), плавно ставим горизонт на 120 мс вперед,
+                    // чтобы компенсировать любой пинг/джиттер облака без рваных пауз!
+                    nextPlayTime = now + 0.12;
+                } else if (nextPlayTime - now > 0.85) {
+                    // Если из-за всплеска сети накопилась задержка > 0.85с, мягко подтягиваем к реалтайму
+                    nextPlayTime = now + 0.25;
                 }
 
                 const audioBuf = audioCtx.createBuffer(1, float32Arr.length, AUDIO_SR);

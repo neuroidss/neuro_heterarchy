@@ -3,12 +3,11 @@
 ===================================================================================
 NEUROCANVAS: 100% GPU ZERO-BUFFER DIFFUSION RUNNER (VRAM CUDA-IPC BUS)
 ===================================================================================
-- ZERO-COPY VRAM STREAMING:
-  Вектор мысли target_77 пишется напрямую в bus.live_clip_77x768 прямо в VRAM!
-  Никаких .cpu().numpy() для эмбеддингов и wm_field_5x5x32x120!
-  Пока U-Net считает шаги денойзинга, основной цикл со скоростью 120 Гц продолжает
-  обновлять bus.live_clip_77x768 в VRAM, и U-Net подхватывает изменения мысли
-  ПРЯМО ВНУТРИ каждого шага денойзинга!
+- ГАРАНТИРОВАННОЕ ПРИМЕНЕНИЕ КОНЦЕПТОВ В ОДИНОЧНОМ И СОВМЕСТНОМ (ALL) ДОКЕРЕ:
+  1) smoothed_target записывается И в bus.live_clip_77x768 (для внутришагового
+     callback_on_step_end), И передается в req['prompt_embeds'], поэтому brain_server
+     никогда не теряет концепты ['psychedelic fractals']!
+  2) При старте с 0 девайсов генерация идет сразу и непрерывно от эндогенной коры Монти.
 ===================================================================================
 """
 
@@ -52,10 +51,6 @@ ipc_lock = threading.Lock()
 def project_amodal_bus_to_diffusion_gpu(bus: HardwareVRAMBus, semantic: UniversalSemanticSpace,
                                         strength_low: float, burst_strength: float,
                                         need_ui_telemetry: bool = False) -> tuple[torch.Tensor, float, dict]:
-    """
-    100% GPU маппинг рабочей памяти (Дельта + Тета + Бета + Гамма + Рипплы по 5 регионам).
-    Не делает НИ ОДНОГО вызова .cpu() или .item() когда need_ui_telemetry=False!
-    """
     meta = bus.meta_64
     n_sec = max(2, int(meta[1]))
     fcz_pers_t = meta[6]
@@ -218,7 +213,7 @@ class AsyncDiffusionWorker(threading.Thread):
 
         self.display_rgb = np.zeros((self.img_h, self.img_w, 3), dtype=np.uint8)
         self.prev_gpu_frame: Optional[torch.Tensor] = None
-        self.has_conditioning = False
+        self.latest_embeds = None
         self.strength = 0.60
         self.running = True
         self.lock = threading.Lock()
@@ -228,9 +223,9 @@ class AsyncDiffusionWorker(threading.Thread):
         self.frame_seq_id = 0
         self.latest_telemetry = {}
 
-    def update_conditioning(self, strength: float, telemetry: dict):
+    def update_conditioning(self, prompt_embeds_np, strength: float, telemetry: dict):
         with self.lock:
-            self.has_conditioning = True
+            self.latest_embeds = prompt_embeds_np
             self.strength = float(np.clip(strength, 0.30, 0.95))
             if telemetry:
                 self.latest_telemetry = telemetry
@@ -249,7 +244,7 @@ class AsyncDiffusionWorker(threading.Thread):
         internal_rgb = np.zeros((self.img_h, self.img_w, 3), dtype=np.uint8)
         while self.running:
             with self.lock:
-                ready = self.has_conditioning
+                embeds = self.latest_embeds
                 s_val = self.strength
                 t_steps = self.target_steps
                 a_steps = self.actual_steps
@@ -265,7 +260,7 @@ class AsyncDiffusionWorker(threading.Thread):
                 if np.max(self.display_rgb) > 0:
                     internal_rgb = self.display_rgb
 
-            if not ready:
+            if embeds is None:
                 time.sleep(0.003)
                 continue
 
@@ -282,11 +277,12 @@ class AsyncDiffusionWorker(threading.Thread):
 
             try:
                 t0 = time.perf_counter()
-                # НИКАКИХ prompt_embeds и wm_5x5x32x120 по сокету!
-                # brain_server читает их напрямую из VRAM через HardwareVRAMBus (Zero-Copy)!
+                # ВСЕГДА передаем prompt_embeds, чтобы brain_server железно видел концепты
+                # в любом Docker-окружении (и в одиночном, и в совместном с MusicGen)!
                 req = {
                     'cmd': 'generate',
                     'image_np': internal_rgb,
+                    'prompt_embeds': embeds,
                     'strength': eff_s,
                     'num_inference_steps': steps_to_run,
                     'guidance_scale': cfg,
@@ -462,6 +458,12 @@ def main():
                     new_c = Client(('localhost', 6004), authkey=b'diff_ctrl')
                     with ctrl_lock:
                         ctrl_conn = new_c
+                        with semantic.lock:
+                            if semantic.words:
+                                ctrl_conn.send({
+                                    'cmd': 'sync_from_runner',
+                                    'concepts': list(semantic.words)
+                                })
 
                 has_msg = False
                 with ctrl_lock:
@@ -473,7 +475,17 @@ def main():
                     cmd = msg.get('cmd')
                     if cmd == 'update_concepts':
                         new_words = msg.get('concepts', [])
-                        semantic.update_concepts_on_the_fly(new_words)
+                        # Если это первичный синк от гейтвея с пустым списком, а у нас загружен лор из CLI —
+                        # не затираем наш лор, а отправляем его в гейтвей!
+                        if msg.get('is_initial_sync') and not new_words and semantic.words:
+                            with ctrl_lock:
+                                if ctrl_conn is not None:
+                                    ctrl_conn.send({
+                                        'cmd': 'sync_from_runner',
+                                        'concepts': list(semantic.words)
+                                    })
+                        else:
+                            semantic.update_concepts_on_the_fly(new_words)
                     elif cmd == 'update_params':
                         p = msg.get('params', {})
                         if 'mode' in p and p['mode'] != args.mode:
@@ -552,16 +564,9 @@ def main():
                     elif cmd == "flush_canvas":
                         worker.flush()
             else:
-                # Высокочастотный цикл обновления рабочей памяти в VRAM (125 Гц),
-                # чтобы пока U-Net рендерит кадр, его callback_on_step_end видел живое изменение мысли!
                 time.sleep(0.008)
 
-            bus, has_live = amodal_engine.step(dt)
-            if not has_live:
-                if hud:
-                    hud.render_waiting()
-                time.sleep(0.02)
-                continue
+            bus, _ = amodal_engine.step(dt)
 
             need_telem = (hud is not None) or ((t_now - last_telem_t) >= 0.15) or recorder_instance.is_recording
             target_77, dyn_str, telemetry = project_amodal_bus_to_diffusion_gpu(
@@ -571,8 +576,6 @@ def main():
 
             ema = float(np.clip(dt / max(0.015, current_ema_smooth), 0.08, 0.85))
             smoothed_target.mul_(1.0 - ema).add_(target_77, alpha=ema)
-
-            # ZERO-COPY: пишем живой эмбеддинг прямо в общую VRAM-шину!
             bus.live_clip_77x768.copy_(smoothed_target)
 
             if (t_now - last_telem_t) >= 0.15 and need_telem:
@@ -604,7 +607,7 @@ def main():
                         except Exception:
                             ctrl_conn = None
 
-            worker.update_conditioning(dyn_str, telemetry)
+            worker.update_conditioning(smoothed_target.unsqueeze(0).cpu().numpy(), dyn_str, telemetry)
 
             if hud:
                 hud.render(worker.get_canvas(), telemetry, fps=worker.fps, dt=dt)

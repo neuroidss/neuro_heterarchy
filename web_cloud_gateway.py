@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from multiprocessing.connection import Listener
 from pylsl import StreamInfo, StreamOutlet
 import numpy as np
+import math
 
 from neuro_recorder import recorder_instance
 
@@ -214,15 +215,11 @@ video_state_lock = threading.Lock()
 def _recalc_and_push_buffer_locked():
     total_bytes = sum(len(c) for c in engine_audio_chunks)
     total_sec = total_bytes / float(SAMPLE_RATE * 4)
-    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ДЛЯ ОБЛАКА:
-    # В headless-режиме считаем эффективное число блоков эквивалентно целевому запасу времени (по 0.16с),
-    # чтобы когда server_realtime_audio_clock откусывает по 0.04с, musicgen_server НЕ думал,
-    # что буфер упал в 0, и НЕ раздувал блоки до 1.2с!
-    effective_chunks = max(len(engine_audio_chunks), int(math.ceil(total_sec / 0.12))) if total_sec > 0.02 else 0
+    total_chunks = len(engine_audio_chunks)
 
     with music_state_lock:
         music_state["buffer_sec"] = round(total_sec, 2)
-        music_state["buffer_chunks"] = effective_chunks
+        music_state["buffer_chunks"] = total_chunks
 
     with music_conn_lock:
         if active_music_conn is not None:
@@ -230,13 +227,10 @@ def _recalc_and_push_buffer_locked():
                 active_music_conn.send({
                     'cmd': 'gateway_buffer_stat',
                     'buffer_sec': total_sec,
-                    'buffer_chunks': effective_chunks
+                    'buffer_chunks': total_chunks
                 })
             except Exception:
                 pass
-
-
-import math
 
 
 def server_realtime_audio_clock():
@@ -644,7 +638,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok", "video": cfg_copy})
 
         elif clean_path == '/api/video/switch_lore':
-            lore_file = str(data.get("lore_file", "lore/maze_lore.txt")).strip()
+            lore_file = str(data.get("lore_file", "")).strip()
             new_sections = parse_regional_lore_file(lore_file)
             with video_state_lock:
                 video_state["lore_file"] = lore_file
@@ -927,12 +921,23 @@ def ipc_control_listener():
             with diff_ctrl_lock:
                 active_diff_ctrl_conn = conn
                 with world_state_lock:
-                    active_diff_ctrl_conn.send({"cmd": "update_concepts", "concepts": list(world_state["concepts"])})
+                    if world_state["concepts"]:
+                        active_diff_ctrl_conn.send({
+                            "cmd": "update_concepts",
+                            "concepts": list(world_state["concepts"]),
+                            "is_initial_sync": True
+                        })
             while True:
                 msg = conn.recv()
                 if isinstance(msg, dict):
                     cmd = msg.get("cmd")
-                    if cmd == "telemetry":
+                    if cmd == "sync_from_runner":
+                        runner_c = msg.get("concepts", [])
+                        with world_state_lock:
+                            if runner_c and not world_state["concepts"]:
+                                world_state["concepts"] = list(runner_c)
+                        broadcast_full_state()
+                    elif cmd == "telemetry":
                         with world_state_lock:
                             world_state["current_puck"] = msg.get("puck", [0.0, 0.0])
                             world_state["active_thought"] = msg.get("active_thought", "")
@@ -1073,10 +1078,7 @@ def ipc_audio_receiver():
 
                     with engine_audio_lock:
                         engine_audio_chunks.append(bytearray(raw_bytes))
-                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ДЛЯ ОБЛАКА:
-                        # Ограничиваем буфер не числом мелких 0.02с чанков (иначе 4 чанка по 0.02с = 0.08с,
-                        # и гейтвей выбрасывал музыку!), а реальной длительностью в секундах (до 3.8 сек)!
-                        max_bytes = int(SAMPLE_RATE * 4 * 3.8)
+                        max_bytes = int(SAMPLE_RATE * 4 * 1.5)
                         while sum(len(c) for c in engine_audio_chunks) > max_bytes and len(engine_audio_chunks) > 2:
                             engine_audio_chunks.pop(0)
                         _recalc_and_push_buffer_locked()

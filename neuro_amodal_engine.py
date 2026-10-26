@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: 100% GPU VRAM-RESIDENT AMODAL COGNITIVE ENGINE (ZERO CPU / ZERO SYNC)
+NEUROCANVAS: 100% GPU VRAM-RESIDENT AMODAL COGNITIVE ENGINE (ZERO CPU / ZERO SINE)
 ===================================================================================
-- ZERO-COPY VRAM IPC: Все тензоры (включая live_clip_77x768 и live_music_64x768)
-  живут в едином блоке VRAM и читаются генераторами напрямую во время шагов денойзинга!
-- МГНОВЕННЫЙ ФОКУС НАСТОЯЩЕГО МОМЕНТА (Instantaneous Present-Moment Kernel):
-  Не ждет окончания цикла Теты или Дельты — последние 20-40 мс сигнала имеют
-  максимальный вес, поэтому зарождающаяся мысль применяется в ту же миллисекунду!
-- НОЛЬ СИНХРОНИЗАЦИЙ GPU->CPU В ГОРЯЧЕМ ЦИКЛЕ:
-  Убраны тяжелые SVD и .item() из цикла вычислений колонок.
+- НИКАКИХ СИНУСОИД И ИСКУССТВЕННЫХ ГЕНЕРАТОРОВ:
+  Движок работает исключительно от реального сигнала мозга (LSL / raw_eeg).
+- ЧЕСТНЫЙ КАСКАД 5 РЕГИОНОВ МОНТИ (Fpz <-> AFz <-> F3/F4 <-> FCz):
+  Даже если физический девайс подключен только к одному региону (например, FCz),
+  активность мозга каскадно распространяется во все 5 регионов через топологию
+  диполей (macro/meso/micro/left/right masks), временные окна tau_sec и
+  межрегиональную гетерархию предсказаний (W_topdown_sdr) и аномалий (upward_sdr_anomaly).
 ===================================================================================
 """
 
@@ -19,6 +19,7 @@ import os
 import json
 import time
 import math
+import threading
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -48,27 +49,24 @@ BAND_RIPPLES = 4
 
 REGION_ROLES = ["AFz", "FCz", "F3", "F4", "Fpz"]
 REGION_TAU_SEC = {
-    "FCz": 0.020,  # Мгновенная гамма-динамика действий (SMA)
-    "F3":  0.18,   # Быстрая реакция форм ON-подпространства
-    "F4":  0.18,   # Быстрая реакция контекста OFF-подпространства
-    "AFz": 0.65,   # Динамические правила композиции (A ⊃ B)
-    "Fpz": 2.50,   # Мета-правила для правил (BA10)
+    "FCz": 0.020,
+    "F3":  0.18,
+    "F4":  0.18,
+    "AFz": 0.65,
+    "Fpz": 2.50,
 }
 
 IPC_HANDLE_FILE = "/dev/shm/neuro_amodal_vram_v4_ipc.json"
-# 210288 (базовая шина) + 59136 (live_clip_77x768) + 49152 (live_music_64x768) = 318576 floats
 TOTAL_AMODAL_FLOATS = 318576
 
 
 class HardwareVRAMBus:
-    """
-    100% GPU VRAM шина с прямыми буферами для внутришаговой подстановки мысли (Intra-Step Streaming).
-    """
     def __init__(self):
         self.gpu_flat = torch.zeros(TOTAL_AMODAL_FLOATS, dtype=torch.float32, device=DEVICE)
         self._bind_views()
         self.is_owner = False
         self.attached_pid = -1
+        self.attach_failed = False
 
     def _bind_views(self):
         self.meta_64                = self.gpu_flat[0:64]
@@ -77,7 +75,7 @@ class HardwareVRAMBus:
         self.z_slots_16x768         = self.gpu_flat[59200:71488].view(MAX_SLOTS, 768)
         self.causal_flow_16x16      = self.gpu_flat[71488:71744].view(MAX_SLOTS, MAX_SLOTS)
         self.slot_order_16          = self.gpu_flat[71744:71760]
-        self.slot_stabs_16          = self.gpu_flat[71776 - 16:71776]
+        self.slot_stabs_16          = self.gpu_flat[71760:71776]
         self.slot_seals_16          = self.gpu_flat[71776:71792]
         self.slot_norm_coord_16     = self.gpu_flat[71792:71808]
         self.wm_field_5x5x32x120    = self.gpu_flat[71808:167808].view(NUM_REGIONS, NUM_BANDS, NUM_SLOTS, NUM_PAIRS)
@@ -85,7 +83,6 @@ class HardwareVRAMBus:
         self.monty_anom_5x4096      = self.gpu_flat[188288:208768].view(NUM_REGIONS, NUM_COLUMNS)
         self.ripple_dag_5x16x16     = self.gpu_flat[208768:210048].view(NUM_REGIONS, MAX_CLOCK_SECTORS, MAX_CLOCK_SECTORS)
         self.seals_and_stabs_5x3x16 = self.gpu_flat[210048:210288].view(NUM_REGIONS, 3, MAX_CLOCK_SECTORS)
-        # Живые буферы в VRAM для мгновенного чтения изнутри U-Net и MusicGen без сокетов!
         self.live_clip_77x768       = self.gpu_flat[210288:269424].view(77, 768)
         self.live_music_64x768      = self.gpu_flat[269424:318576].view(64, 768)
 
@@ -147,11 +144,10 @@ class HardwareVRAMBus:
             print(f"🔗 [VRAM CUDA-IPC] Прямой Zero-Copy доступ к рабочей памяти в VRAM PID={owner_pid} (0% CPU!)")
             return True
         except Exception:
-            torch.cuda.synchronize()
             return False
 
     def try_attach_to_existing_vram(self) -> bool:
-        if self.is_owner or not os.path.exists(IPC_HANDLE_FILE):
+        if self.is_owner or self.attach_failed or not os.path.exists(IPC_HANDLE_FILE):
             return False
         try:
             with open(IPC_HANDLE_FILE, "r", encoding="utf-8") as f:
@@ -159,8 +155,12 @@ class HardwareVRAMBus:
             owner_pid = int(d["pid"])
             if owner_pid == os.getpid() or not os.path.exists(f"/proc/{owner_pid}"):
                 return False
-            return self.attach_from_ipc_dict(d)
+            ok = self.attach_from_ipc_dict(d)
+            if not ok:
+                self.attach_failed = True
+            return ok
         except Exception:
+            self.attach_failed = True
             return False
 
 
@@ -237,7 +237,7 @@ class DirectGPUSpectralFrontend(nn.Module):
         self.last_pull_time = [0.0] * NUM_MAX_DEVICES
         self.device_fs = [250.0] * NUM_MAX_DEVICES
         self.connected_uids = set()
-        self.last_resolve_t = 0.0
+        self._lsl_lock = threading.Lock()
 
         self.register_buffer("raw_buf_gpu", torch.zeros((NUM_MAX_DEVICES, NUM_CHANNELS, BUF_SIZE), device=DEVICE))
         self.register_buffer("base_fftfreq_256", torch.fft.fftfreq(BUF_SIZE, d=1.0, device=DEVICE).view(1, 1, BUF_SIZE))
@@ -245,13 +245,10 @@ class DirectGPUSpectralFrontend(nn.Module):
         slot_ang = -math.pi + (TWO_PI / NUM_SLOTS) * (torch.arange(NUM_SLOTS, device=DEVICE) + 0.5)
         self.register_buffer("slot_angles", slot_ang.view(1, NUM_SLOTS, 1, 1))
 
-        # МГНОВЕННОЕ ЯДРО НАСТОЯЩЕГО МОМЕНТА (Instantaneous Present-Moment Recency Kernel):
-        # Свежие сэмплы в правом конце буфера (t -> 255) имеют экспоненциально больший вес,
-        # чтобы не ждать окончания 1-секундного окна и мгновенно ловить зарождение мысли!
         t_idx = torch.linspace(-1.0, 0.0, BUF_SIZE, device=DEVICE).view(1, 1, 1, BUF_SIZE)
-        self.register_buffer("recency_fast", torch.exp(t_idx * 4.5))   # Фокус на последних ~55 мс (Гамма / Рипплы)
-        self.register_buffer("recency_med",  torch.exp(t_idx * 2.2))   # Фокус на последних ~120 мс (Тета / Бета)
-        self.register_buffer("recency_slow", torch.exp(t_idx * 1.0))   # Фокус на последних ~300 мс (Дельта)
+        self.register_buffer("recency_fast", torch.exp(t_idx * 4.5))
+        self.register_buffer("recency_med",  torch.exp(t_idx * 2.2))
+        self.register_buffer("recency_slow", torch.exp(t_idx * 1.0))
 
         self.register_buffer("delta_centers", torch.linspace(0.5, 3.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
         self.register_buffer("theta_centers", torch.linspace(3.8, 8.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
@@ -259,14 +256,22 @@ class DirectGPUSpectralFrontend(nn.Module):
         self.register_buffer("gamma_centers", torch.linspace(30.0, gamma_max, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
         self.register_buffer("rip_centers",   torch.linspace(70.0, 100.0, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
 
+        self._hotplug_thread = threading.Thread(target=self._background_lsl_loop, daemon=True)
+        self._hotplug_thread.start()
+
+    def _background_lsl_loop(self):
+        while True:
+            try:
+                self._poll_lsl_hotplug()
+            except Exception:
+                pass
+            time.sleep(0.8)
+
     def _poll_lsl_hotplug(self):
         now = time.time()
-        if now - self.last_resolve_t < 0.8:
-            return
-        self.last_resolve_t = now
-        try:
-            streams = resolve_streams(wait_time=0.02)
-            live_uids = {s.source_id() for s in streams}
+        streams = resolve_streams(wait_time=0.04)
+        live_uids = {s.source_id() for s in streams}
+        with self._lsl_lock:
             for i in range(NUM_MAX_DEVICES):
                 if self.inlets[i] is not None:
                     if self.stream_uids[i] not in live_uids or (now - self.last_pull_time[i] > 2.5):
@@ -292,8 +297,6 @@ class DirectGPUSpectralFrontend(nn.Module):
                     _, r = parse_stream_identity(s.name())
                     self.stream_roles[slot] = r if r else CANONICAL_ROLES[slot % len(CANONICAL_ROLES)]
                     print(f"📡 [DIRECT GPU LSL] Стрим '{s.name()}' -> GPU Слот {slot} (Роль: {self.stream_roles[slot]})")
-        except Exception:
-            pass
 
     @torch.no_grad()
     def _extract_ciplv_band(self, fft_exp: torch.Tensor, freqs_4d: torch.Tensor, pos_mask: torch.Tensor,
@@ -345,8 +348,6 @@ class DirectGPUSpectralFrontend(nn.Module):
         fft_exp = fft_clean.unsqueeze(1)
         freqs_4d = freqs_dev.unsqueeze(1)
 
-        # Умножаем фазовые окна Теты и Дельты на экспоненциальное ядро настоящего момента (recency_fast / med / slow),
-        # чтобы система НЕ ждала конца секунды или конца тета-цикла, а сразу выдавала текущую мысль!
         w_raw = torch.exp(3.2 * torch.cos(phi_theta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles))
         w_fast = w_raw * self.recency_fast
         w_fast = w_fast / (torch.sum(w_fast, dim=-1, keepdim=True) + 1e-6)
@@ -420,16 +421,23 @@ class DirectGPUSpectralFrontend(nn.Module):
         }
 
     @torch.no_grad()
-    def pull_and_compute_gpu(self, router) -> Optional[dict]:
-        self._poll_lsl_hotplug()
+    def pull_and_compute_gpu(self, router) -> dict:
+        """
+        НИКОГДА не возвращает None и НИКОГДА не ставит генерацию на паузу!
+        Никаких искусственных синусоид: если девайс в процессе переключения роли
+        или еще не подключен, конвейер продолжает бесшовно работать по текущему
+        буферу raw_buf_gpu и состояниям колонок Монти в VRAM.
+        """
         now = time.time()
-        active_slots = [i for i, inl in enumerate(self.inlets) if inl is not None]
-        if not active_slots:
-            return None
+        with self._lsl_lock:
+            active_slots = [i for i, inl in enumerate(self.inlets) if inl is not None]
 
         for i in active_slots:
             try:
-                chunk, _ = self.inlets[i].pull_chunk(timeout=0.0, max_samples=BUF_SIZE)
+                inl = self.inlets[i]
+                if inl is None:
+                    continue
+                chunk, _ = inl.pull_chunk(timeout=0.0, max_samples=BUF_SIZE)
                 if chunk:
                     self.last_pull_time[i] = now
                     t_chunk = torch.tensor(chunk, dtype=torch.float32, device=DEVICE).T
@@ -440,33 +448,49 @@ class DirectGPUSpectralFrontend(nn.Module):
                         self.raw_buf_gpu[i] = torch.roll(self.raw_buf_gpu[i], shifts=-n, dims=1)
                         self.raw_buf_gpu[i, :, -n:].copy_(t_chunk)
             except Exception:
-                self.connected_uids.discard(self.stream_uids[i])
-                self.inlets[i] = None
+                with self._lsl_lock:
+                    self.connected_uids.discard(self.stream_uids[i])
+                    self.inlets[i] = None
 
-        fresh_slots = [
-            i for i, inl in enumerate(self.inlets)
-            if inl is not None and (now - self.last_pull_time[i] <= 1.5)
-        ]
-        if not fresh_slots:
-            fresh_slots = [i for i, inl in enumerate(self.inlets) if inl is not None]
-        if not fresh_slots:
-            return None
+        with self._lsl_lock:
+            fresh_slots = [
+                i for i, inl in enumerate(self.inlets)
+                if inl is not None and (now - self.last_pull_time[i] <= 1.5)
+            ]
+            if not fresh_slots:
+                fresh_slots = [i for i, inl in enumerate(self.inlets) if inl is not None]
 
-        sub_buf = self.raw_buf_gpu[fresh_slots]
-        D = sub_buf.shape[0]
-        fs_vec = torch.tensor([self.device_fs[i] for i in fresh_slots], device=DEVICE).view(D, 1, 1)
+        if fresh_slots:
+            sub_buf = self.raw_buf_gpu[fresh_slots]
+            D = sub_buf.shape[0]
+            fs_vec = torch.tensor([self.device_fs[i] for i in fresh_slots], device=DEVICE).view(D, 1, 1)
 
-        roles = []
-        for s_i in fresh_slots:
-            stream_r = self.stream_roles[s_i]
-            sname = self.stream_names[s_i]
-            has_explicit_stream_role = any(r.lower() in sname.lower() for r in REGION_ROLES)
-            if s_i in router.overrides and router.overrides[s_i] is not None:
-                roles.append(router.overrides[s_i])
-            elif has_explicit_stream_role:
-                roles.append(stream_r)
+            roles = []
+            for s_i in fresh_slots:
+                stream_r = self.stream_roles[s_i]
+                sname = self.stream_names[s_i]
+                has_explicit_stream_role = any(r.lower() in sname.lower() for r in REGION_ROLES)
+                if s_i in router.overrides and router.overrides[s_i] is not None:
+                    roles.append(router.overrides[s_i])
+                elif has_explicit_stream_role:
+                    roles.append(stream_r)
+                else:
+                    roles.append(router.static_map.get(s_i) or stream_r)
+
+            self._last_valid_roles = list(roles)
+            self._last_valid_slots = list(fresh_slots)
+        else:
+            # Бесшовный режим во время старта / переключения региона / реконнекта BLE:
+            # Никаких пауз и никаких синусоид — берем последний активный слот буфера raw_buf_gpu!
+            fallback_slots = getattr(self, "_last_valid_slots", [0])
+            sub_buf = self.raw_buf_gpu[fallback_slots]
+            D = sub_buf.shape[0]
+            fs_vec = torch.tensor([self.device_fs[i] for i in fallback_slots], device=DEVICE).view(D, 1, 1)
+            override_r = router.overrides.get(0) or router.static_map.get(0)
+            if override_r in REGION_ROLES:
+                roles = [override_r] * D
             else:
-                roles.append(router.static_map.get(s_i) or stream_r)
+                roles = getattr(self, "_last_valid_roles", ["AFz"] * D)
 
         return self.compute_from_buffer_gpu(sub_buf, fs_vec, roles)
 
@@ -523,12 +547,8 @@ class AmodalActionIntegratorGPU(nn.Module):
 
     @torch.no_grad()
     def step_gpu(self, raw_wave_16x768: torch.Tensor, temp_ry: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        100% GPU матричный интегратор без синхронизирующего CPU вызова torch.linalg.svd!
-        """
         centered = raw_wave_16x768 - raw_wave_16x768.mean(dim=0, keepdim=True)
         normed = F.normalize(centered, p=2, dim=-1)
-        # Быстрая ковариационная проекция на 16 собственных направлений волны без SVD-синхронизации:
         gram = torch.matmul(normed, normed.T)
         projected = F.normalize(torch.matmul(gram, raw_wave_16x768), p=2, dim=-1) * torch.norm(raw_wave_16x768, dim=-1, keepdim=True)
 
@@ -598,6 +618,11 @@ class AmodalMontyColumnGPU(nn.Module):
     @torch.no_grad()
     def synthesize_virtual_gpu(self, master_iplv: torch.Tensor, master_rip: torch.Tensor,
                                master_5x32x120: torch.Tensor, bleed_scale: float = 0.35):
+        """
+        Детерминированный каскад в регионы, где сейчас нет физического девайса:
+        НИКАКИХ синусоид — только фильтрация реального сигнала мозга через
+        пространственные маски диполей региона!
+        """
         if self.role == "Fpz":
             mask = self.geom["macro_mask"]
             tgt = master_iplv * mask * (0.85 * bleed_scale)
@@ -631,9 +656,6 @@ class AmodalMontyColumnGPU(nn.Module):
                     n_sec: int, cur_sec: int, is_tick: bool, dt: float,
                     top_down_parent_sdr: Optional[torch.Tensor] = None,
                     bottom_up_child_anomaly: Optional[torch.Tensor] = None) -> dict:
-        """
-        100% Тензорное ядро без единого .item() внутри вычислений!
-        """
         proj_T = self.geom["proj_Px768"]
         raw_delta_32xP = bands_5x32x120[BAND_DELTA]
         raw_theta_32xP = bands_5x32x120[BAND_THETA]
@@ -933,7 +955,6 @@ class SharedAmodalCognitiveEngine:
         self.bus.slot_seals_16[:n_sec].copy_(self.columns[apex_role].seals.mask[:n_sec])
         self.bus.slot_norm_coord_16[:n_sec].copy_(primary["slot_norm_coord"])
 
-        # Вся запись в meta идет напрямую из GPU-тензоров без .item() синхронизаций!
         meta[0]  = th_hz_t
         meta[1]  = float(n_sec)
         meta[2]  = float(cur_sec)
@@ -959,15 +980,12 @@ class SharedAmodalCognitiveEngine:
     @torch.no_grad()
     def step(self, dt: float) -> tuple[HardwareVRAMBus, bool]:
         if not self.is_host and self.bus.try_attach_to_existing_vram():
-            return self.bus, bool((self.bus.meta_64[17] > 0.5).item())
+            return self.bus, True
 
         self._ensure_host_initialized()
         ctx = torch.cuda.stream(self.high_pri_stream) if self.high_pri_stream is not None else torch.no_grad()
         with ctx:
             eeg_out = self.spectral_gpu.pull_and_compute_gpu(self.router)
-            if eeg_out is None:
-                self.bus.meta_64[17] = 0.0
-                return self.bus, False
             return self._update_bus_from_eeg_dict(eeg_out, dt)
 
     @torch.no_grad()
