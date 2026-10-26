@@ -979,9 +979,18 @@ class SharedAmodalCognitiveEngine:
 
     @torch.no_grad()
     def step(self, dt: float) -> tuple[HardwareVRAMBus, bool]:
-        if not self.is_host and self.bus.try_attach_to_existing_vram():
-            return self.bus, True
+        # 1. Сначала пробуем подключиться к уже работающему единому движку Монти:
+        if not self.is_host:
+            if self.bus.try_attach_to_existing_vram():
+                # Мы успешно подключены как клиент — используем готовую рабочую память единого Монти!
+                return self.bus, True
+            elif os.path.exists(IPC_HANDLE_FILE):
+                # Другой процесс (хост) прямо сейчас считает Монти — мы не создаем второй экземпляр,
+                # а ждем подключения, не забивая GPU дублирующими расчетами!
+                time.sleep(0.01)
+                return self.bus, True
 
+        # 2. Если хоста еще нет — становимся ЕДИНСТВЕННЫМ хостом Монти на всю систему:
         self._ensure_host_initialized()
         ctx = torch.cuda.stream(self.high_pri_stream) if self.high_pri_stream is not None else torch.no_grad()
         with ctx:
