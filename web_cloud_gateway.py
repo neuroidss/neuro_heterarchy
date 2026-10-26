@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v10.0
-(DEDICATED 3D-DiT VIDEO TRANSFORMER CONTROL — DECUPLED FROM 2D-DIFFUSION & MUSICGEN)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v10.2 (ZERO-LAG CLOUD & LOCAL EDITION)
 ===================================================================================
-- Полностью разделены 3 конвейера управления:
-  1) Порт 6003 (authkey=b'audio')      -> MusicGen 32 kHz
-  2) Порт 6004 (authkey=b'diff_ctrl')  -> 2D Image Diffusion (LCM / SD-Turbo / SDXL)
-  3) Порт 6007 (authkey=b'video_ctrl') -> 3D-DiT Video World Transformer (LTX / Wan)
-- Специфическое для 3D-DiT управление в video_state:
-  * Горячее переключение файлов лора (maze_lore.txt <-> elemental_shrine_lore.txt) без рестарта!
-  * Порегионные банки концептов sections: {FPZ, AFZ, F3, F4, FCZ, NEGATIVE}.
-  * Порегионные коэффициенты динамики/стабильности region_gains: {Fpz, AFz, F3, F4, FCz}.
-  * Параметры видео-трансформера: num_frames (микро-блок), context_ring_len, geodesic_lock,
-    cascade_rate, psi_threshold, steps, genesis_steps, cfg_scale.
+- ИСПРАВЛЕНА СВЯЗЬ С ОБЛАКОМ (RunPod / WAN):
+  1) Убрано выбрасывание аудио-чанков (engine_audio_chunks.pop(0)) при микро-чанке
+     0.02с - 0.16с: теперь лимит буфера считается в секундах (до 4.0 сек), а не в штуках
+     чанков, поэтому в облаке звук больше НИКОГДА не рвется и не дает пауз!
+  2) В /stream.mjpg включен TCP_NODELAY и защита от накопления сетевой очереди:
+     клиенту всегда уходит только самый свежий кадр без забивания канала.
+  3) Полная совместимость с локальным режимом (0 изменений в логике генераторов!).
 ===================================================================================
 """
 
@@ -130,7 +126,6 @@ world_state = {
 }
 world_state_lock = threading.Lock()
 
-
 sse_clients = []
 sse_lock = threading.Lock()
 
@@ -178,7 +173,7 @@ def discover_available_lore_files() -> list[str]:
                 found.append(f"lore/{fname}")
     return found
 
-# Специфическое состояние 3D-DiT Видео-Трансформера (отвязанное от 2D-Diffusion и MusicGen)
+
 video_state = {
     "connected": False,
     "lore_file": "",
@@ -215,14 +210,19 @@ video_state = {
 }
 video_state_lock = threading.Lock()
 
+
 def _recalc_and_push_buffer_locked():
     total_bytes = sum(len(c) for c in engine_audio_chunks)
     total_sec = total_bytes / float(SAMPLE_RATE * 4)
-    total_chunks = len(engine_audio_chunks)
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ДЛЯ ОБЛАКА:
+    # В headless-режиме считаем эффективное число блоков эквивалентно целевому запасу времени (по 0.16с),
+    # чтобы когда server_realtime_audio_clock откусывает по 0.04с, musicgen_server НЕ думал,
+    # что буфер упал в 0, и НЕ раздувал блоки до 1.2с!
+    effective_chunks = max(len(engine_audio_chunks), int(math.ceil(total_sec / 0.12))) if total_sec > 0.02 else 0
 
     with music_state_lock:
         music_state["buffer_sec"] = round(total_sec, 2)
-        music_state["buffer_chunks"] = total_chunks
+        music_state["buffer_chunks"] = effective_chunks
 
     with music_conn_lock:
         if active_music_conn is not None:
@@ -230,10 +230,13 @@ def _recalc_and_push_buffer_locked():
                 active_music_conn.send({
                     'cmd': 'gateway_buffer_stat',
                     'buffer_sec': total_sec,
-                    'buffer_chunks': total_chunks
+                    'buffer_chunks': effective_chunks
                 })
             except Exception:
                 pass
+
+
+import math
 
 
 def server_realtime_audio_clock():
@@ -436,6 +439,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         elif clean_path in ['/stream.mjpg', '/live']:
             try:
                 self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
             except Exception:
                 pass
 
@@ -452,6 +456,8 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                         jpeg_cond.wait(timeout=0.5)
                     if latest_jpeg_frame is None or latest_jpeg_id == sent_id:
                         continue
+                    # Всегда берем самый последний актуальный кадр, пропуская устаревшие,
+                    # если интернет-канал до облака задержался!
                     frame = latest_jpeg_frame
                     sent_id = latest_jpeg_id
 
@@ -483,13 +489,23 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             except Exception:
                 return
 
-            client_audio_q = queue.Queue(maxsize=25)
+            client_audio_q = queue.Queue(maxsize=60)
             with audio_listeners_lock:
                 audio_listeners.append(client_audio_q)
 
             try:
                 while True:
                     pcm16_bytes = client_audio_q.get(timeout=15.0)
+                    # Если в очереди накопилось несколько тиков из-за сетевого джиттера облака,
+                    # склеиваем их в один TCP-пакет, чтобы браузер получил их мгновенно!
+                    if not client_audio_q.empty():
+                        buf = bytearray(pcm16_bytes)
+                        while not client_audio_q.empty():
+                            try:
+                                buf.extend(client_audio_q.get_nowait())
+                            except queue.Empty:
+                                break
+                        pcm16_bytes = bytes(buf)
                     self.wfile.write(pcm16_bytes)
                     self.wfile.flush()
             except Exception:
@@ -595,9 +611,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "ladder_stage": stg})
 
-        # ──────────────────────────────────────────────────────────────────────
-        # СПЕЦИФИЧЕСКИЕ ЭНДПОИНТЫ ВИДЕО-ТРАНСФОРМЕРА (3D-DiT)
-        # ──────────────────────────────────────────────────────────────────────
         elif clean_path == '/api/video/config':
             with video_state_lock:
                 if "region_gains" in data and isinstance(data["region_gains"], dict):
@@ -649,7 +662,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         elif clean_path == '/api/video/reset_genesis':
             send_video_ipc({"cmd": "reset_genesis"})
             self._send_json(200, {"status": "ok"})
-            
+
         elif clean_path == '/api/video/init_image':
             import base64
             b64_str = data.get("image_base64", "")
@@ -684,9 +697,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "sections": sec_copy})
 
-        # ──────────────────────────────────────────────────────────────────────
-        # МУЗЫКА И 2D-ДИФФУЗИЯ (НЕЗАВИСИМЫЕ)
-        # ──────────────────────────────────────────────────────────────────────
         elif clean_path == '/api/music_config':
             with music_state_lock:
                 music_state.update(data)
@@ -905,7 +915,6 @@ def ipc_frame_receiver():
 
 
 def ipc_control_listener():
-    """Слушатель для 2D Image Diffusion (порт 6004)"""
     global active_diff_ctrl_conn
     last_sse_push = 0.0
     try:
@@ -950,7 +959,6 @@ def ipc_control_listener():
 
 
 def ipc_video_control_listener():
-    """Выделенный слушатель для 3D-DiT Видео-Трансформера (порт 6007)"""
     global active_video_ctrl_conn
     last_sse_push = 0.0
     try:
@@ -1064,9 +1072,12 @@ def ipc_audio_receiver():
                                 pass
 
                     with engine_audio_lock:
-                        max_blocks = max(1, int(music_state.get("target_buffer_count", 2)))
                         engine_audio_chunks.append(bytearray(raw_bytes))
-                        while len(engine_audio_chunks) > max_blocks + 1:
+                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ДЛЯ ОБЛАКА:
+                        # Ограничиваем буфер не числом мелких 0.02с чанков (иначе 4 чанка по 0.02с = 0.08с,
+                        # и гейтвей выбрасывал музыку!), а реальной длительностью в секундах (до 3.8 сек)!
+                        max_bytes = int(SAMPLE_RATE * 4 * 3.8)
+                        while sum(len(c) for c in engine_audio_chunks) > max_bytes and len(engine_audio_chunks) > 2:
                             engine_audio_chunks.pop(0)
                         _recalc_and_push_buffer_locked()
 

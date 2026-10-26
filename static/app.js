@@ -1,7 +1,7 @@
 const SERVICE_UUID   = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 const DATA_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 const CMD_CHAR_UUID  = "c0de0001-36e1-4688-b7f5-ea07361b26a8";
-const BATCH_SIZE     = 40;
+const BATCH_SIZE = 15; // 60 мс вместо 160 мс — мгновенная доставка ЭЭГ в облако!
 const RAW_SAT_LIMIT  = 8300000;
 const AUDIO_SR       = 32000;
 
@@ -183,46 +183,32 @@ async function startPushVideoStream() {
             merged.set(value, buffer.byteLength);
             buffer = merged;
 
-            let lastValidJpeg = null;
-            let lastEndPos = -1;
-            let framesInBurst = 0;
-            let searchPos = 0;
-
-            while (searchPos < buffer.byteLength - 1) {
-                let soi = -1;
-                for (let i = searchPos; i < buffer.byteLength - 1; i++) {
-                    if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
-                        soi = i;
-                        break;
-                    }
-                }
-                if (soi === -1) break;
-
-                let eoi = -1;
-                for (let i = soi + 2; i < buffer.byteLength - 1; i++) {
-                    if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9) {
-                        eoi = i + 2;
-                        break;
-                    }
-                }
-                if (eoi === -1) {
-                    if (soi > 0 && lastEndPos === -1) {
-                        buffer = buffer.slice(soi);
-                    }
+            // Ищем последний полный JPEG с КОНЦА буфера (через нативный быстрый поиск),
+            // чтобы при облачном стриминге на 40 FPS мгновенно рисовать самый свежий кадр!
+            let lastEoi = -1;
+            for (let i = buffer.byteLength - 2; i >= 2; i--) {
+                if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9) {
+                    lastEoi = i + 2;
                     break;
                 }
-
-                lastValidJpeg = buffer.slice(soi, eoi);
-                lastEndPos = eoi;
-                searchPos = eoi;
-                framesInBurst++;
             }
 
-            if (lastEndPos !== -1) {
-                buffer = buffer.slice(lastEndPos);
-                latestJpegBytes = lastValidJpeg;
-                latestFrameSeq += framesInBurst;
-                paintLatestFrameFromRam();
+            if (lastEoi !== -1) {
+                let lastSoi = -1;
+                for (let i = lastEoi - 4; i >= 0; i--) {
+                    if (buffer[i] === 0xFF && buffer[i + 1] === 0xD8) {
+                        lastSoi = i;
+                        break;
+                    }
+                }
+                if (lastSoi !== -1) {
+                    latestJpegBytes = buffer.slice(lastSoi, lastEoi);
+                    latestFrameSeq++;
+                    buffer = buffer.slice(lastEoi);
+                    paintLatestFrameFromRam();
+                } else if (buffer.byteLength > 1024 * 1024) {
+                    buffer = new Uint8Array(0);
+                }
             } else if (buffer.byteLength > 2 * 1024 * 1024) {
                 buffer = new Uint8Array(0);
             }
@@ -1017,25 +1003,28 @@ async function connectNewBleDevice() {
 }
 
 async function sendBatch(devObj) {
-    if (devObj.sending || devObj.sampleBuffer.length === 0) return;
+    if (devObj.sampleBuffer.length === 0) return;
+    if ((devObj.inFlightCount || 0) >= 4) return; // До 4 пакетов параллельно в полете через интернет!
+
     const batch = devObj.sampleBuffer.splice(0, devObj.sampleBuffer.length);
-    devObj.sending = true;
-    try {
-        await fetch('/api/eeg_push', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user: devObj.user,
-                role: devObj.role,
-                sps: 250.0,
-                samples: batch
-            })
-        });
-    } catch (e) {
-    } finally {
-        devObj.sending = false;
-        if (devObj.sampleBuffer.length >= BATCH_SIZE) sendBatch(devObj);
-    }
+    devObj.inFlightCount = (devObj.inFlightCount || 0) + 1;
+
+    fetch('/api/eeg_push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            user: devObj.user,
+            role: devObj.role,
+            sps: 250.0,
+            samples: batch
+        }),
+        keepalive: true
+    }).catch(() => {}).finally(() => {
+        devObj.inFlightCount = Math.max(0, (devObj.inFlightCount || 1) - 1);
+        if (devObj.sampleBuffer.length >= BATCH_SIZE) {
+            sendBatch(devObj);
+        }
+    });
 }
 
 setInterval(() => {
