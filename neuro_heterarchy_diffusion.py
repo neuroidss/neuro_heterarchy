@@ -390,7 +390,7 @@ def main():
     parser.add_argument('--burst-duration', type=float, default=1.2)
     parser.add_argument('--ema-smooth', type=float, default=0.05)
 
-    parser.add_argument('--seal-thresh', type=float, default=0.68)
+    parser.add_argument('--seal-thresh', type=float, default=1.0)
     parser.add_argument('--seal-cycles', type=int, default=4)
     parser.add_argument('--decay-cycles', type=int, default=2)
     parser.add_argument('--refresh-cycles', type=int, default=2)

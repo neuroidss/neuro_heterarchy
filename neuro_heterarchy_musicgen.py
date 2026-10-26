@@ -423,7 +423,7 @@ def main():
                         help="Отключить стохастику в MusicGen")
 
     parser.add_argument('--target-block', type=float, default=0.0)
-    parser.add_argument('--target-context', type=float, default=6.0)
+    parser.add_argument('--target-context', type=float, default=3.6)
     parser.add_argument('--target-buffer-count', type=int, default=2)
     parser.add_argument('--speed-safety-factor', type=float, default=1.0)
     parser.add_argument('--temp', type=float, default=1.0)
