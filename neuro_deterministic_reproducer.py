@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: 100% DETERMINISTIC & PURE WORKING MEMORY REPRODUCER
+NEUROCANVAS: 100% PURE WORKING MEMORY (STOCHASTIC = 0.0) REPRODUCER
 ===================================================================================
-Доказывает сразу ДВА фундаментальных свойства чистого амодального движка:
-1) 100% ДЕТЕРМИНИЗМ: Прогон #1 и Прогон #2 на одном и том же ЭЭГ дают побитово
-   идентичные SHA-256 для Видео и Аудио.
+Доказывает сразу ДВА фундаментальных свойства чистого амодального движка при stochastic=0.0:
+1) 100% ПОВТОРЯЕМОСТЬ ПРИ STOCHASTIC = 0.0: Прогон #1 и Прогон #2 на одном и том же ЭЭГ
+   дают побитово идентичные SHA-256 для Видео и Аудио.
 2) 100% УПРАВЛЕНИЕ САМОЙ РАБОЧЕЙ ПАМЯТЬЮ [5 регионов × 5 ритмов × 32 × 120]:
    При подаче другого фазового паттерна ЭЭГ (при ТОМ ЖЕ САМОМ лоре и даже при
    ПУСТОМ лоре!) генерируются совершенно другие Видео и Аудио!
@@ -70,8 +70,8 @@ def run_pass_on_eeg(eeg_samples_Nx16: np.ndarray, run_label: str,
     prev_gpu_frame = None
     all_pcm = []
 
-    out_mp4 = f"deterministic_{run_label}.mp4"
-    out_wav = f"deterministic_{run_label}.wav"
+    out_mp4 = f"stoch0_{run_label}.mp4"
+    out_wav = f"stoch0_{run_label}.wav"
     vw = cv2.VideoWriter(out_mp4, cv2.VideoWriter_fourcc(*'mp4v'), 5.0, (384, 288))
 
     try:
@@ -80,7 +80,6 @@ def run_pass_on_eeg(eeg_samples_Nx16: np.ndarray, run_label: str,
                 win_gpu = extract_eeg_window_256(eeg_samples_Nx16, step_i)
                 bus = amodal_engine.step_from_raw_eeg_gpu(win_gpu, dt=0.20, sps=250.0)
 
-                # 1. Генерируем кадр напрямую из полного тензора рабочей памяти [5x5x32x120]
                 cond_77, wm_5x5x32x120, dyn_str, _ = map_working_memory_to_visual_field_gpu(
                     bus, vision_sem, strength_low=0.50, burst_strength=0.85, need_ui_telemetry=False
                 )
@@ -93,7 +92,7 @@ def run_pass_on_eeg(eeg_samples_Nx16: np.ndarray, run_label: str,
                     'num_inference_steps': 2,
                     'guidance_scale': 1.0,
                     'use_taesd': True,
-                    'deterministic': True
+                    'stochastic': 0.0
                 })
                 resp_img = brain_conn.recv()
                 if resp_img.shape[:2] != (288, 384):
@@ -103,7 +102,6 @@ def run_pass_on_eeg(eeg_samples_Nx16: np.ndarray, run_label: str,
                 video_hasher.update(canvas_rgb.tobytes())
                 vw.write(cv2.cvtColor(canvas_rgb, cv2.COLOR_RGB2BGR))
 
-                # 2. Генерируем звук напрямую из того же полного тензора рабочей памяти [5x5x32x120]
                 cond_64, wm_mus, _, _, _, _, _, _ = map_working_memory_to_music_field_gpu(
                     bus, music_sem,
                     target_block=0.40, target_context=1.20,
@@ -124,8 +122,7 @@ def run_pass_on_eeg(eeg_samples_Nx16: np.ndarray, run_label: str,
                     'queue_sec': 0.40,
                     'queue_chunks': 1,
                     'is_reset': (step_i == 0),
-                    'deterministic': True,
-                    'lock_speed': True
+                    'stochastic': 0.0,
                 })
                 resp_mus = music_conn.recv()
                 pcm = resp_mus['pcm']
@@ -159,7 +156,7 @@ def build_synthetic_eeg(phase_dir: float = 1.0) -> np.ndarray:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="100% Deterministic & Pure Working Memory Verifier")
+    parser = argparse.ArgumentParser(description="100% Pure Working Memory (Stochastic=0.0) Verifier")
     parser.add_argument("--eeg", type=str, default=None, help="Путь к eeg_raw.npz")
     parser.add_argument("--steps", type=int, default=8, help="Число шагов проверки")
     args = parser.parse_args()
@@ -183,11 +180,10 @@ def main():
         reps = int(math.ceil(BUF_SIZE / max(1, eeg_a.shape[0]))) + 1
         eeg_a = np.tile(eeg_a, (reps, 1))
 
-    # Второй массив ЭЭГ B с инвертированной пространственной фазой диполей (для проверки чувствительности)
     eeg_b = eeg_a[:, ::-1].copy() * (-1.0)
 
     brain_conn = Client(('localhost', 6000), authkey=b'brain')
-    brain_conn.send({'cmd': 'init_mode', 'mode': 'lcm', 'use_taesd': True})
+    brain_conn.send({'cmd': 'init_mode', 'mode': 'lcm', 'use_taesd': True, 'stochastic': 0.0})
     brain_conn.recv()
 
     music_conn = Client(('localhost', 6005), authkey=b'music')
@@ -203,29 +199,29 @@ def main():
         global_svd_bases=m_resp.get('global_svd_bases')
     )
 
-    print("\n▶️ Прогон #1 (ЭЭГ A)...")
+    print("\n▶️ Прогон #1 (ЭЭГ A, stochastic=0.0)...")
     v_a1, m_a1 = run_pass_on_eeg(eeg_a, "eegA_run1", vision_sem, music_sem, brain_conn, music_conn, args.steps)
     print(f"   🎬 Видео SHA-256 (A1): {v_a1}")
     print(f"   🎵 Аудио SHA-256 (A1): {m_a1}")
 
-    print("\n▶️ Прогон #2 (ТОТ ЖЕ САМЫЙ ЭЭГ A)...")
+    print("\n▶️ Прогон #2 (ТОТ ЖЕ САМЫЙ ЭЭГ A, stochastic=0.0)...")
     v_a2, m_a2 = run_pass_on_eeg(eeg_a, "eegA_run2", vision_sem, music_sem, brain_conn, music_conn, args.steps)
     print(f"   🎬 Видео SHA-256 (A2): {v_a2}")
     print(f"   🎵 Аудио SHA-256 (A2): {m_a2}")
 
-    print("\n▶️ Прогон #3 (ДРУГАЯ ФАЗОВАЯ СТРУКТУРА ЭЭГ B при том же лоре!)...")
+    print("\n▶️ Прогон #3 (ДРУГАЯ ФАЗОВАЯ СТРУКТУРА ЭЭГ B при том же лоре, stochastic=0.0)...")
     v_b1, m_b1 = run_pass_on_eeg(eeg_b, "eegB_run1", vision_sem, music_sem, brain_conn, music_conn, args.steps)
     print(f"   🎬 Видео SHA-256 (B1): {v_b1}")
     print(f"   🎵 Аудио SHA-256 (B1): {m_b1}")
 
     print("\n" + "=" * 80)
-    det_ok = (v_a1 == v_a2) and (m_a1 == m_a2)
+    repro_ok = (v_a1 == v_a2) and (m_a1 == m_a2)
     wm_drive_ok = (v_a1 != v_b1) and (m_a1 != m_b1)
-    if det_ok and wm_drive_ok:
-        print("✅ 1. 100% ДЕТЕРМИНИЗМ: A1 == A2 (Один и тот же ЭЭГ дает побитово идентичный выход!)")
+    if repro_ok and wm_drive_ok:
+        print("✅ 1. 100% ПОВТОРЯЕМОСТЬ ПРИ STOCHASTIC=0.0: A1 == A2 (Один и тот же ЭЭГ дает побитово идентичный выход!)")
         print("✅ 2. 100% УПРАВЛЕНИЕ РАБОЧЕЙ ПАМЯТЬЮ [5x5x32x120]: A1 != B1 (Смена фаз ЭЭГ меняет и Видео, и Аудио!)")
     else:
-        print(f"⚠️ Статус проверки: Determinism={det_ok}, WM_Sensitivity={wm_drive_ok}")
+        print(f"⚠️ Статус проверки: Reproducibility={repro_ok}, WM_Sensitivity={wm_drive_ok}")
     print("=" * 80)
 
 

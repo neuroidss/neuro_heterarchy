@@ -3,15 +3,10 @@
 ===================================================================================
 NEUROCANVAS: PER-REGION FULL-RANK [1, 128, 4096] VIDEO RUNNER (PORT 6007 VIDEO IPC)
 ===================================================================================
-- Полностью отвязан от 2D-Diffusion (порт 6004) и MusicGen (порт 6003):
-  общается с web_cloud_gateway.py по выделенному видео-каналу 6007 (authkey=b'video_ctrl').
-- Поддерживает:
-  * Горячую смену файла мира/лора (maze_lore.txt <-> elemental_shrine_lore.txt) из браузера.
-  * Порегионное редактирование концептов [FPZ], [AFZ], [F3], [F4], [FCZ].
-  * Индивидуальные степени стабильности/динамики для каждого региона + авто-буст
-    региона, куда подключен девайс пользователя.
-  * Настройку микро-блока (num_frames=5), длины кольца контекста (context_ring_len),
-    лимита геодезического замка T5 (geodesic_lock) и порога Психической Атаки (psi_threshold).
+- Поддерживает отключение Монти (--no-monty / --monty-mode off|missing_only|full).
+- Единая непрерывная шкала --stochastic ∈ [0.0, 1.0] (без флага deterministic).
+- Универсальный парсер RegionalLoreReader: если в лор-файле не указаны регионы
+  [FPZ]..[FCZ], концепты автоматически назначаются на все 5 регионов!
 ===================================================================================
 """
 
@@ -23,6 +18,7 @@ import os
 import threading
 from pathlib import Path
 from multiprocessing.connection import Client
+import numpy as np
 import cv2
 import torch
 import torch.nn.functional as F
@@ -38,15 +34,18 @@ from neuro_amodal_engine import (
     SharedAmodalCognitiveEngine,
     HardwareVRAMBus,
     REGION_ROLES,
+    EXTENDED_ROLE_TO_FUNCTIONAL,
     BAND_DELTA,
     BAND_THETA,
     BAND_BETA,
     BAND_GAMMA,
     BAND_RIPPLES,
+    MONTY_CODE_TO_STR,
 )
 from neuro_recorder import recorder_instance
 
 ROLE_TO_BUS_IDX = {r: i for i, r in enumerate(REGION_ROLES)}
+CORE_REGIONS = ("FPZ", "AFZ", "F3", "F4", "FCZ")
 
 
 class RegionalLoreReader:
@@ -65,8 +64,9 @@ class RegionalLoreReader:
         with self.lock:
             self.lore_file = lore_file
             self.sections = {"FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []}
+            unassigned_global = []
             if lore_file and os.path.exists(lore_file):
-                current_sec = "FPZ"
+                current_sec = None
                 with open(lore_file, "r", encoding="utf-8") as f:
                     for line in f:
                         s = line.strip()
@@ -77,7 +77,22 @@ class RegionalLoreReader:
                             if current_sec not in self.sections:
                                 self.sections[current_sec] = []
                         else:
-                            self.sections[current_sec].append(s)
+                            if current_sec is None:
+                                unassigned_global.append(s)
+                            else:
+                                self.sections[current_sec].append(s)
+
+                # Если регионы не выбраны — ставим этот лор сразу на все 5 регионов!
+                if unassigned_global:
+                    for r_k in CORE_REGIONS:
+                        if not self.sections[r_k]:
+                            self.sections[r_k] = list(unassigned_global)
+
+                non_empty = next((self.sections[r] for r in CORE_REGIONS if self.sections[r]), [])
+                if non_empty:
+                    for r_k in CORE_REGIONS:
+                        if not self.sections[r_k]:
+                            self.sections[r_k] = list(non_empty)
 
                 print("=" * 80)
                 print(f"📜 [ЗАГРУЖЕН ПОРЕГИОННЫЙ ЛОР ВИДЕО-МИРА ИЗ {lore_file}]:")
@@ -93,6 +108,11 @@ class RegionalLoreReader:
             for k in ("FPZ", "AFZ", "F3", "F4", "FCZ", "NEGATIVE"):
                 if k in new_sections and isinstance(new_sections[k], list):
                     self.sections[k] = [str(x).strip() for x in new_sections[k] if str(x).strip()]
+            non_empty = next((self.sections[r] for r in CORE_REGIONS if self.sections[r]), [])
+            if non_empty:
+                for r_k in CORE_REGIONS:
+                    if not self.sections[r_k]:
+                        self.sections[r_k] = list(non_empty)
 
     def get_copy(self) -> dict[str, list[str]]:
         with self.lock:
@@ -105,6 +125,10 @@ def compile_per_region_full_rank_wm_tensor_gpu(bus: HardwareVRAMBus) -> torch.Te
     sdr_l23  = bus.monty_l23_5x4096
     sdr_anom = bus.monty_anom_5x4096
     c_flow   = bus.ripple_dag_5x16x16
+    meta     = bus.meta_64
+
+    monty_code = int(round(float(meta[27].item())))
+    monty_mode = MONTY_CODE_TO_STR.get(monty_code, "missing_only")
 
     wm_128x4096 = torch.zeros((1, 128, 4096), dtype=torch.float32, device=DEVICE)
 
@@ -119,63 +143,89 @@ def compile_per_region_full_rank_wm_tensor_gpu(bus: HardwareVRAMBus) -> torch.Te
     for role_name, start_i, end_i in region_windows:
         r_idx = ROLE_TO_BUS_IDX[role_name]
         span = end_i - start_i
-        sdr_pooled_256 = F.adaptive_avg_pool1d(sdr_l23[r_idx].unsqueeze(0), 256).squeeze(0)
-        anom_pooled_256 = F.adaptive_avg_pool1d(sdr_anom[r_idx].unsqueeze(0), 256).squeeze(0)
+        is_phys = bool(meta[21 + r_idx].item() > 0.5)
+        use_monty_here = (monty_mode == "full") or (monty_mode == "missing_only" and not is_phys)
+
         dag_flat_256 = c_flow[r_idx].reshape(-1)
+
+        pac_dt_3840 = (wm_field[r_idx, BAND_DELTA] * wm_field[r_idx, BAND_THETA]).reshape(-1)
+        pac_tg_3840 = (wm_field[r_idx, BAND_THETA] * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
+        pac_bg_3840 = (wm_field[r_idx, BAND_BETA]  * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
+        rip_g_3840  = (wm_field[r_idx, BAND_RIPPLES] * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
+
+        if use_monty_here and torch.norm(sdr_l23[r_idx]) > 1e-4:
+            row5_4096 = sdr_l23[r_idx]
+            row6_4096 = sdr_anom[r_idx]
+            tail_256  = F.adaptive_avg_pool1d(sdr_l23[r_idx].unsqueeze(0), 256).squeeze(0)
+            anom_256  = F.adaptive_avg_pool1d(sdr_anom[r_idx].unsqueeze(0), 256).squeeze(0)
+        else:
+            tail_256  = (wm_field[r_idx, BAND_GAMMA, :16, :16] - wm_field[r_idx, BAND_BETA, 16:32, :16]).reshape(-1)
+            anom_256  = (wm_field[r_idx, BAND_RIPPLES, 16:32, :16] - wm_field[r_idx, BAND_RIPPLES, :16, :16]).reshape(-1)
+            row5_4096 = torch.cat([pac_dt_3840, tail_256], dim=0)
+            row6_4096 = torch.cat([wm_field[r_idx].mean(dim=0).reshape(-1), anom_256], dim=0)
 
         for b in range(5):
             wave_3840 = wm_field[r_idx, b].reshape(-1)
             wm_128x4096[0, start_i + b, 0:3840] = wave_3840
-            wm_128x4096[0, start_i + b, 3840:4096] = sdr_pooled_256
+            wm_128x4096[0, start_i + b, 3840:4096] = tail_256
 
-        wm_128x4096[0, start_i + 5, :] = sdr_l23[r_idx]
-        wm_128x4096[0, start_i + 6, :] = sdr_anom[r_idx]
-
-        pac_tg_3840 = (wm_field[r_idx, BAND_THETA] * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
-        pac_bg_3840 = (wm_field[r_idx, BAND_BETA] * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
-        rip_g_3840  = (wm_field[r_idx, BAND_RIPPLES] * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
+        wm_128x4096[0, start_i + 5, :] = row5_4096
+        wm_128x4096[0, start_i + 6, :] = row6_4096
 
         wm_128x4096[0, start_i + 7, 0:3840] = pac_tg_3840
         wm_128x4096[0, start_i + 7, 3840:4096] = dag_flat_256
 
         wm_128x4096[0, start_i + 8, 0:3840] = pac_bg_3840
-        wm_128x4096[0, start_i + 8, 3840:4096] = anom_pooled_256
+        wm_128x4096[0, start_i + 8, 3840:4096] = anom_256
 
         wm_128x4096[0, start_i + 9, 0:3840] = rip_g_3840
-        wm_128x4096[0, start_i + 9, 3840:4096] = sdr_pooled_256
+        wm_128x4096[0, start_i + 9, 3840:4096] = tail_256
 
         rem = span - 10
         for k in range(rem):
             s_a = (k * 2) % 32
             s_b = (k * 2 + 1) % 32
+            s_c = (k * 2 + 16) % 32
             slot_pair_1200 = wm_field[r_idx, :, [s_a, s_b], :].reshape(-1)
             chord_600 = (wm_field[r_idx, :, -1, :] - wm_field[r_idx, :, s_a, :]).reshape(-1)
+            sagitta_600 = (wm_field[r_idx, :, s_c, :] - 0.5 * (wm_field[r_idx, :, -1, :] + wm_field[r_idx, :, 0, :])).reshape(-1)
             wm_128x4096[0, start_i + 10 + k, 0:1200] = slot_pair_1200
             wm_128x4096[0, start_i + 10 + k, 1200:1800] = chord_600
             wm_128x4096[0, start_i + 10 + k, 1800:2056] = dag_flat_256
-            wm_128x4096[0, start_i + 10 + k, 2056:4096] = sdr_l23[r_idx, :2040]
+            if use_monty_here and torch.norm(sdr_l23[r_idx]) > 1e-4:
+                wm_128x4096[0, start_i + 10 + k, 2056:4096] = sdr_l23[r_idx, :2040]
+            else:
+                extra_1440 = wm_field[r_idx, :, [s_b, s_c, (s_c + 1) % 32], :96].reshape(-1)
+                wm_128x4096[0, start_i + 10 + k, 2056:2656] = sagitta_600
+                wm_128x4096[0, start_i + 10 + k, 2656:4096] = extra_1440
 
     return wm_128x4096
 
 
 def main():
     parser = argparse.ArgumentParser(description="Per-Region Full-Rank 3D-DiT Video Runner")
-    parser.add_argument("--lore", type=str, default="lore/maze_lore.txt")
-    parser.add_argument("--users", type=str, default="User1:FCz=0")
+    parser.add_argument("--video-lore", "--lore", dest="video_lore", type=str, default="")
+    parser.add_argument("--users", type=str, default="")
     parser.add_argument("--gamma-max", type=float, default=100.0)
     parser.add_argument("--video-port", type=int, default=6006)
     parser.add_argument("--gateway-port", type=int, default=6002)
     parser.add_argument("--video-ctrl-port", type=int, default=6007)
     parser.add_argument("--headless", action="store_true", default=False)
-    parser.add_argument("--stochastic", dest="stochastic", action="store_true", default=True)
-    parser.add_argument("--deterministic", "--no-stochastic", dest="stochastic", action="store_false")
+    parser.add_argument("--stochastic", type=float, default=0.0,
+                        help="Уровень стохастики от 0.0 (чистая рабочая память) до 1.0")
+
+    parser.add_argument("--monty-mode", type=str, default="missing_only", choices=["off", "missing_only", "full"],
+                        help="Режим Монти: off (чистая рабочая память), missing_only (оператор пустых регионов), full")
+    parser.add_argument("--no-monty", action="store_true", default=False,
+                        help="Полностью отключить Монти (100% чистая рабочая память)")
 
     parser.add_argument("--active-gain", type=float, default=0.92)
     parser.add_argument("--inactive-gain", type=float, default=0.06)
     parser.add_argument("--cross-bleed", type=float, default=0.25)
     args = parser.parse_args()
 
-    init_det = None if args.stochastic is None else (not bool(args.stochastic))
+    init_monty_mode = "off" if args.no_monty else args.monty_mode
+    init_stoch = float(np.clip(args.stochastic, 0.0, 1.0))
 
     print(f"⏳ Подключение к video_world_server (порт {args.video_port})...")
     vid_conn = None
@@ -184,16 +234,17 @@ def main():
             vid_conn = Client(("localhost", args.video_port), authkey=b"video_world")
         except Exception:
             time.sleep(0.5)
-    print("✅ [VIDEO-RUNNER] Видео-сервер 3D-DiT подключен!")
+    print(f"✅ [VIDEO-RUNNER] Видео-сервер 3D-DiT подключен! (Monty={init_monty_mode.upper()}, Stochastic={init_stoch:.2f})")
 
-    lore_reader = RegionalLoreReader(lore_file=args.lore)
+    lore_reader = RegionalLoreReader(lore_file=args.video_lore)
     router = SelfSufficientHeterarchyRouter(args.users)
     amodal_engine = SharedAmodalCognitiveEngine(
         router=router,
         gamma_max=args.gamma_max,
         strength_low=args.inactive_gain,
         strength_high=args.active_gain,
-        cross_region_bleed=args.cross_bleed
+        cross_region_bleed=args.cross_bleed,
+        monty_mode=init_monty_mode
     )
 
     hud = None
@@ -202,6 +253,8 @@ def main():
         hud = NeuroCanvasHUD(device=DEVICE)
 
     runtime_state = {
+        "monty_mode": init_monty_mode,
+        "stochastic": init_stoch,
         "auto_active_boost": True,
         "active_user_gain": float(args.active_gain),
         "inactive_base_gain": float(args.inactive_gain),
@@ -219,7 +272,6 @@ def main():
         "cfg_scale": 3.2,
         "current_active_role": "FCz",
         "force_reset_genesis": True,
-        "deterministic": init_det,
         "running": True,
     }
     ctrl_lock = threading.Lock()
@@ -236,7 +288,8 @@ def main():
                         video_ctrl_conn.send({
                             "cmd": "sync_from_video_runner",
                             "lore_file": lore_reader.lore_file,
-                            "sections": lore_reader.get_copy()
+                            "sections": lore_reader.get_copy(),
+                            "monty_mode": runtime_state["monty_mode"]
                         })
 
                 has_msg = False
@@ -263,6 +316,11 @@ def main():
                             print("📝 [VIDEO LORE] Обновлены региональные концепты из браузера!")
                     elif cmd == "update_video_config":
                         cfg = msg.get("config", {})
+                        if "monty_mode" in cfg:
+                            runtime_state["monty_mode"] = str(cfg["monty_mode"])
+                            amodal_engine.set_monty_mode(runtime_state["monty_mode"])
+                        if "stochastic" in cfg:
+                            runtime_state["stochastic"] = float(np.clip(float(cfg["stochastic"]), 0.0, 1.0))
                         for k in (
                             "auto_active_boost", "active_user_gain", "inactive_base_gain",
                             "cross_region_bleed", "cascade_rate", "psi_threshold",
@@ -275,11 +333,11 @@ def main():
                             runtime_state["region_gains"].update(cfg["region_gains"])
                         amodal_engine.cross_region_bleed = float(runtime_state["cross_region_bleed"])
                     elif cmd == "set_device_role":
-                        new_role = str(msg.get("role", "FCz")).strip()
-                        if new_role in REGION_ROLES:
-                            router.set_role(0, new_role)
-                            runtime_state["current_active_role"] = new_role
-                            print(f"🎛️ [VIDEO ROLE SWITCH] Девайс юзера переключен на регион: {new_role}")
+                        raw_role = str(msg.get("role", "FCz")).strip()
+                        func_role = EXTENDED_ROLE_TO_FUNCTIONAL.get(raw_role, "FCz")
+                        router.set_role(0, raw_role)
+                        runtime_state["current_active_role"] = func_role
+                        print(f"🎛️ [VIDEO ROLE SWITCH] Девайс юзера переключен на регион: {raw_role} (-> {func_role})")
                     elif cmd == "set_ladder_stage":
                         stage = int(msg.get("stage", 1))
                         if stage == 1:
@@ -327,7 +385,7 @@ def main():
                     if cmd == "set_role":
                         router.set_role(payload[0], payload[1])
                         if payload[1]:
-                            runtime_state["current_active_role"] = payload[1]
+                            runtime_state["current_active_role"] = EXTENDED_ROLE_TO_FUNCTIONAL.get(payload[1], payload[1])
                     elif cmd in ("flush_canvas", "reset_seals"):
                         runtime_state["force_reset_genesis"] = True
                         amodal_engine.reset_seals()
@@ -359,9 +417,6 @@ def main():
             surp_val = float(meta[7].item())
             kuramoto_val = float(meta[11].item())
 
-            # Вычисляем эффективный gain каждого региона:
-            # если включен auto_active_boost, то регион с подключенным девайсом юзера получает
-            # мощную динамику active_user_gain, а остальные — свои базовые/индивидуальные значения!
             effective_gains = {}
             for r_name in REGION_ROLES:
                 manual_g = float(runtime_state["region_gains"].get(r_name, runtime_state["inactive_base_gain"]))
@@ -394,6 +449,8 @@ def main():
                 "persistence": pers_val,
                 "surprise": surp_val,
                 "kuramoto": kuramoto_val,
+                "monty_mode": runtime_state["monty_mode"],
+                "stochastic": float(runtime_state["stochastic"]),
                 "video_params": {
                     "cascade_rate": float(runtime_state["cascade_rate"]),
                     "psi_threshold": float(runtime_state["psi_threshold"]),
@@ -412,8 +469,6 @@ def main():
                 req_msg["vram_ipc"] = bus.get_cuda_ipc_Payload()
                 sent_vram_ipc = True
 
-            if runtime_state["deterministic"] is not None:
-                req_msg["deterministic"] = runtime_state["deterministic"]
             runtime_state["force_reset_genesis"] = False
 
             vid_conn.send(req_msg)
@@ -431,7 +486,7 @@ def main():
                 last_debug_tag = debug_tokens
                 active_list = [r for r, v in active_region_mask.items() if v]
                 print(
-                    f"🎬 [3D-DiT | Active:{active_list} | Ψ-Charge:{fpz_charge:.2f} | Stage:{afz_prog:.2f}] "
+                    f"🎬 [3D-DiT | Stoch:{runtime_state['stochastic']:.2f} | Monty:{runtime_state['monty_mode']} | Active:{active_list} | Ψ:{fpz_charge:.2f}] "
                     f"{debug_tokens}"
                 )
 
@@ -441,6 +496,7 @@ def main():
                 "primary_role": primary_active_role,
                 "primary_active": True,
                 "ladder_stage": 1,
+                "monty_mode": runtime_state["monty_mode"],
                 "monty_loss": round(float(meta[8].item()), 5),
                 "persistence": round(pers_val, 3),
                 "surprise": round(surp_val, 3),
@@ -491,6 +547,8 @@ def main():
                                 "monty_loss": telemetry["monty_loss"],
                                 "persistence": telemetry["persistence"],
                                 "surprise": telemetry["surprise"],
+                                "monty_mode": runtime_state["monty_mode"],
+                                "stochastic": runtime_state["stochastic"],
                                 "active_region_mask": active_region_mask,
                                 "region_gains": {k: round(v, 3) for k, v in effective_gains.items()},
                                 "active_concept_idx": act_c_idx,

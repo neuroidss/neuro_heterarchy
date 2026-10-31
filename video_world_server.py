@@ -3,9 +3,8 @@
 ===================================================================================
 NEUROCANVAS: MODULAR 3D-DiT VIDEO WORLD SERVER (video_world_server.py)
 ===================================================================================
-Соединяет два независимых модуля:
-  1) video_render_logic.py        — Неприкосновенный рендерер T5 4-Bit + 3D-DiT.
-  2) video_heterarchy_composer.py — Порегионный маппинг рабочей памяти в концепты лора.
+- Полностью убран deterministic: используется только непрерывная шкала
+  --stochastic ∈ [0.0, 1.0].
 ===================================================================================
 """
 
@@ -13,6 +12,7 @@ from __future__ import annotations
 import time
 import argparse
 from multiprocessing.connection import Listener
+import numpy as np
 import torch
 
 from neuro_heterarchy_core import DEVICE
@@ -25,7 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description="Modular 3D-DiT Video World Server")
     parser.add_argument("--port", type=int, default=6006)
     parser.add_argument("--model", type=str, default="ltx-video", choices=["ltx-video", "wan-1.3b", "wan2.2-5b"])
-    parser.add_argument("--lore", type=str, default="lore/maze_lore.txt")
+    parser.add_argument("--lore", type=str, default="")
     parser.add_argument("--init-image", type=str, default="")
     parser.add_argument("--width", type=int, default=0)
     parser.add_argument("--height", type=int, default=0)
@@ -34,12 +34,11 @@ def main():
     parser.add_argument("--genesis-steps", type=int, default=14)
     parser.add_argument("--cfg", type=float, default=3.5)
     parser.add_argument("--force-low-vram", action="store_true", default=False)
-    parser.add_argument("--stochastic", dest="stochastic", action="store_true", default=None)
-    parser.add_argument("--deterministic", "--no-stochastic", dest="stochastic", action="store_false")
+    parser.add_argument("--stochastic", type=float, default=0.0,
+                        help="Уровень стохастики от 0.0 (чистое ЭЭГ) до 1.0")
     args = parser.parse_args()
 
-    stochastic_mode = True if args.stochastic is None else bool(args.stochastic)
-    deterministic = not stochastic_mode
+    stochastic_level = float(np.clip(args.stochastic, 0.0, 1.0))
 
     renderer = NeuroVideoRenderer(
         model_type=args.model,
@@ -50,7 +49,7 @@ def main():
         genesis_steps=args.genesis_steps,
         cfg_scale=args.cfg,
         force_low_vram=args.force_low_vram,
-        deterministic=deterministic,
+        stochastic=stochastic_level,
     )
     if args.init_image:
         with open(args.init_image, "rb") as f:
@@ -60,7 +59,7 @@ def main():
     vram_bus = HardwareVRAMBus()
 
     listener = Listener(("localhost", args.port), authkey=b"video_world")
-    print(f"🚀 [VIDEO-WORLD-SERVER] Готов на порту {args.port} (Renderer & Composer Separated!)")
+    print(f"🚀 [VIDEO-WORLD-SERVER] Готов на порту {args.port} (Stochastic={stochastic_level:.2f})")
 
     while True:
         try:
@@ -103,9 +102,8 @@ def main():
                         video_params=vid_params,
                     )
 
-                    req_det = msg.get("deterministic", None)
-                    if "stochastic" in msg and msg["stochastic"] is not None:
-                        req_det = not bool(msg["stochastic"])
+                    req_stoch = msg.get("stochastic", renderer.stochastic)
+                    req_stoch = float(np.clip(float(req_stoch), 0.0, 1.0))
 
                     wall_keep = float(min(0.72, max(0.50, 0.55 + 0.15 * beta_lock)))
                     seed_v = int(torch.clamp(torch.abs(wm_t.reshape(-1)[0]) * 10000.0, 1.0, 999999.0).item())
@@ -115,7 +113,7 @@ def main():
                         neg_embeds_1x128x4096=neg_emb,
                         wall_keep=wall_keep,
                         anchor_advance_rate=adv_rate,
-                        use_deterministic=req_det,
+                        stochastic=req_stoch,
                         seed_val=seed_v,
                     )
                     gen_ms = (time.perf_counter() - t_start) * 1000.0
@@ -124,7 +122,7 @@ def main():
                         "gen_ms": gen_ms,
                         "fps": len(frames) / max(0.001, gen_ms / 1000.0),
                         "debug_tokens": debug_tag,
-                        "deterministic": renderer.deterministic if req_det is None else bool(req_det),
+                        "stochastic": req_stoch,
                         "fpz_meta_charge": round(composer.fpz_meta_charge, 3),
                         "afz_stage_progress": round(composer.afz_stage_progress, 3),
                         "active_concept_idx": dict(composer.active_concept_idx),
@@ -137,9 +135,9 @@ def main():
                     renderer.reset_genesis()
                     conn.send({"status": "ok"})
                 elif cmd == "set_stochastic":
-                    stoch = bool(msg.get("stochastic", True))
-                    renderer.deterministic = not stoch
-                    conn.send({"status": "ok", "stochastic": stoch, "deterministic": renderer.deterministic})
+                    stoch = float(np.clip(float(msg.get("stochastic", 0.0)), 0.0, 1.0))
+                    renderer.stochastic = stoch
+                    conn.send({"status": "ok", "stochastic": renderer.stochastic})
         except EOFError:
             continue
         except Exception as e:

@@ -1,7 +1,7 @@
 const SERVICE_UUID   = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 const DATA_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 const CMD_CHAR_UUID  = "c0de0001-36e1-4688-b7f5-ea07361b26a8";
-const BATCH_SIZE = 15; // 60 мс вместо 160 мс — мгновенная доставка ЭЭГ в облако!
+const BATCH_SIZE     = 15;
 const RAW_SAT_LIMIT  = 8300000;
 const AUDIO_SR       = 32000;
 
@@ -26,7 +26,6 @@ let clientRenderCount = 0;
 let clientScreenFps = 0.0;
 let clientDroppedFrames = 0;
 
-// Локальный кэш порегионных секций 3D-DiT видео-мира
 let cachedVideoSections = {
     FPZ: [], AFZ: [], F3: [], F4: [], FCZ: [], NEGATIVE: []
 };
@@ -44,7 +43,10 @@ const dom = {
     deviceList: document.getElementById('deviceList'),
     noDevicesMsg: document.getElementById('noDevicesMsg'),
 
-    // Элементы панели 3D-DiT Видео-Трансформера
+    montyModeSelect: document.getElementById('montyModeSelect'),
+    ladderStageSelect: document.getElementById('ladderStageSelect'),
+    montyStatusBar: document.getElementById('montyStatusBar'),
+
     videoLagStatus: document.getElementById('videoLagStatus'),
     videoLoreSelect: document.getElementById('videoLoreSelect'),
     btnVideoResetGenesis: document.getElementById('btnVideoResetGenesis'),
@@ -77,14 +79,15 @@ const dom = {
     vCascadeRate: document.getElementById('vCascadeRate'),
     vPsiThresh: document.getElementById('vPsiThresh'),
 
-    ladderStageSelect: document.getElementById('ladderStageSelect'),
-    montyStatusBar: document.getElementById('montyStatusBar'),
-
     diffLagStatus: document.getElementById('diffLagStatus'),
     visionConceptList: document.getElementById('visionConceptList'),
     newVisionInput: document.getElementById('newVisionInput'),
     btnAddVision: document.getElementById('btnAddVision'),
     diffPreset: document.getElementById('diffPreset'),
+    diffStochastic: document.getElementById('diffStochastic'),
+    diffStochVal: document.getElementById('diffStochVal'),
+    diffUnassignedStochastic: document.getElementById('diffUnassignedStochastic'),
+    diffUnassStochVal: document.getElementById('diffUnassStochVal'),
     diffResolution: document.getElementById('diffResolution'),
     diffTaesd: document.getElementById('diffTaesd'),
     diffSteps: document.getElementById('diffSteps'),
@@ -101,6 +104,10 @@ const dom = {
     newMusicInput: document.getElementById('newMusicInput'),
     btnAddMusic: document.getElementById('btnAddMusic'),
     musicPreset: document.getElementById('musicPreset'),
+    mStochastic: document.getElementById('mStochastic'),
+    mStochVal: document.getElementById('mStochVal'),
+    mUnassignedStochastic: document.getElementById('mUnassignedStochastic'),
+    mUnassStochVal: document.getElementById('mUnassStochVal'),
     mStrLow: document.getElementById('mStrLow'),
     mStrHigh: document.getElementById('mStrHigh'),
     mEmaSmooth: document.getElementById('mEmaSmooth'),
@@ -120,9 +127,37 @@ const dom = {
     conceptChipTemplate: document.getElementById('conceptChipTemplate')
 };
 
-// =============================================================================
-// HIGH-FPS SERVER-PUSH STREAMER
-// =============================================================================
+function getSavedDeviceConfig(devId) {
+    try {
+        const store = JSON.parse(localStorage.getItem('neuro_device_configs') || '{}');
+        return store[devId] || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function saveDeviceConfig(devId, cfg) {
+    try {
+        const store = JSON.parse(localStorage.getItem('neuro_device_configs') || '{}');
+        store[devId] = { ...(store[devId] || {}), ...cfg };
+        localStorage.setItem('neuro_device_configs', JSON.stringify(store));
+    } catch (e) {}
+}
+
+async function notifyDeviceMapping(devObj) {
+    saveDeviceConfig(devObj.id, { role: devObj.role, user: devObj.user, gain: devObj.gain });
+    await fetch('/api/device/configure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            device_id: devObj.id,
+            user: devObj.user,
+            role: devObj.role,
+            gain: devObj.gain
+        })
+    }).catch(() => {});
+}
+
 function paintLatestFrameFromRam() {
     if (isProbeMode || isImgDecoding || latestFrameSeq === renderedFrameSeq || !latestJpegBytes) {
         return;
@@ -183,8 +218,6 @@ async function startPushVideoStream() {
             merged.set(value, buffer.byteLength);
             buffer = merged;
 
-            // Ищем последний полный JPEG с КОНЦА буфера (через нативный быстрый поиск),
-            // чтобы при облачном стриминге на 40 FPS мгновенно рисовать самый свежий кадр!
             let lastEoi = -1;
             for (let i = buffer.byteLength - 2; i >= 2; i--) {
                 if (buffer[i] === 0xFF && buffer[i + 1] === 0xD9) {
@@ -249,9 +282,6 @@ function toggleFullScreen() {
     }
 }
 
-// =============================================================================
-// ЧТЕНИЕ И ЗАПИСЬ РЕГИСТРОВ PGA ADS131M08
-// =============================================================================
 function readRegister(devObj, reg) {
     return new Promise((resolve) => {
         devObj.pendingReadReg = reg;
@@ -303,6 +333,7 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
         if (val1 === expected && val2 === expected) {
             devObj.gain = targetGain;
             devObj.uvScale = calcUvScale(targetGain);
+            saveDeviceConfig(devObj.id, { gain: targetGain });
             if (devObj.domRefs) {
                 devObj.domRefs.gainBadge.textContent = `✓ Железо подтвердило (${targetGain}x)`;
                 devObj.domRefs.gainBadge.style.color = "#10b981";
@@ -327,9 +358,6 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
     return false;
 }
 
-// =============================================================================
-// УПРАВЛЕНИЕ 3D-DiT ВИДЕО-ТРАНСФОРМЕРОМ (ОТВЯЗАННОЕ ОТ 2D И MUSICGEN)
-// =============================================================================
 function renderSelectedVideoRegionConcepts() {
     if (!dom.videoRegionSelect || !dom.videoRegionConceptList) return;
     const regKey = dom.videoRegionSelect.value.toUpperCase();
@@ -416,7 +444,9 @@ async function resetVideoGenesis() {
 }
 
 async function updateVideoTransformerConfig() {
+    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
     const payload = {
+        monty_mode: mMode,
         region_gains: {
             Fpz: parseFloat(dom.vGainFpz.value) || 0.06,
             AFz: parseFloat(dom.vGainAfz.value) || 0.08,
@@ -430,7 +460,7 @@ async function updateVideoTransformerConfig() {
         cross_region_bleed: parseFloat(dom.vCrossBleed.value) || 0.25,
         cascade_rate: parseFloat(dom.vCascadeRate.value) || 1.0,
         psi_threshold: parseFloat(dom.vPsiThresh.value) || 0.55,
-        geodesic_lock: parseFloat(dom.vGeodesicLock.value) || 0.18,
+        geodesic_lock: parseFloat(dom.vGeodesicLock.value) || 0.24,
         num_frames: parseInt(dom.vNumFrames.value) || 5,
         context_ring_len: parseInt(dom.vContextRing.value) || 16,
         steps: parseInt(dom.vSteps.value) || 4,
@@ -460,9 +490,6 @@ async function uploadVideoInitImage() {
     reader.readAsDataURL(file);
 }
 
-// =============================================================================
-// ПРЕСЕТЫ И НАСТРОЙКИ 2D-ДИФФУЗИИ И МУЗЫКИ
-// =============================================================================
 const PRESETS = {
     meditation: { steps: 0, cfg: 1.0, strLow: 0.45, strHigh: 0.70, ctx: 0.30, ema: 0.28 },
     balanced:   { steps: 0, cfg: 1.0, strLow: 0.50, strHigh: 0.85, ctx: 0.18, ema: 0.12 },
@@ -515,8 +542,17 @@ function onManualParamChange(presetOverride = 'custom') {
     const wCtx = Number.isNaN(rawCtx) ? 0.18 : Math.max(0.0, Math.min(0.60, rawCtx));
     const ema = Math.max(0.02, Math.min(0.50, parseFloat(dom.diffEmaSmooth.value) || 0.12));
 
+    const rawStoch = parseFloat(dom.diffStochastic ? dom.diffStochastic.value : 0.0);
+    const stoch = Number.isNaN(rawStoch) ? 0.0 : Math.max(0.0, Math.min(1.0, rawStoch));
+    if (dom.diffStochVal) dom.diffStochVal.textContent = stoch.toFixed(2);
+
+    const rawUnassStoch = parseFloat(dom.diffUnassignedStochastic ? dom.diffUnassignedStochastic.value : 1.0);
+    const unassStoch = Number.isNaN(rawUnassStoch) ? 1.0 : Math.max(0.0, Math.min(1.0, rawUnassStoch));
+    if (dom.diffUnassStochVal) dom.diffUnassStochVal.textContent = unassStoch.toFixed(2);
+
     const res = dom.diffResolution ? dom.diffResolution.value : "512x384";
     const useTaesd = dom.diffTaesd ? (dom.diffTaesd.value === "1") : true;
+    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
 
     dom.diffSteps.value = steps;
     dom.diffCfg.value = cfg;
@@ -530,7 +566,10 @@ function onManualParamChange(presetOverride = 'custom') {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
             mode: dom.diffModel ? dom.diffModel.value : 'lcm',
+            monty_mode: mMode,
             preset: presetOverride,
+            stochastic: stoch,
+            unassigned_stochastic: unassStoch,
             steps: steps,
             guidance_scale: cfg,
             strength_low: sLow,
@@ -544,6 +583,12 @@ function onManualParamChange(presetOverride = 'custom') {
     });
 }
 
+async function onMontyModeChange() {
+    onManualParamChange('custom');
+    updateMusicConfig();
+    updateVideoTransformerConfig();
+}
+
 async function onLadderStageChange() {
     const stg = parseInt(dom.ladderStageSelect.value) || 1;
     await fetch('/api/preset/ladder', {
@@ -553,15 +598,11 @@ async function onLadderStageChange() {
     });
 }
 
-// =============================================================================
-// SSE ПОТОК ТЕЛЕМЕТРИИ И СОСТОЯНИЯ
-// =============================================================================
 const sse = new EventSource('/api/state_stream');
 
 sse.addEventListener('state', (e) => {
     const st = JSON.parse(e.data);
 
-    // 1. Обновление специфической панели 3D-DiT Видео-Трансформера
     if (st.video) {
         const v = st.video;
         if (v.sections) {
@@ -579,7 +620,7 @@ sse.addEventListener('state', (e) => {
                 v.available_lores.forEach(pathStr => {
                     const opt = document.createElement('option');
                     opt.value = pathStr;
-                    opt.textContent = pathStr ? pathStr : '[Пусто — Свободный 4096-D дрейф без лор-файла]';
+                    opt.textContent = pathStr ? pathStr : '[Пусто — Свободный 524,288-D дрейф без лор-файла]';
                     dom.videoLoreSelect.appendChild(opt);
                 });
             }
@@ -622,7 +663,6 @@ sse.addEventListener('state', (e) => {
         }
     }
 
-    // 2. Обновление панели 2D-Диффузии и глобальной телеметрии
     if (st.world) {
         renderVisionConcepts(st.world.concepts || []);
         if (document.activeElement !== dom.diffSteps) dom.diffSteps.value = st.world.steps ?? 0;
@@ -633,6 +673,14 @@ sse.addEventListener('state', (e) => {
             dom.diffWorldContext.value = st.world.world_context ?? 0.18;
         }
         if (document.activeElement !== dom.diffEmaSmooth) dom.diffEmaSmooth.value = st.world.ema_smooth ?? 0.12;
+        if (dom.diffStochastic && document.activeElement !== dom.diffStochastic && st.world.stochastic !== undefined) {
+            dom.diffStochastic.value = st.world.stochastic;
+            if (dom.diffStochVal) dom.diffStochVal.textContent = parseFloat(st.world.stochastic).toFixed(2);
+        }
+        if (dom.diffUnassignedStochastic && document.activeElement !== dom.diffUnassignedStochastic && st.world.unassigned_stochastic !== undefined) {
+            dom.diffUnassignedStochastic.value = st.world.unassigned_stochastic;
+            if (dom.diffUnassStochVal) dom.diffUnassStochVal.textContent = parseFloat(st.world.unassigned_stochastic).toFixed(2);
+        }
         if (dom.diffResolution && document.activeElement !== dom.diffResolution && st.world.resolution) {
             dom.diffResolution.value = st.world.resolution;
         }
@@ -671,7 +719,6 @@ sse.addEventListener('state', (e) => {
         }
     }
 
-    // 3. Обновление панели MusicGen
     if (st.music) {
         renderMusicConcepts(st.music.concepts || []);
         if (document.activeElement !== dom.mBlock) dom.mBlock.value = st.music.target_block ?? 0;
@@ -683,11 +730,19 @@ sse.addEventListener('state', (e) => {
         if (document.activeElement !== dom.mStrLow) dom.mStrLow.value = st.music.strength_low ?? 0.25;
         if (document.activeElement !== dom.mStrHigh) dom.mStrHigh.value = st.music.strength_high ?? 0.75;
         if (document.activeElement !== dom.mEmaSmooth) dom.mEmaSmooth.value = st.music.ema_smooth ?? 0.20;
+        if (dom.mStochastic && document.activeElement !== dom.mStochastic && st.music.stochastic !== undefined) {
+            dom.mStochastic.value = st.music.stochastic;
+            if (dom.mStochVal) dom.mStochVal.textContent = parseFloat(st.music.stochastic).toFixed(2);
+        }
+        if (dom.mUnassignedStochastic && document.activeElement !== dom.mUnassignedStochastic && st.music.unassigned_stochastic !== undefined) {
+            dom.mUnassignedStochastic.value = st.music.unassigned_stochastic;
+            if (dom.mUnassStochVal) dom.mUnassStochVal.textContent = parseFloat(st.music.unassigned_stochastic).toFixed(2);
+        }
 
         const bSec = (st.music.buffer_sec || 0).toFixed(2);
         const bChunks = st.music.buffer_chunks || 0;
         const maxChunks = st.music.target_buffer_count || 2;
-        const actBlk = (st.music.actual_block || 0.16).toFixed(2);
+        const actBlk = (st.music.actual_block || 0.24).toFixed(2);
         const spd = (st.music.play_speed || 1.0).toFixed(2);
         const rtf = (st.music.rtf || 1.0).toFixed(2);
         const dStr = (st.music.dyn_strength || 0.25).toFixed(2);
@@ -710,9 +765,6 @@ sse.addEventListener('ble_cmd', async (e) => {
     }
 });
 
-// =============================================================================
-// ПРЯМОЙ ПРИЕМНИК ГОТОВОГО АУДИО С СЕРВЕРА
-// =============================================================================
 async function startWebAudioStream() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     audioCtx = new AudioContextClass({ sampleRate: AUDIO_SR });
@@ -773,11 +825,8 @@ async function startWebAudioStream() {
                 if (!audioCtx || !isAudioPlaying) break;
                 const now = audioCtx.currentTime;
                 if (nextPlayTime < now) {
-                    // Если произошел сетевой провал (underrun), плавно ставим горизонт на 120 мс вперед,
-                    // чтобы компенсировать любой пинг/джиттер облака без рваных пауз!
                     nextPlayTime = now + 0.12;
                 } else if (nextPlayTime - now > 0.85) {
-                    // Если из-за всплеска сети накопилась задержка > 0.85с, мягко подтягиваем к реалтайму
                     nextPlayTime = now + 0.25;
                 }
 
@@ -826,14 +875,12 @@ function toggleAudio() {
     }
 }
 
-// =============================================================================
-// BLUETOOTH BLE (FREEEEG16/24)
-// =============================================================================
 function createDeviceCardDOM(devObj) {
     const clone = dom.deviceCardTemplate.content.cloneNode(true);
     const cardEl = clone.querySelector('.device-card');
 
     const titleName = cardEl.querySelector('.device-title-name');
+    const statusBadge = cardEl.querySelector('.badge');
     const userInput = cardEl.querySelector('.device-user-input');
     const roleSelect = cardEl.querySelector('.device-role-select');
     const gainBadge = cardEl.querySelector('.gain-badge');
@@ -842,7 +889,14 @@ function createDeviceCardDOM(devObj) {
     const lossText = cardEl.querySelector('.device-loss-text');
     const satGrid = cardEl.querySelector('.sat-grid');
 
-    titleName.textContent = devObj.name;
+    if (!Array.from(roleSelect.options).some(o => o.value === "UNASSIGNED")) {
+        const optOff = document.createElement('option');
+        optOff.value = "UNASSIGNED";
+        optOff.textContent = "⏸️ В ожидании (Только тест сигнала / Не в коре)";
+        roleSelect.insertBefore(optOff, roleSelect.firstChild);
+    }
+
+    titleName.textContent = `${devObj.name} [FreeEEG_${devObj.shortId}]`;
     userInput.value = devObj.user;
     roleSelect.value = devObj.role;
     gainSelect.value = devObj.gain;
@@ -858,27 +912,29 @@ function createDeviceCardDOM(devObj) {
 
     userInput.addEventListener('change', () => {
         devObj.user = userInput.value;
-        sendDeviceCommand(devObj.id, 'set_user', devObj.user);
+        notifyDeviceMapping(devObj);
     });
 
     roleSelect.addEventListener('change', () => {
         devObj.role = roleSelect.value;
-        // Синхронно переключаем выбранный регион в редакторе 3D-DiT!
         if (dom.videoRegionSelect) {
-            dom.videoRegionSelect.value = devObj.role.toUpperCase();
-            renderSelectedVideoRegionConcepts();
+            const rUp = devObj.role.toUpperCase();
+            if (["FPZ", "AFZ", "F3", "F4", "FCZ"].includes(rUp)) {
+                dom.videoRegionSelect.value = rUp;
+                renderSelectedVideoRegionConcepts();
+            }
         }
-        sendDeviceCommand(devObj.id, 'set_role', devObj.role);
+        notifyDeviceMapping(devObj);
     });
 
     gainSelect.addEventListener('change', async () => {
         const targetGain = parseInt(gainSelect.value);
         await writeAndVerifyGain(devObj, targetGain);
-        sendDeviceCommand(devObj.id, 'set_gain', targetGain);
+        notifyDeviceMapping(devObj);
     });
 
     devObj.domRefs = {
-        cardEl, userInput, roleSelect, gainBadge,
+        cardEl, statusBadge, userInput, roleSelect, gainBadge,
         gainSelect, rateText, lossText, satBoxes
     };
 
@@ -886,11 +942,72 @@ function createDeviceCardDOM(devObj) {
     dom.noDevicesMsg.style.display = 'none';
 }
 
-async function sendDeviceCommand(deviceId, cmd, val) {
-    await fetch('/api/device/command', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ device_id: deviceId, cmd: cmd, val: val })
+async function attachGattStream(devObj) {
+    const server = await devObj.device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    const dataChar = await service.getCharacteristic(DATA_CHAR_UUID);
+    const cmdChar = await service.getCharacteristic(CMD_CHAR_UUID);
+
+    devObj.cmdChar = cmdChar;
+    devObj.isConnected = true;
+
+    if (devObj.domRefs && devObj.domRefs.statusBadge) {
+        devObj.domRefs.statusBadge.textContent = "ONLINE";
+        devObj.domRefs.statusBadge.style.background = "#059669";
+    }
+
+    await cmdChar.startNotifications();
+    cmdChar.addEventListener('characteristicvaluechanged', (e) => {
+        const b = new Uint8Array(e.target.value.buffer);
+        if (b.length >= 3) {
+            const reg = b[0];
+            const val = (b[1] << 8) | b[2];
+            if (devObj.pendingReadResolve && devObj.pendingReadReg === reg) {
+                devObj.pendingReadResolve(val);
+                devObj.pendingReadResolve = null;
+            }
+        }
+    });
+
+    await writeAndVerifyGain(devObj, devObj.gain);
+    await notifyDeviceMapping(devObj);
+
+    await dataChar.startNotifications();
+    dataChar.addEventListener('characteristicvaluechanged', (e) => {
+        const b = new Uint8Array(e.target.value.buffer);
+        if (b[0] !== 0xA0) return;
+
+        const counter = b[1];
+        if (devObj.lastCounter !== -1) {
+            const expected = (devObj.lastCounter + 1) & 0xFF;
+            if (counter !== expected) {
+                devObj.totalLost += (counter - expected) & 0xFF;
+            }
+        }
+        devObj.lastCounter = counter;
+        devObj.totalReceived++;
+        devObj.packetCount++;
+
+        const sample = [];
+        const scale = devObj.uvScale;
+        for (let i = 0; i < 16; i++) {
+            let v = (b[2 + i * 3] << 16) | (b[3 + i * 3] << 8) | b[4 + i * 3];
+            if (v & 0x800000) v -= 0x1000000;
+            sample.push(v * scale);
+
+            const absV = Math.abs(v);
+            if (absV > devObj.channelPeak[i]) devObj.channelPeak[i] = absV;
+        }
+        devObj.sampleBuffer.push(sample);
+
+        if (devObj.sampleBuffer.length > 400) {
+            devObj.sampleBuffer.splice(0, devObj.sampleBuffer.length - BATCH_SIZE);
+            devObj.droppedBatches++;
+        }
+
+        if (devObj.sampleBuffer.length >= BATCH_SIZE) {
+            sendBatch(devObj);
+        }
     });
 }
 
@@ -899,20 +1016,21 @@ async function connectNewBleDevice() {
         const device = await navigator.bluetooth.requestDevice({
             filters: [{ services: [SERVICE_UUID] }]
         });
-        const server   = await device.gatt.connect();
-        const service  = await server.getPrimaryService(SERVICE_UUID);
-        const dataChar = await service.getCharacteristic(DATA_CHAR_UUID);
-        const cmdChar  = await service.getCharacteristic(CMD_CHAR_UUID);
+
+        const rawId = device.id || ("dev_" + Math.random().toString(36).substring(2, 8));
+        const shortId = rawId.replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase() || "DEV0";
+        const saved = getSavedDeviceConfig(rawId);
 
         const devObj = {
-            id: "dev_" + Date.now(),
+            id: rawId,
+            shortId: shortId,
             name: device.name || "FreeEEG16",
             device: device,
-            cmdChar: cmdChar,
-            user: "User" + (activeDevices.length + 1),
-            role: activeDevices.length === 0 ? "FCz" : "AFz",
-            gain: 32,
-            uvScale: calcUvScale(32),
+            cmdChar: null,
+            user: saved?.user || ("User" + (activeDevices.length + 1)),
+            role: saved?.role || (activeDevices.length === 0 ? "FCz" : "AFz"),
+            gain: saved?.gain || 32,
+            uvScale: calcUvScale(saved?.gain || 32),
             packetCount: 0,
             sampleBuffer: [],
             sending: false,
@@ -923,84 +1041,29 @@ async function connectNewBleDevice() {
             channelPeak: new Array(16).fill(0),
             pendingReadReg: -1,
             pendingReadResolve: null,
+            isConnected: false,
             domRefs: null
         };
 
         activeDevices.push(devObj);
         createDeviceCardDOM(devObj);
 
-        await cmdChar.startNotifications();
-        cmdChar.addEventListener('characteristicvaluechanged', (e) => {
-            const b = new Uint8Array(e.target.value.buffer);
-            if (b.length >= 3) {
-                const reg = b[0];
-                const val = (b[1] << 8) | b[2];
-                if (devObj.pendingReadResolve && devObj.pendingReadReg === reg) {
-                    devObj.pendingReadResolve(val);
-                    devObj.pendingReadResolve = null;
-                }
+        device.addEventListener('gattserverdisconnected', async () => {
+            devObj.isConnected = false;
+            if (devObj.domRefs && devObj.domRefs.statusBadge) {
+                devObj.domRefs.statusBadge.textContent = "АВТО-ВОЗВРАТ...";
+                devObj.domRefs.statusBadge.style.background = "#d97706";
+            }
+            while (!devObj.isConnected) {
+                try {
+                    await new Promise(r => setTimeout(r, 1200));
+                    await attachGattStream(devObj);
+                    break;
+                } catch (err) {}
             }
         });
 
-        await writeAndVerifyGain(devObj, 32);
-
-        await fetch('/api/device/register', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                device_id: devObj.id, name: devObj.name,
-                client_id: myClientId, gain: devObj.gain,
-                role: devObj.role, user: devObj.user
-            })
-        });
-
-        await dataChar.startNotifications();
-        dataChar.addEventListener('characteristicvaluechanged', (e) => {
-            const b = new Uint8Array(e.target.value.buffer);
-            if (b[0] !== 0xA0) return;
-
-            const counter = b[1];
-            if (devObj.lastCounter !== -1) {
-                const expected = (devObj.lastCounter + 1) & 0xFF;
-                if (counter !== expected) {
-                    devObj.totalLost += (counter - expected) & 0xFF;
-                }
-            }
-            devObj.lastCounter = counter;
-            devObj.totalReceived++;
-            devObj.packetCount++;
-
-            const sample = [];
-            const scale = devObj.uvScale;
-            for (let i = 0; i < 16; i++) {
-                let v = (b[2 + i * 3] << 16) | (b[3 + i * 3] << 8) | b[4 + i * 3];
-                if (v & 0x800000) v -= 0x1000000;
-                sample.push(v * scale);
-
-                const absV = Math.abs(v);
-                if (absV > devObj.channelPeak[i]) devObj.channelPeak[i] = absV;
-            }
-            devObj.sampleBuffer.push(sample);
-
-            if (devObj.sampleBuffer.length > 400) {
-                devObj.sampleBuffer.splice(0, devObj.sampleBuffer.length - BATCH_SIZE);
-                devObj.droppedBatches++;
-            }
-
-            if (devObj.sampleBuffer.length >= BATCH_SIZE) {
-                sendBatch(devObj);
-            }
-        });
-
-        device.addEventListener('gattserverdisconnected', () => {
-            if (devObj.domRefs && devObj.domRefs.cardEl) {
-                devObj.domRefs.cardEl.remove();
-            }
-            activeDevices = activeDevices.filter(d => d.id !== devObj.id);
-            if (activeDevices.length === 0) {
-                dom.noDevicesMsg.style.display = 'block';
-            }
-        });
+        await attachGattStream(devObj);
 
     } catch (err) {
         alert("Ошибка подключения Bluetooth: " + err.message);
@@ -1009,7 +1072,7 @@ async function connectNewBleDevice() {
 
 async function sendBatch(devObj) {
     if (devObj.sampleBuffer.length === 0) return;
-    if ((devObj.inFlightCount || 0) >= 4) return; // До 4 пакетов параллельно в полете через интернет!
+    if ((devObj.inFlightCount || 0) >= 4) return;
 
     const batch = devObj.sampleBuffer.splice(0, devObj.sampleBuffer.length);
     devObj.inFlightCount = (devObj.inFlightCount || 0) + 1;
@@ -1018,8 +1081,7 @@ async function sendBatch(devObj) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            user: devObj.user,
-            role: devObj.role,
+            device_id: devObj.id,
             sps: 250.0,
             samples: batch
         }),
@@ -1058,9 +1120,6 @@ setInterval(() => {
     });
 }, 1000);
 
-// =============================================================================
-// УПРАВЛЕНИЕ 2D-КОНЦЕПТАМИ, МУЗЫКОЙ И ЗАПИСЬЮ СЕССИЙ
-// =============================================================================
 function renderConceptList(containerEl, list, isMusic, onRemove) {
     containerEl.replaceChildren();
     if (list.length === 0) {
@@ -1148,6 +1207,16 @@ async function updateMusicConfig() {
     const parsedBlock = parseFloat(dom.mBlock.value);
     const targetBlock = Number.isNaN(parsedBlock) ? 0.0 : Math.max(0.0, parsedBlock);
 
+    const rawMStoch = parseFloat(dom.mStochastic ? dom.mStochastic.value : 0.0);
+    const mStoch = Number.isNaN(rawMStoch) ? 0.0 : Math.max(0.0, Math.min(1.0, rawMStoch));
+    if (dom.mStochVal) dom.mStochVal.textContent = mStoch.toFixed(2);
+
+    const rawMUnassStoch = parseFloat(dom.mUnassignedStochastic ? dom.mUnassignedStochastic.value : 1.0);
+    const mUnassStoch = Number.isNaN(rawMUnassStoch) ? 1.0 : Math.max(0.0, Math.min(1.0, rawMUnassStoch));
+    if (dom.mUnassStochVal) dom.mUnassStochVal.textContent = mUnassStoch.toFixed(2);
+
+    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
+
     dom.mStrLow.value = sLow;
     dom.mStrHigh.value = sHigh;
     dom.mEmaSmooth.value = ema;
@@ -1158,6 +1227,9 @@ async function updateMusicConfig() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
             model: dom.musicModel ? dom.musicModel.value : 'facebook/musicgen-small',
+            monty_mode: mMode,
+            stochastic: mStoch,
+            unassigned_stochastic: mUnassStoch,
             target_block: targetBlock,
             target_context: parseFloat(dom.mContext.value) || 3.6,
             target_buffer_count: parseInt(dom.mBuffer.value) || 2,
@@ -1190,7 +1262,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     dom.btnConnectBle.addEventListener('click', connectNewBleDevice);
     dom.btnAudio.addEventListener('click', toggleAudio);
 
-    // Обработчики специфической панели 3D-DiT Видео-Трансформера
     document.getElementById('btnUploadInitImage')?.addEventListener('click', uploadVideoInitImage);
     if (dom.videoLoreSelect) {
         dom.videoLoreSelect.addEventListener('change', switchVideoLoreFile);
@@ -1216,13 +1287,22 @@ window.addEventListener('DOMContentLoaded', async () => {
     dom.btnAddVision.addEventListener('click', addVisionConcept);
     dom.btnAddMusic.addEventListener('click', addMusicConcept);
 
+    if (dom.montyModeSelect) {
+        dom.montyModeSelect.addEventListener('change', onMontyModeChange);
+    }
     if (dom.ladderStageSelect) {
         dom.ladderStageSelect.addEventListener('change', onLadderStageChange);
     }
 
     dom.diffPreset.addEventListener('change', (e) => applyPreset(e.target.value));
+    if (dom.diffStochastic) {
+        dom.diffStochastic.addEventListener('input', () => onManualParamChange('custom'));
+    }
+    if (dom.diffUnassignedStochastic) {
+        dom.diffUnassignedStochastic.addEventListener('input', () => onManualParamChange('custom'));
+    }
     [
-        dom.diffSteps, dom.diffCfg, dom.diffStrLow, dom.diffStrHigh,
+        dom.diffModel, dom.diffSteps, dom.diffCfg, dom.diffStrLow, dom.diffStrHigh,
         dom.diffWorldContext, dom.diffEmaSmooth, dom.diffResolution, dom.diffTaesd
     ].forEach(inp => {
         if (inp) {
@@ -1233,8 +1313,20 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (dom.musicPreset) {
         dom.musicPreset.addEventListener('change', (e) => applyMusicPreset(e.target.value));
     }
+    if (dom.mStochastic) {
+        dom.mStochastic.addEventListener('input', () => {
+            if (dom.musicPreset) dom.musicPreset.value = 'custom';
+            updateMusicConfig();
+        });
+    }
+    if (dom.mUnassignedStochastic) {
+        dom.mUnassignedStochastic.addEventListener('input', () => {
+            if (dom.musicPreset) dom.musicPreset.value = 'custom';
+            updateMusicConfig();
+        });
+    }
     [
-        dom.mStrLow, dom.mStrHigh, dom.mEmaSmooth, dom.mBlock,
+        dom.musicModel, dom.mStrLow, dom.mStrHigh, dom.mEmaSmooth, dom.mBlock,
         dom.mContext, dom.mBuffer, dom.mTemp, dom.mTopK, dom.mCfg
     ].forEach(inp => {
         if (inp) {

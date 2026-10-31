@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v10.2 (ZERO-LAG CLOUD & LOCAL EDITION)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v10.5 (DUAL STOCHASTIC & PERSISTENT LSL)
 ===================================================================================
-- ИСПРАВЛЕНА СВЯЗЬ С ОБЛАКОМ (RunPod / WAN):
-  1) Убрано выбрасывание аудио-чанков (engine_audio_chunks.pop(0)) при микро-чанке
-     0.02с - 0.16с: теперь лимит буфера считается в секундах (до 4.0 сек), а не в штуках
-     чанков, поэтому в облаке звук больше НИКОГДА не рвется и не дает пауз!
-  2) В /stream.mjpg включен TCP_NODELAY и защита от накопления сетевой очереди:
-     клиенту всегда уходит только самый свежий кадр без забивания канала.
-  3) Полная совместимость с локальным режимом (0 изменений в логике генераторов!).
+- По умолчанию:
+  * stochastic = 0.0 (100% управление рабочей памятью на активных регионах).
+  * unassigned_stochastic = 1.0 (живая генерация на пустых регионах без девайса и Монти,
+    а при 0.0 — 100% детерминизм для ученых без необходимости набора статистики).
 ===================================================================================
 """
 
@@ -29,7 +26,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from multiprocessing.connection import Listener
 from pylsl import StreamInfo, StreamOutlet
 import numpy as np
-import math
 
 from neuro_recorder import recorder_instance
 
@@ -46,9 +42,6 @@ IPC_VIDEO_AUTHKEY = b'video_ctrl'
 NUM_CHANNELS = 16
 DEFAULT_SPS = 250.0
 SAMPLE_RATE = 32000
-TICK_SEC = 0.040
-TICK_SAMPLES = int(SAMPLE_RATE * TICK_SEC)
-TICK_FLOAT_BYTES = TICK_SAMPLES * 4
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -58,9 +51,6 @@ latest_jpeg_ts = 0.0
 last_served_jpeg_id = 0
 jpeg_lock = threading.Lock()
 jpeg_cond = threading.Condition(jpeg_lock)
-
-engine_audio_chunks: list[bytearray] = []
-engine_audio_lock = threading.Lock()
 
 audio_listeners: list[queue.Queue] = []
 audio_listeners_lock = threading.Lock()
@@ -80,8 +70,10 @@ video_ctrl_lock = threading.Lock()
 music_state = {
     "concepts": [],
     "preset": "balanced",
+    "stochastic": 0.0,
+    "unassigned_stochastic": 1.0,
     "target_block": 0.0,
-    "actual_block": 0.16,
+    "actual_block": 0.24,
     "play_speed": 1.0,
     "target_context": 3.6,
     "target_buffer_count": 2,
@@ -94,13 +86,15 @@ music_state = {
     "dyn_strength": 0.25,
     "buffer_sec": 0.0,
     "buffer_chunks": 0,
-    "rtf": 1.0
+    "rtf": 1.5
 }
 music_state_lock = threading.Lock()
 
 world_state = {
     "concepts": [],
     "preset": "balanced",
+    "stochastic": 0.0,
+    "unassigned_stochastic": 1.0,
     "steps": 0,
     "actual_steps": 2,
     "resolution": "512x384",
@@ -212,73 +206,6 @@ video_state = {
 video_state_lock = threading.Lock()
 
 
-def _recalc_and_push_buffer_locked():
-    total_bytes = sum(len(c) for c in engine_audio_chunks)
-    total_sec = total_bytes / float(SAMPLE_RATE * 4)
-    total_chunks = len(engine_audio_chunks)
-
-    with music_state_lock:
-        music_state["buffer_sec"] = round(total_sec, 2)
-        music_state["buffer_chunks"] = total_chunks
-
-    with music_conn_lock:
-        if active_music_conn is not None:
-            try:
-                active_music_conn.send({
-                    'cmd': 'gateway_buffer_stat',
-                    'buffer_sec': total_sec,
-                    'buffer_chunks': total_chunks
-                })
-            except Exception:
-                pass
-
-
-def server_realtime_audio_clock():
-    next_tick = time.perf_counter()
-    last_sse_broadcast = 0.0
-
-    while True:
-        now = time.perf_counter()
-        sleep_dt = next_tick - now
-        if sleep_dt > 0.001:
-            time.sleep(sleep_dt)
-        next_tick = max(time.perf_counter(), next_tick + TICK_SEC)
-
-        pulled_bytes = bytearray()
-        with engine_audio_lock:
-            needed = TICK_FLOAT_BYTES
-            while needed > 0 and len(engine_audio_chunks) > 0:
-                head = engine_audio_chunks[0]
-                if len(head) <= needed:
-                    pulled_bytes.extend(head)
-                    needed -= len(head)
-                    engine_audio_chunks.pop(0)
-                else:
-                    pulled_bytes.extend(head[:needed])
-                    del head[:needed]
-                    needed = 0
-            _recalc_and_push_buffer_locked()
-
-        if len(pulled_bytes) > 0:
-            floats = np.frombuffer(pulled_bytes, dtype=np.float32)
-            pcm16_bytes = (np.clip(floats, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
-
-            with audio_listeners_lock:
-                for q in list(audio_listeners):
-                    try:
-                        q.put_nowait(pcm16_bytes)
-                    except queue.Full:
-                        try:
-                            q.get_nowait()
-                            q.put_nowait(pcm16_bytes)
-                        except Exception:
-                            pass
-
-        if time.perf_counter() - last_sse_broadcast >= 0.25:
-            last_sse_broadcast = time.perf_counter()
-            broadcast_full_state()
-
-
 def broadcast_sse(event_name: str, payload: dict):
     msg = f"event: {event_name}\ndata: {json.dumps(payload)}\n\n".encode('utf-8')
     with sse_lock:
@@ -295,28 +222,34 @@ def broadcast_sse(event_name: str, payload: dict):
 
 class DynamicLSLRouter:
     def __init__(self):
-        self.outlets = {}
+        self.device_outlets: dict[str, dict] = {}
         self.lock = threading.Lock()
 
-    def get_or_create_outlet(self, user: str, role: str, sps: float = DEFAULT_SPS):
-        clean_user = "".join(c for c in user if c.isalnum() or c == "_").capitalize() or "User1"
-        clean_role = "".join(c for c in role if c.isalnum()).capitalize() or "Afz"
-        role_map = {"Afz": "AFz", "Fpz": "Fpz", "Fcz": "FCz", "F3": "F3", "F4": "F4", "Pz": "Pz", "Cz": "Cz"}
-        clean_role = role_map.get(clean_role, clean_role)
-        stream_name = f"{clean_user}_{clean_role}"
+    def push(self, dev_id: str, samples: list, sps: float = DEFAULT_SPS):
+        clean_dev = "".join(c for c in dev_id if c.isalnum())[-6:].upper() or "DEV0"
+        stream_name = f"FreeEEG_{clean_dev}"
 
         with self.lock:
-            if stream_name not in self.outlets:
+            dev_entry = self.device_outlets.get(dev_id)
+            if dev_entry is None:
                 info = StreamInfo(
-                    name=stream_name, type='EEG', channel_count=NUM_CHANNELS,
-                    nominal_srate=float(sps), channel_format='float32',
-                    source_id=f"ble_{stream_name}_{int(time.time())}"
+                    name=stream_name,
+                    type='EEG',
+                    channel_count=NUM_CHANNELS,
+                    nominal_srate=float(sps),
+                    channel_format='float32',
+                    source_id=f"uid_freeeeg_{clean_dev}"
                 )
-                self.outlets[stream_name] = StreamOutlet(info)
-            return self.outlets[stream_name]
+                new_outlet = StreamOutlet(info)
+                dev_entry = {
+                    "stream_name": stream_name,
+                    "outlet": new_outlet
+                }
+                self.device_outlets[dev_id] = dev_entry
+                print(f"🔌 [LSL OUTLET] Открыт постоянный аппаратный поток: '{stream_name}'", flush=True)
 
-    def push(self, user, role, samples, sps=DEFAULT_SPS):
-        outlet = self.get_or_create_outlet(user, role, sps)
+            outlet = dev_entry["outlet"]
+
         for s in samples:
             if len(s) == NUM_CHANNELS:
                 outlet.push_sample(s)
@@ -450,8 +383,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                         jpeg_cond.wait(timeout=0.5)
                     if latest_jpeg_frame is None or latest_jpeg_id == sent_id:
                         continue
-                    # Всегда берем самый последний актуальный кадр, пропуская устаревшие,
-                    # если интернет-канал до облака задержался!
                     frame = latest_jpeg_frame
                     sent_id = latest_jpeg_id
 
@@ -483,23 +414,13 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             except Exception:
                 return
 
-            client_audio_q = queue.Queue(maxsize=60)
+            client_audio_q = queue.Queue(maxsize=12)
             with audio_listeners_lock:
                 audio_listeners.append(client_audio_q)
 
             try:
                 while True:
-                    pcm16_bytes = client_audio_q.get(timeout=15.0)
-                    # Если в очереди накопилось несколько тиков из-за сетевого джиттера облака,
-                    # склеиваем их в один TCP-пакет, чтобы браузер получил их мгновенно!
-                    if not client_audio_q.empty():
-                        buf = bytearray(pcm16_bytes)
-                        while not client_audio_q.empty():
-                            try:
-                                buf.extend(client_audio_q.get_nowait())
-                            except queue.Empty:
-                                break
-                        pcm16_bytes = bytes(buf)
+                    pcm16_bytes = client_audio_q.get(timeout=20.0)
                     self.wfile.write(pcm16_bytes)
                     self.wfile.flush()
             except Exception:
@@ -571,28 +492,53 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(length).decode('utf-8')) if length else {}
 
         if clean_path == '/api/eeg_push':
+            dev_id = str(data.get('device_id') or "dev_0").strip()
             lsl_router.push(
-                data.get('user', 'User1'),
-                data.get('role', 'AFz'),
-                data.get('samples', []),
-                float(data.get('sps', DEFAULT_SPS))
+                dev_id=dev_id,
+                samples=data.get('samples', []),
+                sps=float(data.get('sps', DEFAULT_SPS))
             )
             self._send_json(200, {"status": "ok"})
 
-        elif clean_path == '/api/device/register':
+        elif clean_path in ['/api/device/register', '/api/device/configure']:
+            dev_id = str(data.get('device_id', 'dev_0')).strip()
+            clean_dev = "".join(c for c in dev_id if c.isalnum())[-6:].upper() or "DEV0"
             role = str(data.get('role', 'FCz')).strip()
-            payload = {"cmd": "set_device_role", "role": role, "device_id": data.get("device_id", "dev_0")}
-            send_diff_ipc(payload)
-            send_video_ipc(payload)
-            self._send_json(200, {"status": "ok"})
+            user = str(data.get('user', 'User1')).strip()
+
+            mapping_msg = {
+                "cmd": "set_device_mapping",
+                "device_id": dev_id,
+                "stream_name": f"FreeEEG_{clean_dev}",
+                "role": role,
+                "user": user
+            }
+            send_diff_ipc(mapping_msg)
+            send_video_ipc(mapping_msg)
+            send_music_ipc(mapping_msg)
+            self._send_json(200, {"status": "ok", "mapped": mapping_msg})
 
         elif clean_path == '/api/device/command':
             cmd_type = data.get('cmd')
             val = data.get('val')
-            if cmd_type == 'set_role' and val:
-                payload = {"cmd": "set_device_role", "role": str(val).strip(), "device_id": data.get("device_id", "dev_0")}
-                send_diff_ipc(payload)
-                send_video_ipc(payload)
+            dev_id = str(data.get('device_id', 'dev_0')).strip()
+            clean_dev = "".join(c for c in dev_id if c.isalnum())[-6:].upper() or "DEV0"
+            user = str(data.get('user', 'User1')).strip()
+
+            if cmd_type in ('set_role', 'set_user') and val:
+                role = str(val).strip() if cmd_type == 'set_role' else str(data.get('role', 'FCz')).strip()
+                usr = str(val).strip() if cmd_type == 'set_user' else user
+                mapping_msg = {
+                    "cmd": "set_device_mapping",
+                    "device_id": dev_id,
+                    "stream_name": f"FreeEEG_{clean_dev}",
+                    "role": role,
+                    "user": usr
+                }
+                send_diff_ipc(mapping_msg)
+                send_video_ipc(mapping_msg)
+                send_music_ipc(mapping_msg)
+
             broadcast_sse("ble_cmd", data)
             self._send_json(200, {"status": "ok"})
 
@@ -694,12 +640,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
         elif clean_path == '/api/music_config':
             with music_state_lock:
                 music_state.update(data)
-            with music_conn_lock:
-                if active_music_conn is not None:
-                    try:
-                        active_music_conn.send({'cmd': 'update_config', 'config': music_state})
-                    except Exception:
-                        pass
+            send_music_ipc({'cmd': 'update_config', 'config': music_state})
             broadcast_full_state()
             self._send_json(200, {"status": "ok"})
 
@@ -736,12 +677,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 with music_state_lock:
                     if concept not in music_state["concepts"]:
                         music_state["concepts"].append(concept)
-                with music_conn_lock:
-                    if active_music_conn is not None:
-                        try:
-                            active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
-                        except Exception:
-                            pass
+                send_music_ipc({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
                 broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
@@ -749,12 +685,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             new_list = [str(c).strip() for c in data.get('concepts', []) if str(c).strip()]
             with music_state_lock:
                 music_state["concepts"] = new_list
-            with music_conn_lock:
-                if active_music_conn is not None:
-                    try:
-                        active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
-                    except Exception:
-                        pass
+            send_music_ipc({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
@@ -763,12 +694,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             with music_state_lock:
                 if concept in music_state["concepts"]:
                     music_state["concepts"].remove(concept)
-            with music_conn_lock:
-                if active_music_conn is not None:
-                    try:
-                        active_music_conn.send({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
-                    except Exception:
-                        pass
+            send_music_ipc({'cmd': 'update_concepts', 'concepts': music_state["concepts"]})
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "concepts": music_state["concepts"]})
 
@@ -854,6 +780,16 @@ def send_video_ipc(payload):
                 active_video_ctrl_conn.send(payload)
             except Exception:
                 active_video_ctrl_conn = None
+
+
+def send_music_ipc(payload):
+    global active_music_conn
+    with music_conn_lock:
+        if active_music_conn is not None:
+            try:
+                active_music_conn.send(payload)
+            except Exception:
+                active_music_conn = None
 
 
 class ThreadedHTTPServer(ThreadingHTTPServer):
@@ -946,6 +882,8 @@ def ipc_control_listener():
                             world_state["persistence"] = msg.get("persistence", 0.0)
                             world_state["surprise"] = msg.get("surprise", 0.0)
                             world_state["regions"] = msg.get("regions", {})
+                            if "stochastic" in msg: world_state["stochastic"] = msg["stochastic"]
+                            if "unassigned_stochastic" in msg: world_state["unassigned_stochastic"] = msg["unassigned_stochastic"]
                             if "fps" in msg: world_state["fps"] = msg["fps"]
                             if "gen_ms" in msg: world_state["gen_ms"] = msg["gen_ms"]
                             if "actual_steps" in msg: world_state["actual_steps"] = msg["actual_steps"]
@@ -1055,7 +993,7 @@ def ipc_audio_receiver():
                         with music_state_lock:
                             music_state["rtf"] = round(float(data.get('rtf', 1.0)), 2)
                             music_state["play_speed"] = round(float(data.get('play_speed', 1.0)), 2)
-                            music_state["actual_block"] = round(float(data.get('actual_block', 0.16)), 3)
+                            music_state["actual_block"] = round(float(data.get('actual_block', 0.24)), 3)
                             if 'dyn_strength' in data:
                                 music_state["dyn_strength"] = round(float(data['dyn_strength']), 2)
                     elif cmd == 'sync_from_runner':
@@ -1067,22 +1005,41 @@ def ipc_audio_receiver():
                         broadcast_full_state()
 
                 if raw_bytes is not None:
+                    flt = np.frombuffer(raw_bytes, dtype=np.float32)
+                    pcm16_bytes = (np.clip(flt, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                    chunk_sec = len(flt) / float(SAMPLE_RATE)
+
                     with session_wav_lock:
                         if session_wav_writer is not None:
                             try:
-                                flt = np.frombuffer(raw_bytes, dtype=np.float32)
-                                pcm16 = (np.clip(flt, -1.0, 1.0) * 32767).astype(np.int16)
-                                session_wav_writer.writeframes(pcm16.tobytes())
+                                session_wav_writer.writeframes(pcm16_bytes)
                             except Exception:
                                 pass
 
-                    with engine_audio_lock:
-                        engine_audio_chunks.append(bytearray(raw_bytes))
-                        max_bytes = int(SAMPLE_RATE * 4 * 1.5)
-                        while sum(len(c) for c in engine_audio_chunks) > max_bytes and len(engine_audio_chunks) > 2:
-                            engine_audio_chunks.pop(0)
-                        _recalc_and_push_buffer_locked()
+                    max_q_chunks = 0
+                    with audio_listeners_lock:
+                        for q in list(audio_listeners):
+                            try:
+                                q.put_nowait(pcm16_bytes)
+                            except queue.Full:
+                                try:
+                                    q.get_nowait()
+                                    q.put_nowait(pcm16_bytes)
+                                except Exception:
+                                    pass
+                            if q.qsize() > max_q_chunks:
+                                max_q_chunks = q.qsize()
 
+                    est_buf_sec = round(max_q_chunks * chunk_sec, 2)
+                    with music_state_lock:
+                        music_state["buffer_chunks"] = max_q_chunks
+                        music_state["buffer_sec"] = est_buf_sec
+
+                    send_music_ipc({
+                        'cmd': 'gateway_buffer_stat',
+                        'buffer_sec': est_buf_sec,
+                        'buffer_chunks': max_q_chunks
+                    })
                     broadcast_full_state()
         except Exception:
             time.sleep(0.5)
@@ -1108,30 +1065,35 @@ def main():
     parser.add_argument('--cert', type=str, default=None)
     parser.add_argument('--key', type=str, default=None)
     parser.add_argument('--lore', type=str, default=None)
+    parser.add_argument('--video-lore', type=str, default=None)
     parser.add_argument('--music-lore', type=str, default=None)
     args = parser.parse_args()
 
     port = args.port or args.pos_port or int(os.environ.get("HTTP_PORT", HTTP_PORT))
 
-    raw_cli_lore = args.lore if args.lore is not None else os.environ.get("LORE_PATH", "")
-    initial_lore_path = normalize_lore_relpath(raw_cli_lore)
-    initial_world_words = load_initial_lore(os.path.join(BASE_DIR, initial_lore_path)) if initial_lore_path else []
-    initial_music_words = load_initial_lore(args.music_lore or os.environ.get("MUSIC_LORE_PATH"))
+    raw_diff_lore  = args.lore if args.lore is not None else os.environ.get("LORE_PATH", "")
+    raw_video_lore = args.video_lore if args.video_lore is not None else os.environ.get("VIDEO_LORE_PATH", "")
+    raw_music_lore = args.music_lore if args.music_lore is not None else os.environ.get("MUSIC_LORE_PATH", "")
+
+    diff_lore_rel  = normalize_lore_relpath(raw_diff_lore)
+    video_lore_rel = normalize_lore_relpath(raw_video_lore)
+
+    initial_world_words = load_initial_lore(os.path.join(BASE_DIR, diff_lore_rel)) if diff_lore_rel else []
+    initial_music_words = load_initial_lore(raw_music_lore)
 
     with world_state_lock:
         world_state["concepts"] = initial_world_words
     with music_state_lock:
         music_state["concepts"] = initial_music_words
     with video_state_lock:
-        video_state["lore_file"] = initial_lore_path
-        video_state["sections"] = parse_regional_lore_file(initial_lore_path)
+        video_state["lore_file"] = video_lore_rel
+        video_state["sections"] = parse_regional_lore_file(video_lore_rel)
         video_state["available_lores"] = discover_available_lore_files()
 
     threading.Thread(target=ipc_frame_receiver, daemon=True).start()
     threading.Thread(target=ipc_audio_receiver, daemon=True).start()
     threading.Thread(target=ipc_control_listener, daemon=True).start()
     threading.Thread(target=ipc_video_control_listener, daemon=True).start()
-    threading.Thread(target=server_realtime_audio_clock, daemon=True).start()
 
     server = ThreadedHTTPServer(('0.0.0.0', port), UnifiedCloudHandler)
 
@@ -1154,3 +1116,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

@@ -3,10 +3,8 @@
 ===================================================================================
 NEUROCANVAS: ISOLATED 3D-DiT & 4-BIT T5 VIDEO RENDER ENGINE (video_render_logic.py)
 ===================================================================================
-- ЭТОТ МОДУЛЬ ОТВЕЧАЕТ ИСКЛЮЧИТЕЛЬНО ЗА КАЧЕСТВО РЕНДЕРИНГА 3D-DiT И T5 В VRAM.
-- Строго сохраняет целостность T5-эмбеддингов [1, 128, 4096] и баланс экспозиции I2V
-  из эталонной рабочей версии (никаких разрезаний последовательности T5 и никакого
-  белого пересвета!).
+- Полностью убран бинарный флаг deterministic: используется только непрерывная
+  шкала stochastic ∈ [0.0, 1.0].
 ===================================================================================
 """
 
@@ -52,18 +50,15 @@ def resolve_quantized_t5_dir() -> Path:
 
 
 class NeuroVideoRenderer:
-    """
-    Чистый изолированный рендерер 3D-DiT (LTX-Video / Wan) + 4-bit T5 в VRAM.
-    """
     def __init__(self, model_type: str = "ltx-video", width: int = 0, height: int = 0,
                  num_frames: int = 9, steps: int = 4, genesis_steps: int = 14,
                  cfg_scale: float = 3.5, force_low_vram: bool = False,
-                 deterministic: bool = False):
+                 stochastic: float = 0.0):
 
         self.device = DEVICE
         self.dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
         self.model_type = model_type.lower()
-        self.deterministic = bool(deterministic)
+        self.stochastic = float(np.clip(stochastic, 0.0, 1.0))
         self.seq_len = 128
 
         self.total_vram_gb = 12.0
@@ -90,7 +85,6 @@ class NeuroVideoRenderer:
         self.pipe_i2v = None
         self.ones_mask = torch.ones((1, self.seq_len), dtype=torch.long, device=self.device)
 
-        # Кадры визуального состояния в float32 [3, H, W] в диапазоне [0, 1]
         self.genesis_maze_gpu: torch.Tensor | None = None
         self.last_frame_gpu: torch.Tensor | None = None
         self.custom_init_image_gpu: torch.Tensor | None = None
@@ -158,21 +152,33 @@ class NeuroVideoRenderer:
         print(f"🎬 [VIDEO-RENDERER] Загрузка 3D-DiT: {repo_id}")
         t0 = time.time()
         try:
-            from diffusers import LTXPipeline, LTXImageToVideoPipeline, LTXVideoTransformer3DModel
+            if "wan" in self.model_type:
+                from diffusers import AutoPipelineForImage2Image, WanImageToVideoPipeline
+                try:
+                    self.pipe_i2v = WanImageToVideoPipeline.from_pretrained(
+                        repo_id, torch_dtype=self.dtype
+                    ).to(self.device)
+                except Exception:
+                    self.pipe_i2v = AutoPipelineForImage2Image.from_pretrained(
+                        repo_id, torch_dtype=self.dtype
+                    ).to(self.device)
+                self.pipe_t2v = self.pipe_i2v
+            else:
+                from diffusers import LTXPipeline, LTXImageToVideoPipeline, LTXVideoTransformer3DModel
 
-            load_kwargs = {"torch_dtype": self.dtype, "low_cpu_mem_usage": True}
-            transformer = LTXVideoTransformer3DModel.from_pretrained(repo_id, subfolder="transformer", **load_kwargs)
+                load_kwargs = {"torch_dtype": self.dtype, "low_cpu_mem_usage": True}
+                transformer = LTXVideoTransformer3DModel.from_pretrained(repo_id, subfolder="transformer", **load_kwargs)
 
-            if self.is_low_vram and hasattr(transformer, "enable_layerwise_casting"):
-                transformer.enable_layerwise_casting(storage_dtype=torch.float8_e4m3fn, compute_dtype=self.dtype)
+                if self.is_low_vram and hasattr(transformer, "enable_layerwise_casting"):
+                    transformer.enable_layerwise_casting(storage_dtype=torch.float8_e4m3fn, compute_dtype=self.dtype)
 
-            self.pipe_t2v = LTXPipeline.from_pretrained(
-                repo_id, text_encoder=None, tokenizer=None, transformer=transformer, torch_dtype=self.dtype
-            )
-            self.pipe_i2v = LTXImageToVideoPipeline(
-                scheduler=self.pipe_t2v.scheduler, vae=self.pipe_t2v.vae,
-                text_encoder=None, tokenizer=None, transformer=self.pipe_t2v.transformer,
-            )
+                self.pipe_t2v = LTXPipeline.from_pretrained(
+                    repo_id, text_encoder=None, tokenizer=None, transformer=transformer, torch_dtype=self.dtype
+                )
+                self.pipe_i2v = LTXImageToVideoPipeline(
+                    scheduler=self.pipe_t2v.scheduler, vae=self.pipe_t2v.vae,
+                    text_encoder=None, tokenizer=None, transformer=self.pipe_t2v.transformer,
+                )
 
             self.pipe_t2v.set_progress_bar_config(disable=True)
             if self.pipe_i2v is not None:
@@ -181,22 +187,19 @@ class NeuroVideoRenderer:
             if hasattr(self.pipe_t2v.vae, "enable_tiling"): self.pipe_t2v.vae.enable_tiling()
             if hasattr(self.pipe_t2v.vae, "enable_slicing"): self.pipe_t2v.vae.enable_slicing()
 
-            self.pipe_t2v.transformer.to(self.device)
-            self.pipe_t2v.vae.to(self.device)
+            if "wan" not in self.model_type:
+                self.pipe_t2v.transformer.to(self.device)
+                self.pipe_t2v.vae.to(self.device)
 
             torch.cuda.empty_cache()
             alloc_mb = torch.cuda.memory_allocated(0) / (1024 ** 2)
-            print(f"✅ [VIDEO-RENDERER] Готов за {time.time() - t0:.1f}с! Занято VRAM: {alloc_mb:.0f} МБ")
+            print(f"✅ [VIDEO-RENDERER] Модель {self.model_type} готова за {time.time() - t0:.1f}с! VRAM: {alloc_mb:.0f} МБ")
             print("=" * 80)
         except Exception as e:
             print(f"❌ [DiT Load Error]: {e}")
 
     @torch.no_grad()
     def encode_holistic_128_t5(self, prompt_text: str) -> torch.Tensor:
-        """
-        100% эталонное целостное кодирование из первой рабочей версии (с защитой от пустой строки для Triton):
-        Возвращает [128, 4096] в float32.
-        """
         text_clean = prompt_text.strip()
         if not text_clean:
             inp = self.tokenizer([""], return_tensors="pt", padding="max_length", max_length=16)
@@ -266,19 +269,13 @@ class NeuroVideoRenderer:
         neg_embeds_1x128x4096: torch.Tensor,
         wall_keep: float = 0.55,
         anchor_advance_rate: float = 0.18,
-        use_deterministic: bool | None = None,
+        stochastic: float | None = None,
         seed_val: int = 42,
     ) -> list[np.ndarray]:
-        """
-        Выполняет 1 шаг роллаута 3D-DiT:
-        - wall_keep (0.45..0.70): держит картинку от распада и выгорания в белый шум (как в первом видео!).
-        - anchor_advance_rate (0.0..0.35): плавно подтягивает genesis_maze_gpu к last_frame_gpu
-          ТОЛЬКО в тех местах, где изменилось состояние объекта, чтобы объект не возвращался по кругу
-          на старт, а продвигался вперед по миру!
-        """
         h, w = self.height, self.width
-        use_det = self.deterministic if use_deterministic is None else bool(use_deterministic)
-        gen_arg = torch.Generator(device=self.device).manual_seed(seed_val) if use_det else None
+        stoch = self.stochastic if stochastic is None else float(np.clip(stochastic, 0.0, 1.0))
+        eff_seed = seed_val if stoch <= 0.001 else (seed_val + int(time.time() * 1000.0 * stoch) % 100000)
+        gen_arg = torch.Generator(device=self.device).manual_seed(eff_seed)
 
         cond_pos = final_embeds_1x128x4096.to(device=self.device, dtype=self.dtype)
         cond_neg = neg_embeds_1x128x4096.to(device=self.device, dtype=self.dtype)
@@ -305,14 +302,11 @@ class NeuroVideoRenderer:
                     self.last_frame_gpu = vid_pt[-1].detach().float().clone()
                     self.is_genesis_done = True
                 else:
-                    # 1. Плавное продвижение якоря в зоне активного действия (чтобы шар НЕ возвращался на старт,
-                    #    но и стены никогда не выгорали в белый шум!)
                     if anchor_advance_rate > 0.005:
                         diff_mag = torch.mean(torch.abs(self.last_frame_gpu - self.genesis_maze_gpu), dim=0, keepdim=True)
                         local_advance = torch.clamp(diff_mag * 3.0, 0.0, 1.0) * float(np.clip(anchor_advance_rate, 0.0, 0.35))
                         self.genesis_maze_gpu = self.genesis_maze_gpu * (1.0 - local_advance) + self.last_frame_gpu * local_advance
 
-                    # 2. Точная формула стабилизации из первого видео:
                     keep = float(np.clip(wall_keep, 0.45, 0.75))
                     anchor_gpu = self.genesis_maze_gpu * keep + self.last_frame_gpu * (1.0 - keep)
                     anchor_np = (anchor_gpu.permute(1, 2, 0).clamp(0.0, 1.0) * 255.0).to(torch.uint8).cpu().numpy()

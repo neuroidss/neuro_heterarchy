@@ -80,6 +80,12 @@
             font-family: monospace; 
             font-size: 11px; 
         }
+        input[type="range"] {
+            padding: 0;
+            height: 18px;
+            accent-color: #00ffc8;
+            cursor: pointer;
+        }
 
         .btn { 
             width: 100%; 
@@ -231,24 +237,42 @@
                 </div>
             </div>
 
-            <!-- ========================================================================= -->
-            <!-- НОВАЯ СПЕЦИФИЧЕСКАЯ ПАНЕЛЬ УПРАВЛЕНИЯ 3D-DiT ВИДЕО-ТРАНСФОРМЕРОМ          -->
-            <!-- ========================================================================= -->
+            <div class="panel">
+                <h3>🪜 Режим Колонки Монти & Межрегиональная Гетерархия</h3>
+                <label>Участие колонок Монти (SDR):</label>
+                <select id="montyModeSelect">
+                    <option value="off">🚫 ВЫКЛ (--no-monty: 100% Чистая полноранговая рабочая память)</option>
+                    <option value="missing_only" selected>⚡ Оператор пустых регионов (На девайсах — чистая рабочая память)</option>
+                    <option value="full">🧠 Полный Монти на всех 5 регионах</option>
+                </select>
+
+                <label class="mt-6">Ступень разморозки регионов (Лестница обучения):</label>
+                <select id="ladderStageSelect">
+                    <option value="1" selected>Ступень 1: FCz Действия (Верх стабилен, только FCz мега-быстрый)</option>
+                    <option value="2">Ступень 2: +F3/F4 Структурная Форма и Стиль</option>
+                    <option value="3">Ступень 3: +AFz Композиционная Матрёшка (A ⊃ B)</option>
+                    <option value="4">Ступень 4: +Fpz Полная Гетерархия и Колесо Эпох</option>
+                </select>
+                <div id="montyStatusBar" class="monty-bar">
+                    Loss (MSE): 0.0200 | Persistence: 0.00 | Surprise: 0.00
+                </div>
+            </div>
+
             <div class="panel panel-video">
-                <h3 style="color:#00ffc8;">🎬 3D-DiT Видео-Трансформер (Порегионная 4096-D Гетерархия)</h3>
+                <h3 style="color:#00ffc8;">🎬 3D-DiT Видео-Трансформер (Порегионная 524,288-D Гетерархия)</h3>
                 <div id="videoLagStatus" class="lag-status">
                     3D-DiT: Ожидание подключения порта 6007...
                 </div>
 
-                <label>Источник концептов (Пусто = Свободный 4096-D дрейф по матрице T5):</label>
+                <label>Источник концептов (Пусто = Свободный 524,288-D дрейф по матрице T5):</label>
                 <div class="input-row">
                     <select id="videoLoreSelect">
-                        <option value="">[Пусто — Свободный 4096-D дрейф без лор-файла]</option>
+                        <option value="">[Пусто — Свободный 524,288-D дрейф без лор-файла]</option>
                     </select>
                     <button type="button" class="btn btn-blue btn-fixed" id="btnVideoResetGenesis">🔄 СБРОС</button>
                 </div>
                 
-                <label>Стартовая Карта / Картинка Мира (PNG/JPG — держит стены даже с пустым лором):</label>
+                <label>Стартовая Карта / Картинка Мира (PNG/JPG):</label>
                 <div class="input-row">
                     <input type="file" id="videoInitImageInput" accept="image/*">
                     <button type="button" class="btn btn-green btn-fixed" id="btnUploadInitImage">🖼️ В МИР</button>
@@ -292,13 +316,13 @@
                     </div>
                 </div>
 
-                <label class="mt-6">Пул концептов выбранного региона коры (Пусто = Свободный дрейф региона):</label>
+                <label class="mt-6">Пул концептов выбранного региона коры:</label>
                 <select id="videoRegionSelect">
-                    <option value="FCZ" selected>[FCZ] — SMA (Гамма-динамика действий, tau=0.025s)</option>
-                    <option value="F3">[F3] — L-dlPFC (ON-подпространство структуры, tau=0.35s)</option>
-                    <option value="F4">[F4] — R-dlPFC (OFF-подпространство контекста, tau=0.35s)</option>
-                    <option value="AFZ">[AFZ] — dmPFC (Композиционные правила A ⊃ B, tau=1.20s)</option>
-                    <option value="FPZ">[FPZ] — BA10 (Смена мета-правил, tau=5.00s)</option>
+                    <option value="FCZ" selected>[FCZ] — SMA (Гамма-динамика действий, tau=0.020s)</option>
+                    <option value="F3">[F3] — L-dlPFC (ON-подпространство структуры, tau=0.18s)</option>
+                    <option value="F4">[F4] — R-dlPFC (OFF-подпространство контекста, tau=0.18s)</option>
+                    <option value="AFZ">[AFZ] — dmPFC (Композиционные правила A ⊃ B, tau=0.65s)</option>
+                    <option value="FPZ">[FPZ] — BA10 (Смена мета-правил, tau=2.50s)</option>
                     <option value="NEGATIVE">[NEGATIVE] — Исключаемое подпространство</option>
                 </select>
                 <div id="videoRegionConceptList" class="concept-container mt-4"></div>
@@ -322,7 +346,7 @@
                     </div>
                     <div>
                         <label>Geodesic Lock:</label>
-                        <input type="number" id="vGeodesicLock" value="0.18" min="0.04" max="0.65" step="0.02">
+                        <input type="number" id="vGeodesicLock" value="0.24" min="0.04" max="0.65" step="0.02">
                     </div>
                     <div>
                         <label>Шаги DiT:</label>
@@ -346,26 +370,12 @@
             </div>
 
             <div class="panel">
-                <h3>🪜 Межрегиональная Гетерархия Монти (FCz ➔ Fpz)</h3>
-                <label>Ступень разморозки регионов (Лестница обучения):</label>
-                <select id="ladderStageSelect">
-                    <option value="1" selected>Ступень 1: FCz Действия (Верх стабилен, только FCz мега-быстрый)</option>
-                    <option value="2">Ступень 2: +F3/F4 Структурная Форма и Стиль</option>
-                    <option value="3">Ступень 3: +AFz Композиционная Матрёшка (A ⊃ B)</option>
-                    <option value="4">Ступень 4: +Fpz Полная Гетерархия и Колесо Эпох</option>
-                </select>
-                <div id="montyStatusBar" class="monty-bar">
-                    Loss (MSE): 0.0200 | Persistence: 0.00 | Surprise: 0.00
-                </div>
-            </div>
-
-            <div class="panel">
-                <h3>🎨 2D-Диффузия Картинок (LCM / SD-Turbo / SDXL — Отдельный режим)</h3>
+                <h3>🎨 2D-Диффузия Картинок (LCM / SD-Turbo / SDXL)</h3>
                 <div id="diffLagStatus" class="lag-status">
-                    Буфер: 0.00с (0 кадр) | FPS: 0.0 (0 мс) | Шаги: 2 | 512×384 | TAESD+Color 🟢
+                    Буфер: 0.00с | FPS: 0.0 | Шаги: 2 | 512×384 | TAESD+Color 🟢
                 </div>
 
-                <label>Активный пул 2D-образов (Пусто = Свободный дрейф):</label>
+                <label>Активный пул 2D-образов (Пусто = Свободный дрейф вокруг средней точки):</label>
                 <div id="visionConceptList" class="concept-container"></div>
                 <div class="input-row">
                     <input type="text" id="newVisionInput" placeholder="Новый 2D визуальный образ...">
@@ -386,6 +396,15 @@
                     <option value="dynamic">⚡ Мгновенный отклик (Steps 2, Ctx 0.05, EMA 0.05)</option>
                     <option value="custom">🛠️ Пользовательский (Ручная настройка)</option>
                 </select>
+
+                <div class="mt-6">
+                    <label>🎯 Стохастика Активных Регионов 2D (0.00 = 100% Управление мозгом | 1.00 = Полное отключение управления): <b id="diffStochVal" style="color:#00ffc8;">0.00</b></label>
+                    <input type="range" id="diffStochastic" min="0" max="1" step="0.05" value="0.00">
+                </div>
+                <div class="mt-4">
+                    <label>🌌 Стохастика Пустых Регионов (без девайса и Монти) (1.00 = Живой фон | 0.00 = Строгий режим для учёных без статистики): <b id="diffUnassStochVal" style="color:#38bdf8;">1.00</b></label>
+                    <input type="range" id="diffUnassignedStochastic" min="0" max="1" step="0.05" value="1.00">
+                </div>
 
                 <div class="grid-3 mt-6">
                     <div>
@@ -449,11 +468,20 @@
 
                 <label class="mt-8">Сила влияния рабочей памяти на музыку (Пресеты):</label>
                 <select id="musicPreset">
-                    <option value="meditation">🧘 Удержание темы (Ctx 2.8с, Str 0.12-0.45, EMA 0.35)</option>
-                    <option value="balanced" selected>⚖️ Баланс / Морфинг (Ctx 2.4с, Str 0.25-0.80, EMA 0.20)</option>
-                    <option value="dynamic">⚡ Быстрый отклик на мозг (Ctx 1.6с, Str 0.40-0.95, EMA 0.08)</option>
+                    <option value="meditation">🧘 Удержание темы (Ctx 3.6с, Str 0.12-0.45, EMA 0.35)</option>
+                    <option value="balanced" selected>⚖️ Баланс / Морфинг (Ctx 3.6с, Str 0.25-0.80, EMA 0.20)</option>
+                    <option value="dynamic">⚡ Быстрый отклик на мозг (Ctx 2.4с, Str 0.40-0.95, EMA 0.08)</option>
                     <option value="custom">🛠️ Пользовательский (Ручная настройка)</option>
                 </select>
+
+                <div class="mt-6">
+                    <label>🎯 Стохастика Активных Регионов Музыки (0.00 = 100% Управление мозгом | 1.00 = Полное отключение управления): <b id="mStochVal" style="color:#00ffc8;">0.00</b></label>
+                    <input type="range" id="mStochastic" min="0" max="1" step="0.05" value="0.00">
+                </div>
+                <div class="mt-4">
+                    <label>🌌 Стохастика Пустых Регионов (без девайса и Монти) (1.00 = Обычный псайтранс | 0.00 = Строгий режим для учёных без статистики): <b id="mUnassStochVal" style="color:#38bdf8;">1.00</b></label>
+                    <input type="range" id="mUnassignedStochastic" min="0" max="1" step="0.05" value="1.00">
+                </div>
 
                 <div class="grid-3 mt-6">
                     <div><label>Min Str (Покой):</label><input type="number" id="mStrLow" value="0.25" min="0.05" max="0.80" step="0.05"></div>
@@ -496,11 +524,14 @@
             
             <label>Кортикальная зона (10-20 EEG):</label>
             <select class="device-role-select">
-                <option value="FCz" selected>FCz — SMA (SVD-Действия смысла / Движение)</option>
-                <option value="AFz">AFz — Макросцена / Связи (A ⊃ B / Квест-стадии)</option>
-                <option value="Fpz">Fpz — BA 10 Правила правил (⚡ Ψ-Атака / Домен)</option>
-                <option value="F3">F3  — Левый dlPFC (ON-Структура формы / Стихия)</option>
-                <option value="F4">F4  — Правый dlPFC (OFF-Контекст / Свет)</option>
+                <option value="FCz" selected>FCz — SMA (Действия, влияющие на сенсинг / Движение)</option>
+                <option value="Pz">Pz — Теменной навигационный центр (Пространственный вектор)</option>
+                <option value="Cz">Cz — Сенсомоторный центр</option>
+                <option value="AFz">AFz — Правила форм и стилей (A ⊃ B / Макросцена)</option>
+                <option value="Fpz">Fpz — BA 10 Правила правил (⚡ Ψ-Атака / Эпоха)</option>
+                <option value="F3">F3  — Левый dlPFC (ON-Формы действий)</option>
+                <option value="F4">F4  — Правый dlPFC (OFF-Стили действий / Контекст)</option>
+                <option value="Oz">Oz  — Первичная зрительная кора (Сенсорный базис)</option>
             </select>
 
             <div class="row-between mt-5">

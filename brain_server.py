@@ -15,19 +15,15 @@ from render_logic import NeuroRender
 def main():
     parser = argparse.ArgumentParser(description="NeuroCanvas Fast Brain Server")
     parser.add_argument('--mode', type=str, default="lcm", choices=["lcm", "turbo", "sdxl-turbo"])
-    parser.add_argument('--stochastic', dest='stochastic', action='store_true', default=None,
-                        help="Включить стохастический (случайный) шум на каждом кадре (как в классическом движке)")
-    parser.add_argument('--deterministic', '--no-stochastic', dest='stochastic', action='store_false',
-                        help="Отключить стохастику (100% детерминированный режим от рабочей памяти ЭЭГ)")
+    parser.add_argument('--stochastic', type=float, default=0.0,
+                        help="Уровень стохастики от 0.0 (100% чистая рабочая память ЭЭГ) до 1.0 (50% ЭЭГ + 50% рандом)")
     args = parser.parse_args()
 
-    # По умолчанию стохастика включена (как в старом движке), если явно не передан --deterministic
-    stochastic_mode = True if args.stochastic is None else bool(args.stochastic)
-    deterministic = not stochastic_mode
+    stochastic_level = float(np.clip(args.stochastic, 0.0, 1.0))
 
-    print(f"🧠 STARTING FAST NEURAL BRAIN SERVER (CUDA BACKEND | Stochastic={stochastic_mode} | Deterministic={deterministic}) 🧠")
+    print(f"🧠 STARTING FAST NEURAL BRAIN SERVER (CUDA BACKEND | Stochastic={stochastic_level:.2f}) 🧠")
     current_mode = args.mode
-    render = NeuroRender(mode=current_mode, use_taesd=True, deterministic=deterministic)
+    render = NeuroRender(mode=current_mode, use_taesd=True, stochastic=stochastic_level)
 
     listener = Listener(('localhost', 6000), authkey=b'brain')
     print(f"🧠 Server is ACTIVE in [{current_mode.upper()}] mode on localhost:6000...")
@@ -44,15 +40,13 @@ def main():
                         req_mode = msg.get('mode', current_mode)
                         req_taesd = msg.get('use_taesd', render.use_taesd)
                         if 'stochastic' in msg and msg['stochastic'] is not None:
-                            render.deterministic = not bool(msg['stochastic'])
-                        elif 'deterministic' in msg and msg['deterministic'] is not None:
-                            render.deterministic = bool(msg['deterministic'])
+                            render.stochastic_level = float(np.clip(float(msg['stochastic']), 0.0, 1.0))
 
                         if req_mode != current_mode:
-                            det_flag = render.deterministic
+                            cur_stoch = render.stochastic_level
                             del render
                             torch.cuda.empty_cache()
-                            render = NeuroRender(mode=req_mode, use_taesd=req_taesd, deterministic=det_flag)
+                            render = NeuroRender(mode=req_mode, use_taesd=req_taesd, stochastic=cur_stoch)
                             current_mode = req_mode
                         else:
                             render.set_taesd(req_taesd)
@@ -60,16 +54,15 @@ def main():
                             'status': 'ok',
                             'mode': current_mode,
                             'is_sdxl': render.is_sdxl,
-                            'deterministic': render.deterministic,
-                            'stochastic': not render.deterministic
+                            'stochastic': render.stochastic_level
                         })
                         continue
 
                     elif cmd == 'set_stochastic':
-                        stoch = bool(msg.get('stochastic', True))
-                        render.deterministic = not stoch
-                        print(f"🎲 [BRAIN SERVER] Режим стохастики переключен: Stochastic={stoch} (Deterministic={render.deterministic})")
-                        conn.send({'status': 'ok', 'stochastic': stoch, 'deterministic': render.deterministic})
+                        val = float(msg.get('stochastic', 0.0))
+                        render.stochastic_level = float(np.clip(val, 0.0, 1.0))
+                        print(f"🎲 [BRAIN SERVER] Уровень стохастики: {render.stochastic_level:.2f}")
+                        conn.send({'status': 'ok', 'stochastic': render.stochastic_level})
                         continue
 
                     elif cmd == 'encode_base_prompts':

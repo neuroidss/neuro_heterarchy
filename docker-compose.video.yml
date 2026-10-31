@@ -29,8 +29,8 @@ services:
       bash -c "
       mkdir -p /workspace/hf_cache /workspace/logs &&
       python3 -u /app/video_world_server.py --port 6006 --model ltx-video &
-      python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem --lore /app/lore/maze_lore.txt &
+      python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem --video-lore /app/lore/maze_lore.txt &
       sleep 3 &&
-      python3 -u /app/neuro_heterarchy_video.py --headless --lore /app/lore/maze_lore.txt &
+      python3 -u /app/neuro_heterarchy_video.py --headless --video-lore /app/lore/maze_lore.txt --stochastic 1.0 &
       wait
       "

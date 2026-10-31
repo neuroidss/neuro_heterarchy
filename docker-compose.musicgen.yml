@@ -24,9 +24,9 @@ services:
     command: >
       bash -c "
       mkdir -p /workspace/hf_cache /workspace/logs &&
-      python3 -u /app/musicgen_server.py --port 6005 --model facebook/musicgen-small --quiet-step --stochastic &
-      python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem --music-lore /app/lore/music_lore_psy.txt --lore /app/lore/world_lore_psy.txt &
+      python3 -u /app/musicgen_server.py --port 6005 --model facebook/musicgen-small --quiet-step &
+      python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem --music-lore /app/lore/music_lore_psy.txt &
       sleep 3 &&
-      python3 -u /app/neuro_heterarchy_musicgen.py --headless --mode semantic --gateway-port 6003 --lore /app/lore/music_lore_psy.txt --deterministic &
+      python3 -u /app/neuro_heterarchy_musicgen.py --headless --mode semantic --gateway-port 6003 --lore /app/lore/music_lore_psy.txt --monty-mode off &
       wait
       "

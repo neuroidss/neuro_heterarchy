@@ -28,8 +28,8 @@ services:
       python3 -u /app/brain_server.py --mode lcm &
       python3 -u /app/web_cloud_gateway.py --port 8080 --cert /app/cert.pem --key /app/key.pem --music-lore /app/lore/music_lore_psy.txt --lore /app/lore/world_lore_psy.txt &
       sleep 3 &&
-      python3 -u /app/neuro_heterarchy_diffusion.py --headless --mode lcm --lore /app/lore/world_lore_psy.txt --deterministic &
+      python3 -u /app/neuro_heterarchy_diffusion.py --headless --mode lcm --lore /app/lore/world_lore_psy.txt &
       sleep 2 &&
-      /opt/venv_musicgen/bin/python3 -u /app/neuro_heterarchy_musicgen.py --headless --lore /app/lore/music_lore_psy.txt --gateway-port 6003 --deterministic &
+      /opt/venv_musicgen/bin/python3 -u /app/neuro_heterarchy_musicgen.py --headless --lore /app/lore/music_lore_psy.txt --gateway-port 6003 &
       wait
       "
