@@ -86,7 +86,8 @@ music_state = {
     "dyn_strength": 0.25,
     "buffer_sec": 0.0,
     "buffer_chunks": 0,
-    "rtf": 1.5
+    "rtf": 1.5,
+    "wm_radius": 0.15
 }
 music_state_lock = threading.Lock()
 
@@ -117,7 +118,8 @@ world_state = {
     "monty_loss": 0.0,
     "persistence": 0.0,
     "surprise": 0.0,
-    "regions": {}
+    "regions": {},
+    "wm_radius": 0.15
 }
 world_state_lock = threading.Lock()
 
@@ -890,6 +892,7 @@ def ipc_control_listener():
                             if "resolution" in msg: world_state["resolution"] = msg["resolution"]
                             if "use_taesd" in msg: world_state["use_taesd"] = msg["use_taesd"]
                             if "use_color" in msg: world_state["use_color"] = msg["use_color"]
+                            if "wm_radius" in msg: world_state["wm_radius"] = msg["wm_radius"]
                         now = time.time()
                         if now - last_sse_push > 0.20:
                             last_sse_push = now

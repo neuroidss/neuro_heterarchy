@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: HARDWARE VRAM CUDA-IPC BUS & UNIVERSAL FULL-RANK MANIFOLD OPERATOR
-===================================================================================
-- Никаких if/else и никаких token_mask:
-  Вся матрица [L × D] является единым непрерывным тензорным полем в рабочей памяти!
-- Непрерывный аналитический геодезический переход по параметру stochastic ∈ [0.0, 1.0]:
-  * stochastic = 1.0 -> 100% чистое опорное состояние лора (0% смещения WM).
-  * stochastic = 0.0 -> 100% максимальный геодезический сдвиг рабочей памяти мозга.
-- Входной тензор рабочей памяти строится из ciPLV ∈ [-1.0, +1.0] (Bruña et al., 2018,
-  DOI:10.1088/1741-2552/aacfe4).
-- Надежное авто-переподключение try_attach_to_existing_vram() без вечной блокировки
-  attach_failed, даже если сервер стартовал раньше раннера или раннер перезапускался.
+NEUROCANVAS: HARDWARE VRAM CUDA-IPC BUS & BOUNDED GEODESIC MANIFOLD OPERATOR
 ===================================================================================
 """
 
@@ -20,6 +10,7 @@ from typing import Optional, Union, Tuple
 import os
 import json
 import time
+import math
 import torch
 import torch.nn.functional as F
 
@@ -72,72 +63,89 @@ TOTAL_AMODAL_FLOATS = 318576
 def universal_full_rank_manifold_step(
     anchor_bank_KxLxD: torch.Tensor,
     wm_tensor_LxD: torch.Tensor,
-    gain_gamma: Union[float, torch.Tensor] = 0.35,
+    gain_gamma: Union[float, torch.Tensor] = 0.25,
     stochastic: Union[float, torch.Tensor] = 0.0,
     temp: float = 0.35,
+    preserve_bos_token: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
     """
-    НЕПРЕРЫВНЫЙ АНАЛИТИЧЕСКИЙ ОПЕРАТОР РАБОЧЕЙ ПАМЯТИ В ПРОСТРАНСТВЕ [L × D]
-    (БЕЗ ЕДИНОГО ЗАФИКСИРОВАННОГО ТОКЕНА И БЕЗ ВЕТВЛЕНИЙ IF/ELSE):
-    1) Вычисляет координаты состояния рабочей памяти в базисе опорных концептов
-       через полное скалярное произведение Фробениуса по всем L * D измерениям.
-    2) Проецирует волну рабочей памяти wm_tensor_LxD на собственное касательное
-       подпространство текущего состояния многообразия (Subspace Projection,
-       Chen et al., Neuron 2024; Fan et al., Nature Human Behaviour 2024).
-    3) Поворачивает всю матрицу [L × D] по геодезической дуге на угол theta_rad,
-       который гладко зависит от (1 - stochastic) и энергии рабочей памяти wm_energy.
+    ПОЛНОРАНГОВЫЙ ГЕОДЕЗИЧЕСКИЙ ОПЕРАТОР В ПРОСТРАНСТВЕ [L × D] С УПРАВЛЯЕМЫМ РАДИУСОМ:
+    - Не трогает токен 0 ([BOS] в CLIP), чтобы никогда не ломать глобальную систему координат U-Net.
+    - Нормализует энергию входящей волны ЭЭГ так, чтобы угол отклонения theta_rad
+      напрямую и линейно управлялся ползунком gain_gamma (wm_radius ∈ [0.0, 1.0]):
+      * при wm_radius = 0.05 -> узкое удержание в самом центре концепта;
+      * при wm_radius = 0.35 -> широкая прогулка по окрестности концепта;
+      * при wm_radius = 0.80 -> глубокий выход на периферию концептуального подпространства.
     """
     K, L, D = anchor_bank_KxLxD.shape
-    stoch_t = torch.clamp(
-        torch.as_tensor(stochastic, device=anchor_bank_KxLxD.device, dtype=torch.float32),
-        0.0, 1.0
-    )
+    dev = anchor_bank_KxLxD.device
+
+    stoch_t = torch.clamp(torch.as_tensor(stochastic, device=dev, dtype=torch.float32), 0.0, 1.0)
     wm_influence = 1.0 - stoch_t
 
-    # 1. Полное скалярное произведение Фробениуса во всех L * D измерениях:
-    bank_flat = anchor_bank_KxLxD.reshape(K, L * D)
-    delta_bank = bank_flat - bank_flat.mean(dim=0, keepdim=True)
-    delta_bank_unit = delta_bank / (torch.norm(delta_bank, p=2, dim=-1, keepdim=True) + 1e-6)
+    start_tok = 1 if (preserve_bos_token and L == 77) else 0
+    sem_bank = anchor_bank_KxLxD[:, start_tok:, :]          # [K, L_sem, D]
+    sem_wm   = wm_tensor_LxD[start_tok:, :]                 # [L_sem, D]
+    L_sem    = sem_bank.shape[1]
 
-    wm_flat = wm_tensor_LxD.reshape(1, L * D)
+    wm_flat = sem_wm.reshape(1, L_sem * D)
     wm_centered = wm_flat - wm_flat.mean(dim=-1, keepdim=True)
-    wm_energy = torch.norm(wm_centered, p=2, dim=-1, keepdim=True)
-    wm_unit = wm_centered / (wm_energy + 1e-6)
+    wm_norm_val = torch.norm(wm_centered, p=2, dim=-1, keepdim=True)
+    wm_unit = wm_centered / (wm_norm_val + 1e-6)
 
-    sims_K = torch.mm(wm_unit, delta_bank_unit.T).squeeze(0)  # [K]
-    sims_std = torch.std(sims_K, unbiased=False)
-    sims_scaled = (sims_K - sims_K.mean()) / (sims_std + 1e-6)
-    weights_K = torch.softmax(sims_scaled / temp, dim=0)      # [K]
+    if K > 1:
+        bank_flat = sem_bank.reshape(K, L_sem * D)
+        delta_bank = bank_flat - bank_flat.mean(dim=0, keepdim=True)
+        delta_bank_unit = delta_bank / (torch.norm(delta_bank, p=2, dim=-1, keepdim=True) + 1e-6)
+        sims_K = torch.mm(wm_unit, delta_bank_unit.T).squeeze(0)
+        sims_std = torch.std(sims_K, unbiased=False)
+        sims_scaled = (sims_K - sims_K.mean()) / (sims_std + 1e-5)
+        weights_K = torch.softmax(sims_scaled / max(0.05, temp), dim=0)
+        anchor_point_LxD = torch.sum(anchor_bank_KxLxD * weights_K.view(K, 1, 1), dim=0)
+    else:
+        weights_K = torch.ones(1, device=dev, dtype=torch.float32)
+        anchor_point_LxD = anchor_bank_KxLxD[0]
 
-    # 2. Непрерывная суперпозиция концептов в R^[L x D]:
-    anchor_point_LxD = torch.sum(anchor_bank_KxLxD * weights_K.view(K, 1, 1), dim=0)
-    ref_norms_Lx1 = torch.norm(anchor_point_LxD, p=2, dim=-1, keepdim=True).clamp(min=1e-4)
+    anchor_sem = anchor_point_LxD[start_tok:, :]              # [L_sem, D]
+    ref_norms = torch.norm(anchor_sem, p=2, dim=-1, keepdim=True).clamp(min=1e-4)
 
-    # 3. Проекция волны рабочей памяти wm_tensor_LxD в собственное касательное подпространство:
-    anchor_centered = anchor_point_LxD - anchor_point_LxD.mean(dim=0, keepdim=True)
-    inter_concept_modes = (anchor_bank_KxLxD - anchor_point_LxD.unsqueeze(0)).reshape(K * L, D)
-    manifold_span = torch.cat([anchor_centered, inter_concept_modes], dim=0)
-    span_unit = F.normalize(manifold_span + 1e-6, p=2, dim=-1)  # [M, D]
+    # Ортонормированный базис собственного пространства концепта + волна рабочей памяти:
+    anchor_tok_centered = anchor_sem - anchor_sem.mean(dim=0, keepdim=True)
+    if K > 1:
+        inter_modes = (sem_bank - anchor_sem.unsqueeze(0)).reshape(K * L_sem, D)
+        raw_span = torch.cat([anchor_tok_centered, inter_modes[:64]], dim=0)
+    else:
+        raw_span = anchor_tok_centered
 
-    wm_coords_LxM = torch.matmul(wm_tensor_LxD, span_unit.T) / float(max(1, span_unit.shape[0]) ** 0.5)
-    wm_tangent_LxD = torch.matmul(wm_coords_LxM, span_unit)     # [L, D]
+    q_mat, _ = torch.linalg.qr(raw_span.T, mode="reduced")    # [D, M]
+    q_basis = q_mat.T                                         # [M, D]
 
-    dot_proj = torch.sum(wm_tangent_LxD * anchor_point_LxD, dim=-1, keepdim=True) / (ref_norms_Lx1 ** 2 + 1e-6)
-    wm_geodesic_LxD = wm_tangent_LxD - dot_proj * anchor_point_LxD
-    geo_norms = torch.norm(wm_geodesic_LxD, p=2, dim=-1, keepdim=True)
-    wm_unit_tangent = (wm_geodesic_LxD / (geo_norms + 1e-6)) * ref_norms_Lx1
+    # Комбинируем проекцию на собственные оси концепта (70%) и прямое полноранговое направление WM (30%),
+    # чтобы даже для 1 короткого слова из 1 токена все 768 измерений рабочей памяти двигали образ:
+    wm_zero_mean = sem_wm - sem_wm.mean(dim=0, keepdim=True)
+    wm_in_span = torch.matmul(torch.matmul(wm_zero_mean, q_basis.T), q_basis)
+    wm_combined = wm_in_span * 0.70 + wm_zero_mean * 0.30
 
-    # 4. Гладкий аналитический угол геодезического поворота всей матрицы [L × D]:
-    # При wm_energy == 0 или stochastic == 1.0 угол theta_rad строго равен 0.0!
-    gate_activation = torch.tanh(wm_energy * 8.0) * wm_influence
-    eff_gamma = torch.clamp(
-        torch.as_tensor(gain_gamma, device=anchor_point_LxD.device, dtype=torch.float32),
-        0.0, 0.85
-    )
-    theta_rad = eff_gamma * (3.14159265 * 0.25) * gate_activation
+    # Ортогонализация к опорному вектору каждого токена (чистое касательное поле на сфере):
+    dot_proj = torch.sum(wm_combined * anchor_sem, dim=-1, keepdim=True) / (ref_norms ** 2 + 1e-6)
+    wm_geodesic = wm_combined - dot_proj * anchor_sem
+    geo_norms = torch.norm(wm_geodesic, p=2, dim=-1, keepdim=True)
+    wm_unit_tangent = (wm_geodesic / (geo_norms + 1e-6)) * ref_norms
 
-    out_LxD = torch.cos(theta_rad) * anchor_point_LxD + torch.sin(theta_rad) * wm_unit_tangent
-    out_LxD = F.normalize(out_LxD, p=2, dim=-1) * ref_norms_Lx1
+    # Если сигнал ЭЭГ ненулевой (wm_norm_val > 1e-4), gate_activation равен ~1.0,
+    # и угол поворота напрямую задается ползунком gain_gamma (wm_radius)!
+    has_signal_gate = torch.tanh(wm_norm_val * 25.0) * wm_influence
+    radius_t = torch.clamp(torch.as_tensor(gain_gamma, device=dev, dtype=torch.float32), 0.0, 1.0)
+    # При radius=0.25 угол ~ 20 градусов, при radius=0.80 угол ~ 65 градусов
+    theta_rad = radius_t * (math.pi * 0.42) * has_signal_gate
+
+    out_sem = torch.cos(theta_rad) * anchor_sem + torch.sin(theta_rad) * wm_unit_tangent
+    out_sem = F.normalize(out_sem, p=2, dim=-1) * ref_norms
+
+    if start_tok > 0:
+        out_LxD = torch.cat([anchor_point_LxD[:start_tok, :], out_sem], dim=0)
+    else:
+        out_LxD = out_sem
 
     best_idx = int(torch.argmax(weights_K).item())
     conf_pct = int(round(float(weights_K[best_idx].item()) * 100.0))

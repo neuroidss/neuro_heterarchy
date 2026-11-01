@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: ZERO-PREFILL KV-CACHE & CONTINUOUS ENCODEC STREAMING
-===================================================================================
-- Никаких захардкоженных концептов или жанров: чистый амодальный оператор.
-- Непрерывный EnCodec декодер: ровно N * 640 сэмплов на каждый блок без клипов.
+NEUROCANVAS: ZERO-SEAM LOOKAHEAD ENCODEC DECODER & PURE B=1 FLASH-ATTN KERNELS
 ===================================================================================
 """
 
@@ -14,7 +11,11 @@ import torch
 import torch.nn.functional as F
 
 from audiocraft.models.lm import LMModel
-from audiocraft.modules.transformer import StreamingMultiheadAttention
+from audiocraft.modules.transformer import (
+    StreamingMultiheadAttention,
+    StreamingTransformer,
+    create_sin_embedding
+)
 from audiocraft.modules.conditioners import T5Conditioner
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -22,6 +23,8 @@ MAX_T5_TOKENS = 64
 KV_BUFFER_CAPACITY = 2048
 
 ACTIVE_T5_EMBEDS: Optional[torch.Tensor] = None
+_STATIC_SIN_EMB_CACHE = {}
+
 _orig_complete_kv = StreamingMultiheadAttention._complete_kv
 _orig_t5_forward = T5Conditioner.forward
 
@@ -46,7 +49,8 @@ def fast_complete_kv(self, k, v):
     if (not hasattr(self, '_persistent_k') or
             self._persistent_k.shape[0] != k.shape[0] or
             self._persistent_k.ndim != k.ndim or
-            self._persistent_k.shape[1] != k.shape[1]):
+            self._persistent_k.shape[1] != k.shape[1] or
+            self._persistent_k.dtype != k.dtype):
         shape_k = list(k.shape)
         shape_k[2] = KV_BUFFER_CAPACITY
         self._persistent_k = torch.zeros(shape_k, device=k.device, dtype=k.dtype)
@@ -113,6 +117,7 @@ def fast_mha_forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.
                 state['cross_v'] = v
         use_causal = False
     else:
+        # Чистый FP16 Tensor-Core путь на GPU (без конвертации в float32):
         projected = F.linear(query, self.in_proj_weight, self.in_proj_bias)
         packed = projected.view(B, T_q, 3, H, D).permute(2, 0, 3, 1, 4)
         q = packed[0].contiguous()
@@ -123,8 +128,6 @@ def fast_mha_forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.
             past_keys_offset = self._streaming_state.get('curr_len', 0)
             q, k = self.rope.rotate_qk(q, k, start=past_keys_offset, time_dim=2)
         k, v = self._complete_kv(k, v)
-        k = k.contiguous()
-        v = v.contiguous()
         use_causal = (T_q > 1) and (T_q == k.shape[2])
 
     if self.attention_as_float32:
@@ -135,11 +138,34 @@ def fast_mha_forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.
     return self.out_proj(x), None
 
 
+def fast_transformer_forward(self, x: torch.Tensor, *args, **kwargs):
+    B, T, C = x.shape
+    offset_int = int(self._streaming_state.get('offsets', 0))
+
+    if self.positional_embedding in ['sin', 'sin_rope']:
+        cache_key = (C, x.device, x.dtype)
+        if cache_key not in _STATIC_SIN_EMB_CACHE:
+            pos = torch.arange(65536, device=x.device).view(1, -1, 1)
+            sin_emb = (create_sin_embedding(pos, C, max_period=self.max_period, dtype=torch.float32) * self.positional_scale).to(x.dtype)
+            _STATIC_SIN_EMB_CACHE[cache_key] = sin_emb
+        safe_off = offset_int % (65536 - T - 1)
+        x = x + _STATIC_SIN_EMB_CACHE[cache_key][:, safe_off:safe_off + T, :]
+
+    for layer in self.layers:
+        x = layer(x, *args, **kwargs)
+
+    if self._is_streaming:
+        self._streaming_state['offsets'] = offset_int + T
+    return x
+
+
 def intercepted_t5_forward(self, inputs):
     if ACTIVE_T5_EMBEDS is not None:
         target_device = self.output_proj.weight.device
         target_dtype = self.output_proj.weight.dtype
-        embeds = ACTIVE_T5_EMBEDS.to(device=target_device, dtype=target_dtype)
+        embeds = ACTIVE_T5_EMBEDS
+        if embeds.device != target_device or embeds.dtype != target_dtype:
+            embeds = embeds.to(device=target_device, dtype=target_dtype)
         if embeds.ndim == 2:
             embeds = embeds.unsqueeze(0)
         b_size = (
@@ -157,6 +183,7 @@ def apply_audiocraft_fast_patches():
     StreamingMultiheadAttention._complete_kv = fast_complete_kv
     StreamingMultiheadAttention._apply_rope = fast_apply_rope
     StreamingMultiheadAttention.forward = fast_mha_forward
+    StreamingTransformer.forward = fast_transformer_forward
     T5Conditioner.forward = intercepted_t5_forward
 
 
@@ -202,47 +229,52 @@ def encode_clean_64_t5(t5_cond, prompt_text: str) -> torch.Tensor:
 
 
 class ExactStreamingEncodecDecoder:
-    """
-    НЕПРЕРЫВНЫЙ ПОТОКОВЫЙ ДЕКОДЕР ENCODEC:
-    - Декодирует блоки с левым прогревом pad_tokens=32.
-    - Отдаёт ровно N * 640 сэмплов на каждый блок из N токенов без задержек и повторов.
-    - Плавный косинусный микро-стык на границе блоков исключает щелчки.
-    """
-    def __init__(self, compression_model, pad_tokens: int = 32):
+    def __init__(self, compression_model, pad_tokens: int = 32, lookahead_tokens: int = 8):
         self.compression_model = compression_model
         self.pad_tokens = max(16, int(pad_tokens))
+        self.lookahead_tokens = max(4, int(lookahead_tokens))
         self.committed_history: Optional[torch.Tensor] = None
-        self.prev_tail: Optional[torch.Tensor] = None
+        self.pending_lookahead: Optional[torch.Tensor] = None
 
     def reset(self):
         self.committed_history = None
-        self.prev_tail = None
+        self.pending_lookahead = None
 
     @torch.no_grad()
     def decode_exact_tokens(self, new_tokens: torch.Tensor) -> torch.Tensor:
-        B, K, N = new_tokens.shape
-        if N == 0:
+        B, K, T_new = new_tokens.shape
+        if T_new == 0:
             return torch.zeros((B, 1, 0), device=new_tokens.device, dtype=torch.float32)
 
+        if self.pending_lookahead is None:
+            work_tokens = new_tokens
+        else:
+            work_tokens = torch.cat([self.pending_lookahead, new_tokens], dim=-1)
+
+        total_work = work_tokens.shape[-1]
+        if total_work <= self.lookahead_tokens:
+            self.pending_lookahead = work_tokens
+            decoded_full = self.compression_model.decode(work_tokens, None)
+            return decoded_full
+
+        emit_count = total_work - self.lookahead_tokens
+        tokens_to_emit = work_tokens[:, :, :emit_count]
+        self.pending_lookahead = work_tokens[:, :, emit_count:]
+
         if self.committed_history is None:
-            decoded = self.compression_model.decode(new_tokens, None)
-            self.committed_history = new_tokens[:, :, -self.pad_tokens:].clone()
-            self.prev_tail = decoded[..., -32:].clone()
-            return decoded
+            total_ctx = work_tokens
+            actual_left_pad = 0
+        else:
+            ctx_left = self.committed_history[:, :, -self.pad_tokens:]
+            actual_left_pad = ctx_left.shape[-1]
+            total_ctx = torch.cat([ctx_left, work_tokens], dim=-1)
 
-        left_pad = self.committed_history
-        pad_len = left_pad.shape[-1]
-        work = torch.cat([left_pad, new_tokens], dim=-1)
+        if self.committed_history is None:
+            self.committed_history = tokens_to_emit
+        else:
+            self.committed_history = torch.cat([self.committed_history, tokens_to_emit], dim=-1)[:, :, -512:]
 
-        decoded_full = self.compression_model.decode(work, None)
-        start_samp = pad_len * 640
-        chunk_pcm = decoded_full[..., start_samp:]
-
-        if self.prev_tail is not None:
-            fade_len = min(16, chunk_pcm.shape[-1], self.prev_tail.shape[-1])
-            fade_in = 0.5 * (1.0 - torch.cos(torch.linspace(0, torch.pi, fade_len, device=chunk_pcm.device)))
-            chunk_pcm[..., :fade_len] = chunk_pcm[..., :fade_len] * fade_in + self.prev_tail[..., -fade_len:] * (1.0 - fade_in)
-
-        self.committed_history = work[:, :, -self.pad_tokens:].clone()
-        self.prev_tail = chunk_pcm[..., -32:].clone()
-        return chunk_pcm
+        decoded_full = self.compression_model.decode(total_ctx, None)
+        start_sample = actual_left_pad * 640
+        end_sample = start_sample + emit_count * 640
+        return decoded_full[..., start_sample:end_sample]

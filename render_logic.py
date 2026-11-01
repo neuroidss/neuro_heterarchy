@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: ANALYTIC S^3 ROTATION DIFFUSION RENDERER (TAESD ACCELERATED)
+NEUROCANVAS: ANALYTIC S^3 ROTATION DIFFUSION RENDERER (FULL-FRAME REGIONAL MIXING)
 ===================================================================================
-- Никакого хардкода концептов: движок 100% амодален.
-- Полностью сохранен apply_color_surgery_and_blend_gpu для стабилизации цвета TAESD.
-- Поканальная интерполяция шума латента: активные регионы управляются мозгом,
-  неактивные регионы сохраняют живую стохастическую динамику диффузии.
+- Исправлена заморозка активного региона: каждый из 5 регионов (Fpz, AFz, F3, F4, FCz)
+  вносит вклад во все 4 канала латента [1, 4, H, W] (включая каналы яркости и формы!).
+- Ползунок стохастики активного региона (stochastic) напрямую управляет стохастичностью
+  всех активных регионов (даже если подключен всего 1 девайс на FCz и все пустые
+  регионы заморожены в unassigned_stochastic = 0.0).
+- При stochastic = 0.0 изменение фазовой картины ЭЭГ детерминированно поворачивает
+  латентное поле на угол, пропорциональный ползунку wm_radius ∈ [0.0, 1.0].
 ===================================================================================
 """
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, List
 import gc
 import math
 import types
@@ -33,7 +36,8 @@ GW, GH = 512, 384
 
 class NeuroRender:
     def __init__(self, mode="lcm", compile_unet=False, remote_conn=None, use_taesd=True,
-                 stochastic: float = 0.0, unassigned_stochastic: float = 1.0, seed: int = 0):
+                 stochastic: float = 0.0, unassigned_stochastic: float = 1.0,
+                 wm_radius: float = 0.25, seed: int = 0):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype = torch.float16
         self.mode = mode.lower().replace("_", "-")
@@ -41,6 +45,8 @@ class NeuroRender:
         self.use_taesd = use_taesd
         self.stochastic_level = float(np.clip(stochastic, 0.0, 1.0))
         self.unassigned_stochastic = float(np.clip(unassigned_stochastic, 0.0, 1.0))
+        self.wm_radius = float(np.clip(wm_radius, 0.0, 1.0))
+        self.active_region_flags: List[float] = [0.0, 1.0, 0.0, 0.0, 0.0]  # [AFz, FCz, F3, F4, Fpz]
         self.base_seed = int(seed)
         self.vae_full = None
         self.vae_tiny = None
@@ -48,8 +54,9 @@ class NeuroRender:
 
         self.active_wm_5x5x32x120: Optional[torch.Tensor] = None
         self.smooth_wm_drift: Optional[torch.Tensor] = None
+        self.accum_wm_phase: float = 0.0
         self.active_seed_val: int = self.base_seed
-        self._gaussian_basis_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        self._gaussian_basis_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
         self.proj_768_to_1024 = None
         self.proj_768_to_1280 = None
@@ -106,28 +113,41 @@ class NeuroRender:
         self._warmup()
 
     @torch.no_grad()
-    def _get_gaussian_bases_4xHxW(self, shape: tuple, device: torch.device):
+    def _get_regional_gaussian_bases(self, shape: tuple, device: torch.device):
+        """
+        Создает 4 взаимно ортогональных гауссовых базиса N(0, I) размера [5, 4, H, W]
+        на сфере S^3 для всех 5 регионов коры.
+        """
         key = (shape, device, self.active_seed_val)
         if key not in self._gaussian_basis_cache:
+            B, C, H, W = shape
             g1 = torch.Generator(device=device).manual_seed(101 + self.active_seed_val)
             g2 = torch.Generator(device=device).manual_seed(202 + self.active_seed_val)
             g3 = torch.Generator(device=device).manual_seed(303 + self.active_seed_val)
             g4 = torch.Generator(device=device).manual_seed(404 + self.active_seed_val)
-            b1 = torch.randn(shape, generator=g1, device=device, dtype=torch.float32)
-            b2 = torch.randn(shape, generator=g2, device=device, dtype=torch.float32)
-            b3 = torch.randn(shape, generator=g3, device=device, dtype=torch.float32)
-            b4 = torch.randn(shape, generator=g4, device=device, dtype=torch.float32)
-            self._gaussian_basis_cache[key] = (b1, b2, b3, b4)
+            b1 = torch.randn((5, C, H, W), generator=g1, device=device, dtype=torch.float32)
+            b2 = torch.randn((5, C, H, W), generator=g2, device=device, dtype=torch.float32)
+            b3 = torch.randn((5, C, H, W), generator=g3, device=device, dtype=torch.float32)
+            b4 = torch.randn((5, C, H, W), generator=g4, device=device, dtype=torch.float32)
+
+            # Детерминированные индексы перестановки для прямого 1-в-1 отображения
+            # всех 19,200 измерений региона (5 * 32 * 120) в C * H * W вокселей латента без .mean()!
+            gp = torch.Generator(device=device).manual_seed(707 + self.active_seed_val)
+            n_vox = C * H * W
+            perm_a = torch.randint(0, 19200, (5, n_vox), generator=gp, device=device)
+            perm_b = torch.randint(0, 19200, (5, n_vox), generator=gp, device=device)
+            perm_c = torch.randint(0, 19200, (5, n_vox), generator=gp, device=device)
+            self._gaussian_basis_cache[key] = (b1, b2, b3, b4, perm_a, perm_b, perm_c)
         return self._gaussian_basis_cache[key]
 
     @torch.no_grad()
     def unfold_wm_to_latent_tensor_4xHxW(self, wm_5x5x32x120: Optional[torch.Tensor],
                                          target_shape: tuple, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-        b1, b2, b3, b4 = self._get_gaussian_bases_4xHxW(target_shape, device)
+        b1, b2, b3, b4, perm_a, perm_b, perm_c = self._get_regional_gaussian_bases(target_shape, device)
         stoch_act = float(np.clip(self.stochastic_level, 0.0, 1.0))
         stoch_unass = float(np.clip(self.unassigned_stochastic, 0.0, 1.0))
+        rad = float(np.clip(self.wm_radius, 0.0, 1.0))
         B, C, H, W = target_shape
-        num_voxels = H * W
 
         wm = (
             wm_5x5x32x120.to(device=device, dtype=torch.float32)
@@ -135,52 +155,69 @@ class NeuroRender:
             else torch.zeros((5, 5, 32, 120), device=device, dtype=torch.float32)
         )
 
+        # Отделяем медленный анатомический фон (smooth_wm_drift) от живой мысли:
+        # Если девайс выключен (wm == const), то diff_wm == 0 и картинка стоит.
+        # Как только на девайсе меняются любые из 96,000 мод — они усиливаются на 100%!
         if self.smooth_wm_drift is None or self.smooth_wm_drift.shape != wm.shape:
             self.smooth_wm_drift = wm.clone()
         else:
-            self.smooth_wm_drift.lerp_(wm, 0.12)
+            self.smooth_wm_drift.lerp_(wm, 0.04)
 
-        # 4 канала латента соответствуют регионам: Ch0=Fpz/AFz, Ch1=F3, Ch2=F4, Ch3=FCz
-        p0 = (self.smooth_wm_drift[4].mean(dim=0) * 0.5 + self.smooth_wm_drift[0].mean(dim=0) * 0.5).reshape(-1)
-        p1 = self.smooth_wm_drift[2].mean(dim=0).reshape(-1)
-        p2 = self.smooth_wm_drift[3].mean(dim=0).reshape(-1)
-        p3 = self.smooth_wm_drift[1].mean(dim=0).reshape(-1)
-        all_4_ch = torch.stack([p0, p1, p2, p3], dim=0)
-
-        if num_voxels <= 3840:
-            spatial_wm = all_4_ch[:, :num_voxels].view(1, 4, H, W)
-        else:
-            reps = (num_voxels // 3840) + 1
-            spatial_wm = all_4_ch.repeat(1, reps)[:, :num_voxels].view(1, 4, H, W)
-
-        phi_a = spatial_wm * (math.pi * 0.5)
-        phi_b = -spatial_wm * (math.pi * 0.35)
-
-        g_a = torch.cos(phi_a) * b1 + torch.sin(phi_a) * b2
-        g_b = torch.cos(phi_b) * b3 + torch.sin(phi_b) * b4
-        G_wm = math.sqrt(0.5) * (g_a + g_b)
-
-        # Свежий гауссовский шум для стохастической динамики диффузии
-        G_rand = torch.randn(target_shape, device=device, dtype=torch.float32)
-
+        reg_flags = list(self.active_region_flags)
         if self.vram_bus.attached_pid > 0:
             meta = self.vram_bus.meta_64
             monty_code = int(round(float(meta[27].item())))
             unass_m = 0.0 if monty_code == 0 else 1.0
-            m_afz = 1.0 if float(meta[21 + 0].item()) > 0.5 else unass_m
-            m_fcz = 1.0 if float(meta[21 + 1].item()) > 0.5 else unass_m
-            m_f3  = 1.0 if float(meta[21 + 2].item()) > 0.5 else unass_m
-            m_f4  = 1.0 if float(meta[21 + 3].item()) > 0.5 else unass_m
-            m_fpz = 1.0 if float(meta[21 + 4].item()) > 0.5 else unass_m
-            ch_mask = torch.tensor(
-                [max(m_fpz, m_afz), m_f3, m_f4, m_fcz], device=device, dtype=torch.float32
-            ).view(1, 4, 1, 1)
-            eff_stoch_4 = ch_mask * stoch_act + (1.0 - ch_mask) * stoch_unass
-        else:
-            eff_stoch_4 = torch.full((1, 4, 1, 1), stoch_act, device=device, dtype=torch.float32)
+            bus_flags = [
+                1.0 if float(meta[21 + i].item()) > 0.5 else unass_m
+                for i in range(5)
+            ]
+            if any(x > 0.5 for x in bus_flags):
+                reg_flags = bus_flags
 
-        angle_s = eff_stoch_4 * (math.pi * 0.5)
-        noise_out = torch.cos(angle_s) * G_wm + torch.sin(angle_s) * G_rand
+        if not any(x > 0.5 for x in reg_flags):
+            reg_flags[1] = 1.0
+
+        active_mask_t = torch.tensor(reg_flags, device=device, dtype=torch.float32)
+        raw_weights = torch.where(active_mask_t > 0.5, torch.tensor(3.0, device=device), torch.tensor(0.35, device=device))
+        l2_weights_5 = (raw_weights / torch.norm(raw_weights, p=2)).view(5, 1, 1, 1)
+
+        reg_stoch_5 = (active_mask_t * stoch_act + (1.0 - active_mask_t) * stoch_unass).view(5, 1, 1, 1)
+
+        # БЕРЕМ ВСЕ 96,000 ИЗМЕРЕНИЙ [5 регионов, 19200 мод] БЕЗ ЕДИНОГО .mean()!
+        # Вычитаем 85% медленного статического пьедестала, чтобы динамика мыслей
+        # использовала весь фазовый круг [-pi, +pi]:
+        dynamic_wm_5x19200 = (wm - self.smooth_wm_drift * 0.85).reshape(5, 19200)
+        wm_energy = float(torch.norm(dynamic_wm_5x19200).item())
+        sig_gate = math.tanh(wm_energy * 5.0)
+
+        # Z-score whitening по всем 19,200 измерениям каждого региона:
+        wm_mean = dynamic_wm_5x19200.mean(dim=-1, keepdim=True)
+        wm_std = dynamic_wm_5x19200.std(dim=-1, keepdim=True, unbiased=False).clamp(min=1e-5)
+        whitened_5x19200 = (dynamic_wm_5x19200 - wm_mean) / wm_std
+
+        # Прямая выборка всех 19,200 измерений в 3 независимые фазовые решетки [5, C, H, W]:
+        f1 = torch.gather(whitened_5x19200, 1, perm_a).view(5, C, H, W)
+        f2 = torch.gather(whitened_5x19200, 1, perm_b).view(5, C, H, W)
+        f3 = torch.gather(whitened_5x19200, 1, perm_c).view(5, C, H, W)
+
+        # Полное вращение на сфере S^3 по трем углам Эйлера-Хопфа (phi_a, phi_b, phi_c),
+        # масштабируемое ползунком wm_radius (rad ∈ [0.0, 1.0]):
+        scale_ang = math.pi * 1.25 * rad * sig_gate
+        phi_a = f1 * scale_ang
+        phi_b = f2 * scale_ang
+        phi_c = f3 * (scale_ang * 0.5)
+
+        g_12 = torch.cos(phi_a) * b1 + torch.sin(phi_a) * b2
+        g_34 = torch.cos(phi_b) * b3 + torch.sin(phi_b) * b4
+        G_wm_5 = torch.cos(phi_c) * g_12 + torch.sin(phi_c) * g_34  # Точное N(0, I) во всех точках!
+
+        G_rand_5 = torch.randn((5, C, H, W), device=device, dtype=torch.float32)
+
+        angle_s_5 = reg_stoch_5 * (math.pi * 0.5)
+        reg_noise_5 = torch.cos(angle_s_5) * G_wm_5 + torch.sin(angle_s_5) * G_rand_5
+
+        noise_out = torch.sum(reg_noise_5 * l2_weights_5, dim=0, keepdim=True)
 
         if B > 1:
             noise_out = noise_out.expand(B, -1, -1, -1)
@@ -340,6 +377,8 @@ class NeuroRender:
     def generate(self, **kwargs):
         req_stoch = kwargs.pop('stochastic', None)
         req_unass_stoch = kwargs.pop('unassigned_stochastic', None)
+        req_wm_radius = kwargs.pop('wm_radius', None)
+        req_reg_flags = kwargs.pop('active_region_flags', None)
         req_seed = kwargs.pop('seed', None)
         wm_tensor = kwargs.pop('wm_5x5x32x120', None)
 
@@ -350,6 +389,10 @@ class NeuroRender:
             self.stochastic_level = float(np.clip(float(req_stoch), 0.0, 1.0))
         if req_unass_stoch is not None:
             self.unassigned_stochastic = float(np.clip(float(req_unass_stoch), 0.0, 1.0))
+        if req_wm_radius is not None:
+            self.wm_radius = float(np.clip(float(req_wm_radius), 0.0, 1.0))
+        if req_reg_flags is not None and len(req_reg_flags) == 5:
+            self.active_region_flags = [float(x) for x in req_reg_flags]
 
         active_seed = int(req_seed) if req_seed is not None else self.base_seed
 

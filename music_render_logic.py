@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: REALTIME B=1 MUSIC RENDER LOGIC (CLEAN DUAL STOCHASTIC)
+NEUROCANVAS: REALTIME B=1 MUSIC RENDER LOGIC (96,000-D WM & ZERO-SEAM ENCODEC)
 ===================================================================================
 """
 
 from __future__ import annotations
 from typing import Optional, Tuple, List
 import time
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -29,17 +30,18 @@ from musicgen_fast_kernels import (
 
 SAMPLE_RATE = 32000
 FRAME_RATE = 50
-MIN_BLOCK_SEC = 1.0 / float(FRAME_RATE)
+MIN_BLOCK_SEC = 1.0 / float(FRAME_RATE)  # 0.02s (1 токен = 20 мс)
 
 
 class NeuroMusicRenderer:
     def __init__(self, model_name: str = "facebook/musicgen-small",
                  stochastic: float = 0.0, unassigned_stochastic: float = 1.0,
-                 run_benchmark: bool = True):
+                 wm_radius: float = 0.25, run_benchmark: bool = True):
         self.device = DEVICE
         self.model_name = model_name
         self.stochastic = float(np.clip(stochastic, 0.0, 1.0))
         self.unassigned_stochastic = float(np.clip(unassigned_stochastic, 0.0, 1.0))
+        self.wm_radius = float(np.clip(wm_radius, 0.0, 1.0))
 
         apply_audiocraft_fast_patches()
         set_efficient_attention_backend('torch')
@@ -55,15 +57,16 @@ class NeuroMusicRenderer:
         self.vram_bus = HardwareVRAMBus()
 
         self.current_diag_seq: Optional[torch.Tensor] = None
+        self.smooth_wm_drift: Optional[torch.Tensor] = None
         self.absolute_token_step: int = 0
         self.cached_tokenized = None
-        self.current_block = 0.20
+        self.current_block = 0.16
         self.ema_rtf = 1.8
 
         g_proj = torch.Generator(device=self.device).manual_seed(777)
-        self.wm_to_k50 = F.normalize(
-            torch.randn((120, 50), generator=g_proj, device=self.device, dtype=torch.float32),
-            p=2, dim=0
+        self.wm_600_to_4x50 = F.normalize(
+            torch.randn((4, 600, 50), generator=g_proj, device=self.device, dtype=torch.float32),
+            p=2, dim=1
         )
 
         g_det = torch.Generator(device=self.device).manual_seed(424242)
@@ -98,7 +101,9 @@ class NeuroMusicRenderer:
 
         prepare_lm_fast_weights(self.mg.lm)
         self.t5_cond = self.mg.lm.condition_provider.conditioners['description']
-        self.stream_decoder = ExactStreamingEncodecDecoder(self.mg.compression_model, pad_tokens=48)
+        self.stream_decoder = ExactStreamingEncodecDecoder(
+            self.mg.compression_model, pad_tokens=32, lookahead_tokens=8
+        )
         self.cached_tokenized = None
         self.reset_stream()
 
@@ -128,7 +133,7 @@ class NeuroMusicRenderer:
         if self.stream_decoder:
             self.stream_decoder.reset()
         self.ema_rtf = 1.8
-        self.current_block = 0.20
+        self.current_block = 0.16
 
     @torch.no_grad()
     def encode_lore_prompts(self, prompts: List[str]) -> dict:
@@ -146,6 +151,53 @@ class NeuroMusicRenderer:
         }
 
     @torch.no_grad()
+    def _build_full_rank_wm_bias_32x4xK(
+        self,
+        wm_5x5x32x120: torch.Tensor,
+        active_codebook_mask_4: Optional[torch.Tensor],
+        k_eff: int,
+        device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        100% на GPU без .item() синхронизаций с CPU!
+        """
+        w_f = wm_5x5x32x120 if (wm_5x5x32x120.device == device and wm_5x5x32x120.dtype == torch.float32) else wm_5x5x32x120.to(device=device, dtype=torch.float32)
+        if self.smooth_wm_drift is None or self.smooth_wm_drift.shape != w_f.shape:
+            self.smooth_wm_drift = w_f.clone()
+        else:
+            self.smooth_wm_drift.lerp_(w_f, 0.04)
+
+        dyn_wm = w_f - self.smooth_wm_drift * 0.85
+        wm_energy_t = torch.norm(dyn_wm)
+        sig_gate_t = torch.tanh(wm_energy_t * 5.0)
+
+        dyn_5x32x600 = dyn_wm.permute(0, 2, 1, 3).reshape(5, 32, 600)
+
+        if active_codebook_mask_4 is not None:
+            m4 = active_codebook_mask_4.to(device=device, dtype=torch.float32)
+            reg_act_5 = torch.stack([m4[0], m4[3], m4[1], m4[2], m4[0]], dim=0)
+        else:
+            reg_act_5 = torch.tensor([0.0, 1.0, 0.0, 0.0, 0.0], device=device, dtype=torch.float32)
+
+        has_any = torch.any(reg_act_5 > 0.5)
+        reg_act_5 = torch.where(has_any, reg_act_5, torch.tensor([0.0, 1.0, 0.0, 0.0, 0.0], device=device))
+
+        reg_w_5 = torch.where(reg_act_5 > 0.5, torch.tensor(3.0, device=device), torch.tensor(0.35, device=device))
+        reg_w_5 = (reg_w_5 / reg_w_5.sum()).view(5, 1, 1)
+
+        global_32x600 = torch.sum(dyn_5x32x600 * reg_w_5, dim=0)
+        cb0_32x600 = global_32x600 * 0.65 + (dyn_5x32x600[0] * 0.5 + dyn_5x32x600[4] * 0.5) * 0.35
+        cb1_32x600 = global_32x600 * 0.65 + dyn_5x32x600[2] * 0.35
+        cb2_32x600 = global_32x600 * 0.65 + dyn_5x32x600[3] * 0.35
+        cb3_32x600 = global_32x600 * 0.65 + dyn_5x32x600[1] * 0.35
+        cb_4x32x600 = torch.stack([cb0_32x600, cb1_32x600, cb2_32x600, cb3_32x600], dim=0)
+
+        raw_bias_4x32xK = torch.bmm(cb_4x32x600, self.wm_600_to_4x50[:, :, :k_eff])
+        b_std = raw_bias_4x32xK.std(dim=-1, keepdim=True, unbiased=False).clamp(min=1e-5)
+        norm_bias = (raw_bias_4x32xK - raw_bias_4x32xK.mean(dim=-1, keepdim=True)) / b_std
+        return norm_bias.permute(1, 0, 2).contiguous(), sig_gate_t
+
+    @torch.no_grad()
     def step_continuous_diagonal_stream(
         self,
         conditions: list,
@@ -155,6 +207,7 @@ class NeuroMusicRenderer:
         top_k: int = 250,
         stochastic: float = 0.0,
         unassigned_stochastic: float = 1.0,
+        wm_radius: float = 0.25,
         wm_5x5x32x120: Optional[torch.Tensor] = None,
         active_codebook_mask_4: Optional[torch.Tensor] = None,
         deterministic_seed_lock: bool = False
@@ -184,40 +237,37 @@ class NeuroMusicRenderer:
         inv_temp = 1.0 / max(0.05, float(temp))
         stoch_act = float(np.clip(stochastic, 0.0, 1.0))
         stoch_unass = float(np.clip(unassigned_stochastic, 0.0, 1.0))
+        rad = float(np.clip(wm_radius, 0.0, 1.0))
 
         if active_codebook_mask_4 is not None:
             cb_mask = active_codebook_mask_4.to(device=device, dtype=torch.float32).view(1, 4, 1)
-            cb_stoch_1x4x1 = cb_mask * stoch_act + (1.0 - cb_mask) * stoch_unass
+            has_any_cb = torch.any(cb_mask > 0.5)
+            eff_mask = torch.where(has_any_cb, torch.clamp(cb_mask + 0.75, 0.0, 1.0), torch.tensor(1.0, device=device))
+            cb_stoch_1x4x1 = eff_mask * stoch_act + (1.0 - eff_mask) * stoch_unass
         else:
             cb_stoch_1x4x1 = torch.full((1, 4, 1), stoch_act, device=device, dtype=torch.float32)
 
-        min_stoch = float(cb_stoch_1x4x1.min().item())
+        min_stoch = min(stoch_act, stoch_unass)
         wm_bias_32x4xK = None
+        sig_gate_t = None
 
         if wm_5x5x32x120 is not None and min_stoch < 0.999:
-            w_f = wm_5x5x32x120.to(device=device, dtype=torch.float32)
-            cb0 = w_f[0, 0] * 0.5 + w_f[4, 0] * 0.5
-            cb1 = w_f[2, 1] * 0.5 + w_f[2, 2] * 0.5
-            cb2 = w_f[3, 1] * 0.5 + w_f[3, 4] * 0.5
-            cb3 = w_f[1, 3] * 0.6 + w_f[1, 4] * 0.4
-            wm_4x32x120 = torch.stack([cb0, cb1, cb2, cb3], dim=0)
-
-            raw_bias = torch.matmul(wm_4x32x120, self.wm_to_k50[:, :k_eff])
-            b_std = raw_bias.std(dim=-1, keepdim=True, unbiased=False) + 1e-5
-            norm_bias = (raw_bias - raw_bias.mean(dim=-1, keepdim=True)) / b_std
-            wm_bias_32x4xK = norm_bias.permute(1, 0, 2).contiguous()
+            wm_bias_32x4xK, sig_gate_t = self._build_full_rank_wm_bias_32x4xK(
+                wm_5x5x32x120, active_codebook_mask_4, k_eff, device
+            )
 
         gen_frames = max(1, int(gen_frames))
-        is_first_boot = (self.current_diag_seq is None or self.current_diag_seq.shape[-1] < 4)
+        is_first_boot = (self.current_diag_seq is None)
+        lookahead_extra = self.stream_decoder.lookahead_tokens if self.stream_decoder is not None else 8
 
         if is_first_boot:
-            steps_to_run = gen_frames + 4
+            steps_to_run = gen_frames + lookahead_extra + 4
             work_seq = torch.full((B, K, steps_to_run + 1), special_id, dtype=torch.long, device=device)
             start_step = 1
             self.last_profile["ctx_tokens"] = 0
         else:
             avail = self.current_diag_seq.shape[-1]
-            keep_ctx = max(8, min(avail, ctx_frames))
+            keep_ctx = min(avail, max(8, ctx_frames))
             ctx_slice = self.current_diag_seq[..., -keep_ctx:]
             work_seq = torch.zeros((B, K, keep_ctx + gen_frames), dtype=torch.long, device=device)
             work_seq[..., :keep_ctx] = ctx_slice
@@ -261,9 +311,12 @@ class NeuroMusicRenderer:
                     if min_stoch >= 0.999 or wm_bias_32x4xK is None:
                         score = top_logits + g_rand
                     else:
+                        g_det_base = self.det_gumbel_table[curr_abs_t % 8192, :, :k_eff].unsqueeze(0).to(top_logits.dtype)
                         wm_bias = wm_bias_32x4xK[curr_abs_t % 32].unsqueeze(0).to(top_logits.dtype)
+                        eff_mod = (rad * sig_gate_t).to(top_logits.dtype)
+                        det_carrier = g_det_base * (1.0 - 0.55 * eff_mod) + wm_bias * (1.85 * eff_mod)
                         s_mask = cb_stoch_1x4x1.to(top_logits.dtype)
-                        score = top_logits + (s_mask * g_rand) + ((1.0 - s_mask) * wm_bias * 1.5)
+                        score = top_logits + (s_mask * g_rand) + ((1.0 - s_mask) * det_carrier)
 
                     sample_idx = torch.argmax(score, dim=-1, keepdim=True)
                     next_token = torch.gather(top_indices, -1, sample_idx)
@@ -317,8 +370,8 @@ class NeuroMusicRenderer:
 
         if user_target_block <= 0.0:
             max_auto_block = 0.80
-            if queue_chunks >= target_buf and real_rtf > 1.15:
-                shrink = 0.85 if (queue_chunks > target_buf or real_rtf > 1.45) else 0.92
+            if queue_chunks >= target_buf and real_rtf > 1.12:
+                shrink = 0.78 if real_rtf > 1.80 else (0.85 if real_rtf > 1.35 else 0.92)
                 current_block = max(MIN_BLOCK_SEC, current_block * shrink)
             elif queue_chunks == 0 or real_rtf < 1.02:
                 grow_step = max(MIN_BLOCK_SEC, current_block * 0.25)
@@ -356,14 +409,19 @@ class NeuroMusicRenderer:
 
         stoch = float(msg.get('stochastic', self.stochastic))
         unass_stoch = float(msg.get('unassigned_stochastic', self.unassigned_stochastic))
+        rad = float(msg.get('wm_radius', self.wm_radius))
+
+        self.vram_bus.try_attach_to_existing_vram()
+        has_vram_bus = (self.vram_bus.attached_pid > 0)
 
         if embeds_np is not None:
             set_active_t5_embeds(torch.from_numpy(embeds_np).to(self.device))
+        elif has_vram_bus:
+            set_active_t5_embeds(self.vram_bus.live_music_64x768)
 
-        self.vram_bus.try_attach_to_existing_vram()
         if wm_np is not None:
             wm_tensor = torch.from_numpy(wm_np).to(self.device, dtype=torch.float32)
-        elif self.vram_bus.attached_pid > 0:
+        elif has_vram_bus:
             wm_tensor = self.vram_bus.wm_field_5x5x32x120
         else:
             wm_tensor = None
@@ -374,7 +432,7 @@ class NeuroMusicRenderer:
 
         if is_reset:
             self.reset_stream()
-            self.current_block = max(MIN_BLOCK_SEC, user_target_block) if user_target_block > 0.0 else 0.20
+            self.current_block = max(MIN_BLOCK_SEC, user_target_block) if user_target_block > 0.0 else 0.16
 
         if user_target_block > 0.0:
             self.current_block = max(MIN_BLOCK_SEC, user_target_block)
@@ -392,6 +450,7 @@ class NeuroMusicRenderer:
                 top_k=top_k,
                 stochastic=stoch,
                 unassigned_stochastic=unass_stoch,
+                wm_radius=rad,
                 wm_5x5x32x120=wm_tensor,
                 active_codebook_mask_4=cb_mask_t
             )
@@ -441,13 +500,14 @@ class NeuroMusicRenderer:
 
     def run_startup_diagnostics(self):
         print("\n" + "=" * 90)
-        print("🔬 [ТЕСТ СТЫКОВКИ БЛОКОВ ENCODEC: 0.1s x 12 VS 1.2s x 1]")
+        print("🔬 [ТЕСТ ИНВАРИАНТНОСТИ И СТЫКОВКИ БЛОКОВ: 0.1s x 12 VS 1.2s x 1]")
         print("=" * 90)
         set_active_t5_embeds(self.empty_embed_t)
         self.cached_tokenized = None
         attributes = [self.mg._prepare_tokens_and_attributes([""], None)[0][0]]
 
         self.reset_stream()
+        tokens_small_list = []
         pcm_small_list = []
         with torch.inference_mode(), self.mg.autocast:
             for _ in range(12):
@@ -455,7 +515,9 @@ class NeuroMusicRenderer:
                     attributes, gen_frames=5, ctx_frames=360,
                     stochastic=1.0, deterministic_seed_lock=True
                 )
+                tokens_small_list.append(toks)
                 pcm_small_list.append(self.stream_decoder.decode_exact_tokens(toks))
+        full_tokens_small = torch.cat(tokens_small_list, dim=-1)
         full_pcm_small = torch.cat(pcm_small_list, dim=-1)[0, 0]
 
         self.reset_stream()
@@ -466,6 +528,7 @@ class NeuroMusicRenderer:
             )
             full_pcm_large = self.stream_decoder.decode_exact_tokens(full_tokens_large)[0, 0]
 
+        is_exact_tokens = torch.equal(full_tokens_small, full_tokens_large)
         min_len = min(len(full_pcm_small), len(full_pcm_large))
         seam_indices = [k * 3200 for k in range(1, 12)]
         max_seam_err = max(
@@ -473,7 +536,8 @@ class NeuroMusicRenderer:
             for idx in seam_indices if idx + 16 <= min_len
         )
 
-        print(f"👉 Погрешность волны PCM на стыках блоков: max_err = {max_seam_err:.5f} {'✅ БЕЗ СКЛЕЕК' if max_seam_err < 0.08 else '⚠️ ЗАМЕТЕН СТЫК'}")
+        print(f"👉 1. Токены (0.1s x 12 vs 1.2s x 1):                {'✅ 100% ПОБИТОВО ИДЕНТИЧНО' if is_exact_tokens else '❌ РАЗЛИЧАЮТСЯ'}")
+        print(f"👉 2. Погрешность волны PCM на 11 стыках блоков:     max_err = {max_seam_err:.5f} {'✅ БЕЗ СКЛЕЕК' if max_seam_err < 0.05 else '⚠️ ЗАМЕТЕН СТЫК'}")
         print("-" * 90)
         print(f"{'Режим (Block / Context)':<28} | {'CtxТок':<6} | {'Шагов':<6} | {'LM Loop':<9} | {'1 Шаг':<8} | {'EnCodec':<7} | {'ЧИСТЫЙ RTF'}")
         print("-" * 90)

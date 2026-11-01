@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: REAL-TIME MUSICGEN RUNNER (DUAL STOCHASTIC: ACTIVE VS UNASSIGNED)
+NEUROCANVAS: REAL-TIME MUSICGEN RUNNER (BOUNDED WM RADIUS & SMOOTH STREAM)
 ===================================================================================
-- По умолчанию:
-  * --stochastic 0.0 (100% управление рабочей памятью на регионах с девайсом / Монти).
-  * --unassigned-stochastic 1.0 (100% живой базовый псайтранс на пустых регионах без девайса и Монти;
-    а при установке в 0.0 — строгий 100% детерминизм для ученых без необходимости набора статистики!).
+- Параметр --wm-radius ∈ [0.0, 1.0] (по умолчанию 0.15) задает радиус конуса
+  вокруг музыкального концепта base_64 в нестохастическом режиме, исключая
+  разрушение ритма и вылет из жанра.
 ===================================================================================
 """
 
@@ -64,17 +63,19 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
                                        strength_low: float, strength_high: float,
                                        stochastic: float = 0.0,
                                        unassigned_stochastic: float = 1.0,
+                                       wm_radius: float = 0.25,
                                        need_ui_telemetry: bool = False):
-    meta = bus.meta_64
-    n_sec = max(2, int(meta[1].item()))
-    fcz_pers_t = meta[6]
-    max_surp_t = meta[7]
-    monty_mode_code = int(round(float(meta[27].item())))
+    # Читаем мета-вектор одним срезом (1 транзакция вместо 15 отдельных .item()):
+    meta_cpu = bus.meta_64[:28].cpu().tolist()
+    n_sec = max(2, int(meta_cpu[1]))
+    fcz_pers_t = bus.meta_64[6]
+    max_surp_t = bus.meta_64[7]
+    monty_mode_code = int(round(meta_cpu[27]))
     monty_mode_str = MONTY_CODE_TO_STR.get(monty_mode_code, "missing_only")
 
     active_drive_t = torch.clamp(fcz_pers_t * 0.70 + torch.clamp(max_surp_t, max=1.0) * 0.30, 0.0, 1.0)
     dyn_str_t = torch.clamp(strength_low + (strength_high - strength_low) * active_drive_t, strength_low, 0.98)
-    dyn_str = float(dyn_str_t.item())
+    dyn_str = float(strength_low + (strength_high - strength_low) * min(1.0, max(0.0, meta_cpu[6] * 0.70 + min(1.0, meta_cpu[7]) * 0.30)))
 
     order = bus.slot_order_16[:n_sec].long()
     norm_coords = bus.slot_norm_coord_16[:n_sec]
@@ -83,18 +84,29 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
     wm_field = bus.wm_field_5x5x32x120
     proj_T = PHYSICAL_PROJECTION_768x120.T
 
-    fpz_32x768 = torch.matmul(wm_field[4, BAND_DELTA] * 0.65 + wm_field[4, BAND_THETA] * 0.35, proj_T)
-    afz_32x768 = torch.matmul(wm_field[0, BAND_DELTA] * 0.45 + wm_field[0, BAND_THETA] * 0.35 + wm_field[0, BAND_RIPPLES] * 0.20, proj_T)
-    f3_32x768  = torch.matmul(torch.relu(wm_field[2, BAND_THETA] * 0.40 + wm_field[2, BAND_BETA] * 0.30 + wm_field[2, BAND_GAMMA] * 0.30), proj_T)
-    f4_32x768  = torch.matmul(torch.relu(-wm_field[3, BAND_THETA] * 0.35 - wm_field[3, BAND_BETA] * 0.30 + wm_field[3, BAND_RIPPLES] * 0.35), proj_T)
-    fcz_32x768 = torch.matmul(wm_field[1, BAND_GAMMA] * 0.60 + wm_field[1, BAND_RIPPLES] * 0.40, proj_T)
+    stoch_act = float(np.clip(stochastic, 0.0, 1.0))
+    stoch_unass = float(np.clip(unassigned_stochastic, 0.0, 1.0))
+    eff_radius = float(np.clip(wm_radius, 0.0, 1.0))
 
-    direct_wm_64 = torch.zeros((64, 768), dtype=torch.float32, device=DEVICE)
-    direct_wm_64[0:4]   = F.adaptive_avg_pool1d(fpz_32x768.T.unsqueeze(0), 4).squeeze(0).T
-    direct_wm_64[4:20]  = F.adaptive_avg_pool1d(afz_32x768.T.unsqueeze(0), 16).squeeze(0).T
-    direct_wm_64[20:36] = F.adaptive_avg_pool1d(f3_32x768.T.unsqueeze(0), 16).squeeze(0).T
-    direct_wm_64[36:52] = F.adaptive_avg_pool1d(f4_32x768.T.unsqueeze(0), 16).squeeze(0).T
-    direct_wm_64[52:64] = F.adaptive_avg_pool1d(fcz_32x768.T.unsqueeze(0), 12).squeeze(0).T
+    m_afz = 1.0 if meta_cpu[21 + 0] > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
+    m_fcz = 1.0 if meta_cpu[21 + 1] > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
+    m_f3  = 1.0 if meta_cpu[21 + 2] > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
+    m_f4  = 1.0 if meta_cpu[21 + 3] > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
+    m_fpz = 1.0 if meta_cpu[21 + 4] > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
+
+    if not any(x > 0.5 for x in (m_afz, m_fcz, m_f3, m_f4, m_fpz)):
+        m_fcz = 1.0
+
+    # Батчевая свертка всех 5 регионов на GPU одним тензорным вызовом (без цикла for!):
+    full_5x160x120 = wm_field[[4, 0, 2, 3, 1]].reshape(5, 160, 120)
+    dyn_5x160x120 = full_5x160x120 - full_5x160x120.mean(dim=1, keepdim=True) * 0.85
+    w_5 = torch.tensor(
+        [3.0 if x > 0.5 else 0.35 for x in (m_fpz, m_afz, m_f3, m_f4, m_fcz)],
+        device=DEVICE, dtype=torch.float32
+    ).view(5, 1, 1)
+    weighted_160x120 = torch.sum(dyn_5x160x120 * (w_5 / w_5.sum()), dim=0)
+    full_160x768 = torch.matmul(weighted_160x120, proj_T)
+    direct_wm_64 = F.adaptive_avg_pool1d(full_160x768.T.unsqueeze(0), 64).squeeze(0).T
 
     if monty_mode_str == "off":
         raw_wave_64 = direct_wm_64
@@ -103,28 +115,24 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
     else:
         raw_wave_64 = direct_wm_64 * 0.35 + amodal_64 * 0.65
 
-    stoch_act = float(np.clip(stochastic, 0.0, 1.0))
-    stoch_unass = float(np.clip(unassigned_stochastic, 0.0, 1.0))
-
-    # Влияние рабочей памяти на управляемых регионах = (1.0 - stoch_act).
-    # Влияние рабочей памяти на пустых регионах (без девайса и без Монти) = (1.0 - stoch_unass).
     wm_gain_act = 1.0 - stoch_act
     wm_gain_unass = (1.0 - stoch_unass) if monty_mode_str == "off" else (wm_gain_act * (0.45 if monty_mode_str == "missing_only" else 0.75))
 
-    m_afz = 1.0 if float(meta[21 + 0].item()) > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
-    m_fcz = 1.0 if float(meta[21 + 1].item()) > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
-    m_f3  = 1.0 if float(meta[21 + 2].item()) > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
-    m_f4  = 1.0 if float(meta[21 + 3].item()) > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
-    m_fpz = 1.0 if float(meta[21 + 4].item()) > 0.5 else (0.0 if monty_mode_str == "off" else 1.0)
+    any_act = 1.0 if any(x > 0.5 for x in (m_afz, m_fcz, m_f3, m_f4, m_fpz)) else 0.0
+    s_fpz = wm_gain_act if m_fpz > 0.5 else max(wm_gain_unass, wm_gain_act * 0.65 * any_act)
+    s_afz = wm_gain_act if m_afz > 0.5 else max(wm_gain_unass, wm_gain_act * 0.65 * any_act)
+    s_f3  = wm_gain_act if m_f3  > 0.5 else max(wm_gain_unass, wm_gain_act * 0.65 * any_act)
+    s_f4  = wm_gain_act if m_f4  > 0.5 else max(wm_gain_unass, wm_gain_act * 0.65 * any_act)
+    s_fcz = wm_gain_act if m_fcz > 0.5 else max(wm_gain_unass, wm_gain_act * 0.65 * any_act)
 
     reg_wm_scale_64 = torch.zeros((64, 1), dtype=torch.float32, device=DEVICE)
-    reg_wm_scale_64[0:4]   = wm_gain_act if m_fpz > 0.5 else wm_gain_unass
-    reg_wm_scale_64[4:20]  = wm_gain_act if m_afz > 0.5 else wm_gain_unass
-    reg_wm_scale_64[20:36] = wm_gain_act if m_f3  > 0.5 else wm_gain_unass
-    reg_wm_scale_64[36:52] = wm_gain_act if m_f4  > 0.5 else wm_gain_unass
-    reg_wm_scale_64[52:64] = wm_gain_act if m_fcz > 0.5 else wm_gain_unass
+    reg_wm_scale_64[0:4]   = s_fpz
+    reg_wm_scale_64[4:20]  = s_afz
+    reg_wm_scale_64[20:36] = s_f3
+    reg_wm_scale_64[36:52] = s_f4
+    reg_wm_scale_64[52:64] = s_fcz
 
-    max_wm_scale = float(reg_wm_scale_64.max().item())
+    max_wm_scale = max(s_fpz, s_afz, s_f3, s_f4, s_fcz)
 
     with semantic.lock:
         c_bases_copy = list(semantic.c_bases)
@@ -134,7 +142,7 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
         if n_bases == 0:
             base_64 = semantic.last_active_embed.clone()
             clean_norms = torch.norm(base_64, p=2, dim=-1, keepdim=True).clamp(min=1.0)
-            v_aff = semantic.global_svd_bases[:16]
+            v_aff = semantic.global_svd_bases[:64]
             slot_idx_gpu = torch.zeros(n_sec, dtype=torch.long, device=DEVICE)
         else:
             slot_idx_gpu = torch.clamp((norm_coords * n_bases).long(), 0, n_bases - 1)
@@ -143,7 +151,7 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
             base_64 = c_bases_copy[root_c_idx].clone()
             clean_norms = torch.norm(base_64, p=2, dim=-1, keepdim=True).clamp(min=1.0)
 
-            afz_scale = float(reg_wm_scale_64[4, 0].item())
+            afz_scale = s_afz * eff_radius
             if n_bases > 1 and n_sec > 1 and afz_scale > 0.01:
                 child_s = order[1] % n_sec
                 child_c_idx = int(slot_idx_gpu[child_s].item()) % n_bases
@@ -152,23 +160,21 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
                     dot = torch.sum(t_child * base_64, dim=-1, keepdim=True) / (torch.sum(base_64 ** 2, dim=-1, keepdim=True) + 1e-7)
                     ortho = F.normalize(t_child - dot * base_64, p=2, dim=-1) * clean_norms
                     is_sup = (c_flow[root_s, child_s] >= 0.03).float()
-                    base_64[4:20].add_((ortho[4:20] * is_sup * 0.32 + t_child[4:20] * (1.0 - is_sup) * 0.22) * afz_scale)
+                    base_64[4:20].add_((ortho[4:20] * is_sup * 0.30 + t_child[4:20] * (1.0 - is_sup) * 0.20) * afz_scale)
 
-            v_aff = semantic.get_concept_affordances_svd(root_c_idx, max_bases=16)
+            v_aff = semantic.get_concept_affordances_svd(root_c_idx, max_bases=64)
 
-        if max_wm_scale <= 0.001:
+        if max_wm_scale <= 0.001 or eff_radius <= 0.001:
             final_64 = base_64
         else:
             coords = torch.matmul(raw_wave_64, v_aff.T)
             musical_mod = F.normalize(torch.matmul(coords, v_aff) + 1e-6, p=2, dim=-1) * clean_norms
-            mod_weight_64x1 = (0.35 * dyn_str_t) * reg_wm_scale_64
+            mod_weight_64x1 = (eff_radius * 0.45 * dyn_str_t) * reg_wm_scale_64
             final_64 = base_64 * (1.0 - mod_weight_64x1) + musical_mod * mod_weight_64x1
             final_64 = F.normalize(final_64, p=2, dim=-1) * clean_norms
 
-    mod_temp = min(1.8, max(0.3, base_temp * (0.88 + 0.25 * dyn_str)))
-    mod_topk = min(450, max(30, base_top_k + int((dyn_str - 0.4) * 100)))
-    temp = float(base_temp * (1.0 - max_wm_scale) + mod_temp * max_wm_scale)
-    top_k = int(round(base_top_k * (1.0 - max_wm_scale) + mod_topk * max_wm_scale))
+    temp = float(base_temp)
+    top_k = int(base_top_k)
 
     active_cb_mask_4 = [float(max(m_fpz, m_afz)), float(m_f3), float(m_f4), float(m_fcz)]
 
@@ -184,21 +190,21 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
         root_name = names[int(order[0].item()) % n_sec]
         telemetry.update({
             "primary_role": "AFz", "primary_active": True,
-            "total_clock_sectors": n_sec, "current_clock_sec": int(meta[2].item()) % n_sec,
+            "total_clock_sectors": n_sec, "current_clock_sec": int(meta_cpu[2]) % n_sec,
             "slot_names": names, "slot_indices": indices,
             "sealed_mask": [bool(x > 0.5) for x in bus.slot_seals_16[:n_sec].tolist()],
             "slot_stabilities": bus.slot_stabs_16[:n_sec].cpu().numpy(),
             "causal_flow_np": c_flow.cpu().numpy(),
             "dag_log_parts": [root_name],
-            "dl_phase": float(meta[3].item()), "is_delta_tick": bool(meta[4].item() > 0.5),
+            "dl_phase": float(meta_cpu[3]), "is_delta_tick": bool(meta_cpu[4] > 0.5),
             "active_vocab_size": n_bases,
-            "fpz_active": True, "fpz_tension": float(meta[16].item()), "fpz_concept": root_name,
+            "fpz_active": True, "fpz_tension": float(meta_cpu[16]), "fpz_concept": root_name,
             "f3_active": True, "f3_concept": root_name,
-            "f3_x_local": float(meta[9].item()), "f3_y_global": float(meta[10].item()), "f3_kuramoto": float(meta[11].item()),
+            "f3_x_local": float(meta_cpu[9]), "f3_y_global": float(meta_cpu[10]), "f3_kuramoto": float(meta_cpu[11]),
             "f4_active": True, "f4_concept": root_name, "f4_entropy": float(active_drive_t.item()),
             "fcz_active": True, "fcz_concept": root_name,
-            "fcz_lx": float(meta[12].item()), "fcz_ly": float(meta[13].item()),
-            "fcz_rx": float(meta[14].item()), "fcz_ry": float(meta[15].item()),
+            "fcz_lx": float(meta_cpu[12]), "fcz_ly": float(meta_cpu[13]),
+            "fcz_rx": float(meta_cpu[14]), "fcz_ry": float(meta_cpu[15]),
         })
     return final_64, target_block, target_context, temp, top_k, cfg_coef, telemetry
 
@@ -209,10 +215,11 @@ def map_working_memory_to_music_field_gpu(bus: HardwareVRAMBus, semantic: Univer
                                           strength_low: float, strength_high: float,
                                           stochastic: float = 0.0,
                                           unassigned_stochastic: float = 0.0,
+                                          wm_radius: float = 0.15,
                                           need_ui_telemetry: bool = False):
     final_64, b_sec, c_sec, t_val, k_val, cfg_c, telem = project_amodal_bus_to_musicgen_gpu(
         bus, semantic, target_block, target_context, base_temp, base_top_k, cfg_coef,
-        strength_low, strength_high, stochastic, unassigned_stochastic, need_ui_telemetry
+        strength_low, strength_high, stochastic, unassigned_stochastic, wm_radius, need_ui_telemetry
     )
     return final_64, bus.wm_field_5x5x32x120, b_sec, c_sec, t_val, k_val, cfg_c, telem
 
@@ -273,6 +280,7 @@ class AsyncMusicWorker(threading.Thread):
         self.enable_local_audio = enable_local_audio
         self.running = True
         self.lock = threading.Lock()
+        self.has_conditioning = False
         self.latest_embeds = None
         self.latest_cb_mask_4 = [1.0, 1.0, 1.0, 1.0]
         self.block_sec = runtime_cfg['target_block']
@@ -282,19 +290,21 @@ class AsyncMusicWorker(threading.Thread):
         self.cfg_coef = runtime_cfg['cfg_coef']
         self.stochastic = float(runtime_cfg.get('stochastic', 0.0))
         self.unassigned_stochastic = float(runtime_cfg.get('unassigned_stochastic', 1.0))
+        self.wm_radius = float(runtime_cfg.get('wm_radius', 0.15))
         self.is_drop = False
         self.gateway_conn = None
         self.gateway_port = gateway_port
         self.latest_pcm = np.zeros(0, dtype=np.float32)
         self.rtf = 1.0
         self.play_speed = 1.0
-        self.actual_block = 0.24
+        self.actual_block = 0.18
         self.gateway_queue_sec = 0.0
         self.gateway_queue_chunks = 0
         self.latest_dyn_strength = runtime_cfg['strength_low']
 
     def update_conditioning(self, embeds, block_sec, context_sec, temp, top_k, cfg_coef, is_drop, dyn_strength, cb_mask_4=None):
         with self.lock:
+            self.has_conditioning = True
             self.latest_embeds = embeds
             if cb_mask_4 is not None:
                 self.latest_cb_mask_4 = cb_mask_4
@@ -358,6 +368,9 @@ class AsyncMusicWorker(threading.Thread):
                             if 'unassigned_stochastic' in new_cfg:
                                 self.unassigned_stochastic = float(np.clip(float(new_cfg['unassigned_stochastic']), 0.0, 1.0))
                                 self.cfg['unassigned_stochastic'] = self.unassigned_stochastic
+                            if 'wm_radius' in new_cfg:
+                                self.wm_radius = float(np.clip(float(new_cfg['wm_radius']), 0.0, 1.0))
+                                self.cfg['wm_radius'] = self.wm_radius
                         if new_m and new_m != old_m:
                             self.conn.send({'cmd': 'switch_model', 'model': new_m})
                             self.conn.recv()
@@ -393,6 +406,7 @@ class AsyncMusicWorker(threading.Thread):
             self._drain_gateway_messages()
 
             with self.lock:
+                ready = self.has_conditioning
                 emb = self.latest_embeds
                 cb_mask_4 = list(self.latest_cb_mask_4)
                 b_sec = float(self.cfg.get('target_block', 0.0))
@@ -406,9 +420,10 @@ class AsyncMusicWorker(threading.Thread):
                 dyn_str = self.latest_dyn_strength
                 stoch_val = float(self.cfg.get('stochastic', self.stochastic))
                 unass_stoch_val = float(self.cfg.get('unassigned_stochastic', self.unassigned_stochastic))
+                rad_val = float(self.cfg.get('wm_radius', self.wm_radius))
                 self.is_drop = False
 
-            if emb is None:
+            if not ready:
                 time.sleep(0.01)
                 continue
 
@@ -433,7 +448,8 @@ class AsyncMusicWorker(threading.Thread):
                     'queue_chunks': q_chunks,
                     'is_reset': drop_val,
                     'stochastic': stoch_val,
-                    'unassigned_stochastic': unass_stoch_val
+                    'unassigned_stochastic': unass_stoch_val,
+                    'wm_radius': rad_val
                 }
 
                 self.conn.send(req)
@@ -442,7 +458,7 @@ class AsyncMusicWorker(threading.Thread):
                     pcm = resp['pcm']
                     self.rtf = float(resp.get('rtf', 1.0))
                     self.play_speed = float(resp.get('play_speed', 1.0))
-                    self.actual_block = float(resp.get('actual_block', 0.24))
+                    self.actual_block = float(resp.get('actual_block', 0.18))
                     self.cfg['current_speed'] = self.play_speed
                     self.cfg['actual_block'] = self.actual_block
                     with self.lock:
@@ -525,9 +541,11 @@ def main():
     parser.add_argument('--no-monty', action='store_true', default=False)
 
     parser.add_argument('--stochastic', type=float, default=0.0,
-                        help="Стохастика активных регионов (0.0 = 100% управление мозгом [Дефолт для профи], 1.0 = полное отключение управления)")
+                        help="Стохастика активных регионов (0.0 = 100% управление мозгом [Дефолт], 1.0 = отключение управления)")
     parser.add_argument('--unassigned-stochastic', type=float, default=1.0,
-                        help="Стохастика регионов без девайса и без Монти (1.0 = живой базовый псайтранс [Дефолт], 0.0 = полный детерминизм для ученых)")
+                        help="Стохастика пустых регионов (1.0 = живой базовый псайтранс, 0.0 = детерминизм)")
+    parser.add_argument('--wm-radius', type=float, default=0.15,
+                        help="Радиус области концепта в нестохастическом режиме (0.05..0.50)")
 
     parser.add_argument('--target-block', type=float, default=0.0)
     parser.add_argument('--target-context', type=float, default=3.6)
@@ -545,6 +563,7 @@ def main():
     init_monty_mode = "off" if args.no_monty else args.monty_mode
     init_stoch = float(np.clip(args.stochastic, 0.0, 1.0))
     init_unass_stoch = float(np.clip(args.unassigned_stochastic, 0.0, 1.0))
+    init_wm_radius = float(np.clip(args.wm_radius, 0.0, 1.0))
 
     runtime_config = {
         'target_block': args.target_block,
@@ -558,10 +577,11 @@ def main():
         'strength_high': args.strength_high,
         'ema_smooth': args.ema_smooth,
         'current_speed': 1.0,
-        'actual_block': 0.24,
+        'actual_block': 0.18,
         'monty_mode': init_monty_mode,
         'stochastic': init_stoch,
-        'unassigned_stochastic': init_unass_stoch
+        'unassigned_stochastic': init_unass_stoch,
+        'wm_radius': init_wm_radius
     }
 
     enable_local_sound = not args.headless
@@ -638,6 +658,7 @@ def main():
 
             cur_stoch = float(runtime_config.get('stochastic', 0.0))
             cur_unass_stoch = float(runtime_config.get('unassigned_stochastic', 1.0))
+            cur_wm_radius = float(runtime_config.get('wm_radius', 0.15))
 
             target_out, b_sec, c_sec, t_val, k_val, cfg_c, telem = project_amodal_bus_to_musicgen_gpu(
                 bus, semantic,
@@ -650,6 +671,7 @@ def main():
                 strength_high=runtime_config['strength_high'],
                 stochastic=cur_stoch,
                 unassigned_stochastic=cur_unass_stoch,
+                wm_radius=cur_wm_radius,
                 need_ui_telemetry=(hud is not None or args.minimal_ui)
             )
 
@@ -662,8 +684,11 @@ def main():
                 smoothed_t5.mul_(1.0 - ema_alpha).add_(target_out, alpha=ema_alpha)
                 smoothed_t5 = F.normalize(smoothed_t5, p=2, dim=-1) * target_norms
 
+            # Записываем T5 прямо в общую память GPU (VRAM-шина), избегая .cpu().numpy()!
+            bus.live_music_64x768.copy_(smoothed_t5)
+            has_ipc = (bus.is_owner or bus.attached_pid > 0)
             worker.update_conditioning(
-                smoothed_t5.cpu().numpy(),
+                None if has_ipc else smoothed_t5.cpu().numpy(),
                 b_sec, c_sec, t_val, k_val, cfg_c,
                 telem.get("is_drop", False),
                 telem.get("dyn_strength", runtime_config['strength_low']),
@@ -682,7 +707,7 @@ def main():
                     dag_str = " ".join(telem.get("dag_log_parts", ["DRIFT"])[:4])
                     q_s, q_c = get_local_queue_stats()
                     sys.stdout.write(
-                        f"\r🎵 [MINIMAL-UI | Stoch:{cur_stoch:.2f}(Unass:{cur_unass_stoch:.2f}) | Monty:{amodal_engine.monty_mode}] "
+                        f"\r🎵 [MINIMAL-UI | Stoch:{cur_stoch:.2f}(Unass:{cur_unass_stoch:.2f}) | Rad:{cur_wm_radius:.2f}] "
                         f"RTF:{worker.rtf:4.2f}x | Speed:{worker.play_speed:4.2f}x | "
                         f"Blk:{worker.actual_block:4.2f}s | Buf:{q_s:3.1f}s({q_c}) | {dag_str}      "
                     )

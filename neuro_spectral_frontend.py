@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: DIRECT LSL-TO-VRAM SPECTRAL FRONTEND & CORTICAL DIPOLE GEOMETRY
+NEUROCANVAS: FULL-RANK 96,000-D CAUSAL SPECTRAL FRONTEND (ZERO DIMENSION REDUCTION)
 ===================================================================================
-- Поддерживает аппаратные потоки FreeEEG_<ID> с динамическим маппингом ролей
-  и пользователей через router.device_mappings (Control Plane).
-- Поддерживает размещение нескольких плат на одной зоне 10-20 (например, 3 платы на FCz)
-  с автоматическим фьюжном их ciPLV по весам пространственной когерентности.
+- Никакого схлопывания 32 слотов в один: 32 слота представляют 32 каузальных
+  микро-горизонта времени и частоты (шаг 16 мс), давая 5 × 5 × 32 × 120 = 96,000
+  линейно независимых мод рабочей памяти.
+- Никакой модуляции cos(phi_theta - slot_angles), создававшей 1-секундные волны.
 ===================================================================================
 """
 
@@ -113,19 +113,42 @@ class DirectGPUSpectralFrontend(nn.Module):
         self.register_buffer("raw_buf_gpu", torch.zeros((NUM_MAX_DEVICES, NUM_CHANNELS, BUF_SIZE), device=DEVICE))
         self.register_buffer("base_fftfreq_256", torch.fft.fftfreq(BUF_SIZE, d=1.0, device=DEVICE).view(1, 1, BUF_SIZE))
         self.register_buffer("base_rfftfreq_1024", torch.fft.rfftfreq(FFT_SLOW, d=1.0, device=DEVICE))
-        slot_ang = -math.pi + (TWO_PI / NUM_SLOTS) * (torch.arange(NUM_SLOTS, device=DEVICE) + 0.5)
-        self.register_buffer("slot_angles", slot_ang.view(1, NUM_SLOTS, 1, 1))
 
-        t_idx = torch.linspace(-1.0, 0.0, BUF_SIZE, device=DEVICE).view(1, 1, 1, BUF_SIZE)
-        self.register_buffer("recency_fast", torch.exp(t_idx * 4.5))
-        self.register_buffer("recency_med",  torch.exp(t_idx * 2.2))
-        self.register_buffer("recency_slow", torch.exp(t_idx * 1.0))
+        t_norm = torch.linspace(0.0, 1.0, BUF_SIZE, device=DEVICE)
+        left_taper = 0.5 * (1.0 - torch.cos(math.pi * torch.clamp(t_norm / 0.20, 0.0, 1.0)))
+        right_taper = 0.5 * (1.0 + torch.cos(math.pi * torch.clamp((t_norm - 0.94) / 0.06, 0.0, 1.0)))
+        apod_win = (left_taper * right_taper).view(1, 1, BUF_SIZE)
+        self.register_buffer("apod_window", apod_win)
 
-        self.register_buffer("delta_centers", torch.linspace(0.5, 3.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
-        self.register_buffer("theta_centers", torch.linspace(3.8, 8.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
+        # 32 НЕЗАВИСИМЫХ КАУЗАЛЬНЫХ МИКРО-ОКНА ВРЕМЕНИ [1, 32, 1, 256]:
+        # Каждый слот s ∈ [0..31] смотрит в свой собственный микро-интервал внутри
+        # последних 600 мс (от -600 мс до 0 мс), но стационарно относительно "сейчас",
+        # без привязки к синусоиде дельты/теты! Это сохраняет все 32 слота ортогональными
+        # и полностью исключает 1-секундную волну!
+        slot_centers_t = torch.linspace(0.32, 0.92, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1)
+        t_grid = t_norm.view(1, 1, 1, BUF_SIZE)
+
+        w_bank_fast = torch.exp(-0.5 * ((t_grid - slot_centers_t) / 0.035) ** 2)
+        w_bank_fast = w_bank_fast / (torch.sum(w_bank_fast, dim=-1, keepdim=True) + 1e-6)
+
+        w_bank_med = torch.exp(-0.5 * ((t_grid - slot_centers_t) / 0.065) ** 2)
+        w_bank_med = w_bank_med / (torch.sum(w_bank_med, dim=-1, keepdim=True) + 1e-6)
+
+        w_bank_slow = torch.exp(-0.5 * ((t_grid - slot_centers_t) / 0.110) ** 2)
+        w_bank_slow = w_bank_slow / (torch.sum(w_bank_slow, dim=-1, keepdim=True) + 1e-6)
+
+        self.register_buffer("w_bank_fast", w_bank_fast)
+        self.register_buffer("w_bank_med", w_bank_med)
+        self.register_buffer("w_bank_slow", w_bank_slow)
+
+        self.register_buffer("delta_centers", torch.linspace(0.8, 3.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
+        self.register_buffer("theta_centers", torch.linspace(4.0, 8.5, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
         self.register_buffer("beta_centers",  torch.linspace(13.0, 30.0, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
         self.register_buffer("gamma_centers", torch.linspace(30.0, gamma_max, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
         self.register_buffer("rip_centers",   torch.linspace(70.0, 100.0, NUM_SLOTS, device=DEVICE).view(1, NUM_SLOTS, 1, 1))
+
+        self.register_buffer("smooth_bands_Dx5x32x120", torch.zeros((NUM_MAX_DEVICES, 5, NUM_SLOTS, geom["n_pairs"]), device=DEVICE))
+        self._trace_initialized = False
 
         self._hotplug_thread = threading.Thread(target=self._background_lsl_loop, daemon=True)
         self._hotplug_thread.start()
@@ -145,7 +168,6 @@ class DirectGPUSpectralFrontend(nn.Module):
         with self._lsl_lock:
             for i in range(NUM_MAX_DEVICES):
                 if self.inlets[i] is not None:
-                    # Отключаем слот ТОЛЬКО если стрим реально исчез из LSL-сети
                     if self.stream_uids[i] not in live_uids:
                         self.connected_uids.discard(self.stream_uids[i])
                         self.inlets[i] = None
@@ -173,16 +195,16 @@ class DirectGPUSpectralFrontend(nn.Module):
 
     @torch.no_grad()
     def _extract_ciplv_band(self, fft_exp: torch.Tensor, freqs_4d: torch.Tensor, pos_mask: torch.Tensor,
-                            centers: torch.Tensor, bw: float, w_phase: torch.Tensor) -> torch.Tensor:
+                            centers: torch.Tensor, bw: float, w_kernel_32: torch.Tensor) -> torch.Tensor:
         i_idx, j_idx = self.geom["i_idx"], self.geom["j_idx"]
         filt = torch.exp(-0.5 * ((freqs_4d - centers) / bw) ** 2) * 2.0 * pos_mask.unsqueeze(1)
         Z = torch.fft.ifft(fft_exp * filt, dim=-1)
         P = Z / (torch.abs(Z) + 1e-12)
         cg = P[:, :, i_idx, :] * torch.conj(P[:, :, j_idx, :])
-        psi = torch.sum(cg * w_phase, dim=-1)
-        re_psi = torch.clamp(torch.real(psi), -0.9999, 0.9999)
+        psi = torch.sum(cg * w_kernel_32, dim=-1)
+        re_psi = torch.clamp(torch.real(psi), -0.995, 0.995)
         im_psi = torch.imag(psi)
-        ciplv = im_psi / torch.sqrt(1.0 - re_psi * re_psi + 1e-7)
+        ciplv = im_psi / torch.sqrt(1.0 - re_psi * re_psi + 1e-5)
         return torch.clamp(ciplv, -1.0, 1.0)
 
     @torch.no_grad()
@@ -193,7 +215,7 @@ class DirectGPUSpectralFrontend(nn.Module):
             slot_users = ["User1"] * D
         freqs_dev = self.base_fftfreq_256 * fs_vec
 
-        centered = sub_buf - torch.mean(sub_buf, dim=2, keepdim=True)
+        centered = (sub_buf - torch.mean(sub_buf, dim=2, keepdim=True)) * self.apod_window
         notch = ((torch.abs(freqs_dev) < 48.5) | (torch.abs(freqs_dev) > 51.5)) & \
                 ((torch.abs(freqs_dev) < 98.5) | (torch.abs(freqs_dev) > 101.5))
         fft_clean = torch.fft.fft(centered, dim=-1) * notch.float()
@@ -221,31 +243,33 @@ class DirectGPUSpectralFrontend(nn.Module):
         P_delta = Z_delta / (torch.abs(Z_delta) + 1e-12)
         phi_delta_all = torch.angle(torch.mean(P_delta, dim=1))
 
-        dl_phase = phi_delta_all[0, -1]
-        th_phase = phi_theta_all[0, -1]
+        dl_phase = phi_delta_all[0, 230]
+        th_phase = phi_theta_all[0, 230]
 
         fft_exp = fft_clean.unsqueeze(1)
         freqs_4d = freqs_dev.unsqueeze(1)
 
-        w_raw = torch.exp(3.2 * torch.cos(phi_theta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles))
-        w_fast = w_raw * self.recency_fast
-        w_fast = w_fast / (torch.sum(w_fast, dim=-1, keepdim=True) + 1e-6)
+        # Полноранговые 32×120 матрицы для каждой из 5 полос:
+        wm_delta     = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.delta_centers, 0.5, self.w_bank_slow)
+        wm_theta     = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.theta_centers, 0.9, self.w_bank_med)
+        wm_beta      = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.beta_centers,  1.8, self.w_bank_fast)
+        gamma_anchor = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.gamma_centers, 2.8, self.w_bank_fast)
+        h_rip        = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.rip_centers,   2.2, self.w_bank_fast)
 
-        w_med = w_raw * self.recency_med
-        w_med = w_med / (torch.sum(w_med, dim=-1, keepdim=True) + 1e-6)
+        inst_bands = torch.stack([wm_delta, wm_theta, wm_beta, gamma_anchor, h_rip], dim=1)
 
-        w_delta_raw = torch.exp(2.8 * torch.cos(phi_delta_all.unsqueeze(1).unsqueeze(1) - self.slot_angles)) * self.recency_slow
-        w_delta = w_delta_raw / (torch.sum(w_delta_raw, dim=-1, keepdim=True) + 1e-6)
+        if not self._trace_initialized:
+            self.smooth_bands_Dx5x32x120[:D].copy_(inst_bands)
+            self._trace_initialized = True
+        else:
+            band_alphas = torch.tensor([0.35, 0.50, 0.65, 0.80, 0.85], device=DEVICE).view(1, 5, 1, 1)
+            self.smooth_bands_Dx5x32x120[:D].lerp_(inst_bands, band_alphas)
 
-        wm_delta     = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.delta_centers, 0.6, w_delta)
-        wm_theta     = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.theta_centers, 1.2, w_med)
-        wm_beta      = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.beta_centers,  3.0, w_med)
-        gamma_anchor = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.gamma_centers, 4.5, w_fast)
-        h_rip        = self._extract_ciplv_band(fft_exp, freqs_4d, pos_mask, self.rip_centers,   4.0, w_fast)
+        bands_Dx5x32x120 = self.smooth_bands_Dx5x32x120[:D]
+        gamma_smooth = bands_Dx5x32x120[:, 3]
+        rip_smooth   = bands_Dx5x32x120[:, 4]
 
-        bands_Dx5x32x120 = torch.stack([wm_delta, wm_theta, wm_beta, gamma_anchor, h_rip], dim=1)
-
-        traj_2d = torch.matmul(gamma_anchor, self.geom["proj_2d"]) * 8.0
+        traj_2d = torch.matmul(gamma_smooth, self.geom["proj_2d"]) * 8.0
         base_xy = traj_2d[:, 0, :]
         end_xy = traj_2d[:, -1, :] - base_xy
         d_len = torch.hypot(end_xy[:, 0], end_xy[:, 1]) + 1e-6
@@ -269,8 +293,8 @@ class DirectGPUSpectralFrontend(nn.Module):
             raw_roles_present.add(raw_role)
             func_role = EXTENDED_ROLE_TO_FUNCTIONAL.get(raw_role, "AFz")
             if func_role in REGION_ROLES:
-                grouped_ip.setdefault(func_role, []).append(gamma_anchor[idx_in_sub])
-                grouped_rp.setdefault(func_role, []).append(h_rip[idx_in_sub])
+                grouped_ip.setdefault(func_role, []).append(gamma_smooth[idx_in_sub])
+                grouped_rp.setdefault(func_role, []).append(rip_smooth[idx_in_sub])
                 grouped_kin.setdefault(func_role, []).append(kin_all[idx_in_sub])
                 grouped_bands.setdefault(func_role, []).append(bands_Dx5x32x120[idx_in_sub])
 
@@ -303,8 +327,8 @@ class DirectGPUSpectralFrontend(nn.Module):
             "dl_freq": dl_freq,
             "th_phase": th_phase,
             "dl_phase": dl_phase,
-            "master_iplv": gamma_anchor.mean(dim=0),
-            "master_rip": h_rip.mean(dim=0),
+            "master_iplv": gamma_smooth.mean(dim=0),
+            "master_rip": rip_smooth.mean(dim=0),
             "master_5x32x120": bands_Dx5x32x120.mean(dim=0),
             "default_kin": kin_all[0],
             "iplv_by_role": iplv_by_role,
@@ -356,16 +380,13 @@ class DirectGPUSpectralFrontend(nn.Module):
                 sname = self.stream_names[s_i]
                 suid = self.stream_uids[s_i]
 
-                # 1. Приоритет №1: Таблица маршрутизации по аппаратному имени FreeEEG_<ID>
                 mapped = dev_map.get(sname) or dev_map.get(suid)
                 if mapped is not None:
                     r_val = mapped.get("role", "FCz")
                     u_val = mapped.get("user", self.stream_users[s_i])
-                # 2. Приоритет №2: Оверрайд по слоту
                 elif s_i in router.overrides:
                     r_val = router.overrides[s_i]
                     u_val = self.stream_users[s_i]
-                # 3. Приоритет №3: Статическая карта CLI или дефолт
                 else:
                     r_val = router.static_map.get(s_i) or self.stream_roles[s_i]
                     u_val = self.stream_users[s_i]

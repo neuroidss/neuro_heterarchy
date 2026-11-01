@@ -124,7 +124,12 @@ const dom = {
     recBadge: document.getElementById('recBadge'),
 
     deviceCardTemplate: document.getElementById('deviceCardTemplate'),
-    conceptChipTemplate: document.getElementById('conceptChipTemplate')
+    conceptChipTemplate: document.getElementById('conceptChipTemplate'),
+
+diffWmRadius: document.getElementById('diffWmRadius'),
+     diffWmRadiusVal: document.getElementById('diffWmRadiusVal'),
+     mWmRadius: document.getElementById('mWmRadius'),
+     mWmRadiusVal: document.getElementById('mWmRadiusVal')
 };
 
 function getSavedDeviceConfig(devId) {
@@ -553,6 +558,10 @@ function onManualParamChange(presetOverride = 'custom') {
     const res = dom.diffResolution ? dom.diffResolution.value : "512x384";
     const useTaesd = dom.diffTaesd ? (dom.diffTaesd.value === "1") : true;
     const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
+    
+    const rawRad = parseFloat(dom.diffWmRadius ? dom.diffWmRadius.value : 0.15);
+     const wmRadius = Number.isNaN(rawRad) ? 0.15 : Math.max(0.02, Math.min(0.80, rawRad));
+     if (dom.diffWmRadiusVal) dom.diffWmRadiusVal.textContent = wmRadius.toFixed(2);
 
     dom.diffSteps.value = steps;
     dom.diffCfg.value = cfg;
@@ -578,7 +587,8 @@ function onManualParamChange(presetOverride = 'custom') {
             ema_smooth: ema,
             resolution: res,
             use_taesd: useTaesd,
-            use_color: useTaesd
+            use_color: useTaesd,
+            wm_radius: wmRadius
         })
     });
 }
@@ -1216,6 +1226,10 @@ async function updateMusicConfig() {
     if (dom.mUnassStochVal) dom.mUnassStochVal.textContent = mUnassStoch.toFixed(2);
 
     const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
+    
+    const rawMRad = parseFloat(dom.mWmRadius ? dom.mWmRadius.value : 0.15);
+     const mWmRadius = Number.isNaN(rawMRad) ? 0.15 : Math.max(0.02, Math.min(0.80, rawMRad));
+     if (dom.mWmRadiusVal) dom.mWmRadiusVal.textContent = mWmRadius.toFixed(2);
 
     dom.mStrLow.value = sLow;
     dom.mStrHigh.value = sHigh;
@@ -1238,7 +1252,8 @@ async function updateMusicConfig() {
             cfg_coef: parseFloat(dom.mCfg.value) || 1.0,
             strength_low: sLow,
             strength_high: sHigh,
-            ema_smooth: ema
+            ema_smooth: ema,
+wm_radius: mWmRadius
         })
     });
 }
@@ -1336,6 +1351,9 @@ window.addEventListener('DOMContentLoaded', async () => {
             });
         }
     });
+    
+    if (dom.diffWmRadius) dom.diffWmRadius.addEventListener('input', () => onManualParamChange('custom'));
+     if (dom.mWmRadius) dom.mWmRadius.addEventListener('input', () => { if (dom.musicPreset) dom.musicPreset.value = 'custom'; updateMusicConfig(); });
 
     dom.btnRecStart.addEventListener('click', () => toggleRecording(true));
     dom.btnRecStop.addEventListener('click', () => toggleRecording(false));
