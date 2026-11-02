@@ -531,7 +531,7 @@ def main():
     parser.add_argument('--concepts', type=str, default=None)
     parser.add_argument('--users', type=str, default=None)
     parser.add_argument('--gamma-max', type=float, default=100.0)
-    parser.add_argument('--seal-thresh', type=float, default=0.68)
+    parser.add_argument('--seal-thresh', type=float, default=1.0)
     parser.add_argument('--headless', action='store_true', default=False)
     parser.add_argument('--minimal-ui', action='store_true', default=False)
     parser.add_argument('--mode', type=str, default="semantic", choices=["semantic", "turbo"])
