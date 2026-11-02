@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v10.5 (DUAL STOCHASTIC & PERSISTENT LSL)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v10.7 (SMOOTH VIDEO ROLLOUT STREAMER)
 ===================================================================================
-- По умолчанию:
-  * stochastic = 0.0 (100% управление рабочей памятью на активных регионах).
-  * unassigned_stochastic = 1.0 (живая генерация на пустых регионах без девайса и Монти,
-    а при 0.0 — 100% детерминизм для ученых без необходимости набора статистики).
+- Плавный проигрыватель пачек кадров `jpg_frames` для 3D-DiT Video World:
+  ни один промежуточный кадр движения шарика больше не отбрасывается!
 ===================================================================================
 """
 
@@ -22,6 +20,7 @@ import struct
 import shutil
 import argparse
 import threading
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from multiprocessing.connection import Listener
 from pylsl import StreamInfo, StreamOutlet
@@ -51,6 +50,9 @@ latest_jpeg_ts = 0.0
 last_served_jpeg_id = 0
 jpeg_lock = threading.Lock()
 jpeg_cond = threading.Condition(jpeg_lock)
+
+video_playback_deque: deque = deque(maxlen=48)
+video_frame_interval_sec: float = 0.045
 
 audio_listeners: list[queue.Queue] = []
 audio_listeners_lock = threading.Lock()
@@ -146,7 +148,8 @@ def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
         return sections
     full_p = os.path.join(BASE_DIR, rel_p)
     if os.path.isfile(full_p):
-        cur = "FPZ"
+        cur = None
+        unassigned = []
         with open(full_p, "r", encoding="utf-8") as f:
             for line in f:
                 s = line.strip()
@@ -157,7 +160,19 @@ def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
                     if cur not in sections:
                         sections[cur] = []
                 else:
-                    sections[cur].append(s)
+                    if cur is None:
+                        unassigned.append(s)
+                    else:
+                        sections[cur].append(s)
+        if unassigned:
+            for r_k in ("FPZ", "AFZ", "F3", "F4", "FCZ"):
+                if not sections[r_k]:
+                    sections[r_k] = list(unassigned)
+        non_empty = next((sections[r] for r in ("FPZ", "AFZ", "F3", "F4", "FCZ") if sections[r]), [])
+        if non_empty:
+            for r_k in ("FPZ", "AFZ", "F3", "F4", "FCZ"):
+                if not sections[r_k]:
+                    sections[r_k] = list(non_empty)
     return sections
 
 
@@ -178,6 +193,10 @@ video_state = {
     "sections": {
         "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
     },
+    "monty_mode": "missing_only",
+    "stochastic": 0.0,
+    "unassigned_stochastic": 1.0,
+    "wm_radius": 0.25,
     "region_gains": {
         "Fpz": 0.06,
         "AFz": 0.08,
@@ -191,12 +210,12 @@ video_state = {
     "cross_region_bleed": 0.25,
     "cascade_rate": 1.0,
     "psi_threshold": 0.55,
-    "geodesic_lock": 0.18,
-    "num_frames": 5,
-    "context_ring_len": 16,
+    "geodesic_lock": 0.25,
+    "num_frames": 9,
+    "context_ring_len": 9,
     "steps": 4,
     "genesis_steps": 12,
-    "cfg_scale": 3.2,
+    "cfg_scale": 3.0,
     "fps": 0.0,
     "gen_ms": 0.0,
     "debug_tokens": "",
@@ -559,6 +578,7 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     for k, v in data["region_gains"].items():
                         video_state["region_gains"][k] = float(np.clip(float(v), 0.0, 1.0))
                 for k in (
+                    "monty_mode", "stochastic", "unassigned_stochastic", "wm_radius",
                     "auto_active_boost", "active_user_gain", "inactive_base_gain",
                     "cross_region_bleed", "cascade_rate", "psi_threshold",
                     "geodesic_lock", "num_frames", "context_ring_len",
@@ -567,6 +587,10 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     if k in data:
                         video_state[k] = data[k]
                 cfg_copy = {
+                    "monty_mode": str(video_state["monty_mode"]),
+                    "stochastic": float(video_state["stochastic"]),
+                    "unassigned_stochastic": float(video_state["unassigned_stochastic"]),
+                    "wm_radius": float(video_state["wm_radius"]),
                     "region_gains": dict(video_state["region_gains"]),
                     "auto_active_boost": bool(video_state["auto_active_boost"]),
                     "active_user_gain": float(video_state["active_user_gain"]),
@@ -800,8 +824,32 @@ class ThreadedHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def ipc_frame_receiver():
+def smooth_video_pacer_thread():
+    """
+    Плавно подает все промежуточные кадры пачки видео в MJPEG-поток браузера,
+    чтобы шарик двигался непрерывно без пропусков!
+    """
     global latest_jpeg_frame, latest_jpeg_id, latest_jpeg_ts
+    while True:
+        if not video_playback_deque:
+            time.sleep(0.005)
+            continue
+
+        jpg_bytes = video_playback_deque.popleft()
+        now = time.time()
+        with jpeg_cond:
+            latest_jpeg_frame = jpg_bytes
+            latest_jpeg_id += 1
+            latest_jpeg_ts = now
+            jpeg_cond.notify_all()
+
+        q_len = len(video_playback_deque)
+        sleep_dt = video_frame_interval_sec * (0.65 if q_len > 8 else 0.90)
+        time.sleep(max(0.015, min(0.12, sleep_dt)))
+
+
+def ipc_frame_receiver():
+    global latest_jpeg_frame, latest_jpeg_id, latest_jpeg_ts, video_frame_interval_sec
     try:
         listener = Listener(('localhost', IPC_PORT), authkey=IPC_AUTHKEY)
     except Exception:
@@ -812,6 +860,24 @@ def ipc_frame_receiver():
             while True:
                 data = conn.recv()
                 dropped_ipc = 0
+                if isinstance(data, dict) and 'jpg_frames' in data:
+                    batch_jpgs = data['jpg_frames']
+                    gen_ms = float(data.get('gen_ms', 320.0))
+                    n_f = max(1, len(batch_jpgs))
+                    video_frame_interval_sec = float(np.clip((gen_ms / 1000.0) / n_f, 0.025, 0.110))
+                    for jf in batch_jpgs:
+                        video_playback_deque.append(jf)
+                    with world_state_lock:
+                        world_state["fps"] = round(float(data.get('fps', 0.0)), 1)
+                        world_state["gen_ms"] = round(gen_ms, 1)
+                        world_state["actual_steps"] = int(data.get('actual_steps', 4))
+                        world_state["resolution"] = f"{data.get('w', 384)}x{data.get('h', 256)}"
+                        world_state["use_taesd"] = bool(data.get('use_taesd', False))
+                        world_state["use_color"] = bool(data.get('use_color', True))
+                        world_state["buffer_frames"] = len(video_playback_deque)
+                        world_state["buffer_sec"] = round(len(video_playback_deque) * video_frame_interval_sec, 2)
+                    continue
+
                 while conn.poll(0.0):
                     data = conn.recv()
                     dropped_ipc += 1
@@ -918,6 +984,15 @@ def ipc_video_control_listener():
                 active_video_ctrl_conn = conn
             with video_state_lock:
                 video_state["connected"] = True
+                has_gw_sections = any(len(v) > 0 for v in video_state["sections"].values())
+                if has_gw_sections:
+                    try:
+                        conn.send({
+                            "cmd": "update_lore_sections",
+                            "sections": {k: list(v) for k, v in video_state["sections"].items()}
+                        })
+                    except Exception:
+                        pass
             broadcast_full_state()
 
             while True:
@@ -927,10 +1002,13 @@ def ipc_video_control_listener():
                     if cmd == "sync_from_video_runner":
                         with video_state_lock:
                             video_state["connected"] = True
-                            if "lore_file" in msg:
+                            if msg.get("lore_file"):
                                 video_state["lore_file"] = msg["lore_file"]
-                            if "sections" in msg and isinstance(msg["sections"], dict):
-                                video_state["sections"] = msg["sections"]
+                            runner_secs = msg.get("sections")
+                            if isinstance(runner_secs, dict) and any(len(v) > 0 for v in runner_secs.values()):
+                                video_state["sections"] = runner_secs
+                            if "monty_mode" in msg:
+                                video_state["monty_mode"] = msg["monty_mode"]
                             video_state["available_lores"] = discover_available_lore_files()
                         broadcast_full_state()
                     elif cmd == "video_telemetry":
@@ -941,6 +1019,15 @@ def ipc_video_control_listener():
                             video_state["debug_tokens"] = msg.get("debug_tokens", "")
                             video_state["fpz_meta_charge"] = msg.get("fpz_meta_charge", 0.0)
                             video_state["afz_stage_progress"] = msg.get("afz_stage_progress", 0.0)
+                            if "monty_mode" in msg:
+                                video_state["monty_mode"] = msg["monty_mode"]
+                            if "stochastic" in msg:
+                                video_state["stochastic"] = msg["stochastic"]
+                            if "unassigned_stochastic" in msg:
+                                video_state["unassigned_stochastic"] = msg["unassigned_stochastic"]
+                            if "wm_radius" in msg:
+                                video_state["wm_radius"] = msg["wm_radius"]
+                                video_state["geodesic_lock"] = msg["wm_radius"]
                             if "active_region_mask" in msg:
                                 video_state["active_region_mask"] = msg["active_region_mask"]
                             if "region_gains" in msg:
@@ -1093,6 +1180,7 @@ def main():
         video_state["sections"] = parse_regional_lore_file(video_lore_rel)
         video_state["available_lores"] = discover_available_lore_files()
 
+    threading.Thread(target=smooth_video_pacer_thread, daemon=True).start()
     threading.Thread(target=ipc_frame_receiver, daemon=True).start()
     threading.Thread(target=ipc_audio_receiver, daemon=True).start()
     threading.Thread(target=ipc_control_listener, daemon=True).start()

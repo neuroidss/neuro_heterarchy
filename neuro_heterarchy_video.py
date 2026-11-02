@@ -3,10 +3,8 @@
 ===================================================================================
 NEUROCANVAS: PER-REGION FULL-RANK [1, 128, 4096] VIDEO RUNNER (PORT 6007 VIDEO IPC)
 ===================================================================================
-- Поддерживает отключение Монти (--no-monty / --monty-mode off|missing_only|full).
-- Единая непрерывная шкала --stochastic ∈ [0.0, 1.0] (без флага deterministic).
-- Универсальный парсер RegionalLoreReader: если в лор-файле не указаны регионы
-  [FPZ]..[FCZ], концепты автоматически назначаются на все 5 регионов!
+- Отправляет все промежуточные кадры видео-блока (jpg_frames) в WebUI без потерь,
+  чтобы в браузере отображалось плавное непрерывное видео движения шарика, а не слайд-шоу!
 ===================================================================================
 """
 
@@ -82,7 +80,6 @@ class RegionalLoreReader:
                             else:
                                 self.sections[current_sec].append(s)
 
-                # Если регионы не выбраны — ставим этот лор сразу на все 5 регионов!
                 if unassigned_global:
                     for r_k in CORE_REGIONS:
                         if not self.sections[r_k]:
@@ -212,7 +209,12 @@ def main():
     parser.add_argument("--video-ctrl-port", type=int, default=6007)
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--stochastic", type=float, default=0.0,
-                        help="Уровень стохастики от 0.0 (чистая рабочая память) до 1.0")
+                        help="Стохастика активных регионов с девайсами (0.0 = 100% управление из рабочей памяти)")
+    parser.add_argument("--unassigned-stochastic", type=float, default=1.0,
+                        help="Стохастика пустых регионов без девайсов (1.0 = живой DiT, 0.0 = строгий детерминизм)")
+    parser.add_argument("--wm-radius", type=float, default=0.25,
+                        help="Радиус области концепта в нестохастическом режиме (0.05..0.80)")
+    parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--monty-mode", type=str, default="missing_only", choices=["off", "missing_only", "full"],
                         help="Режим Монти: off (чистая рабочая память), missing_only (оператор пустых регионов), full")
@@ -226,6 +228,8 @@ def main():
 
     init_monty_mode = "off" if args.no_monty else args.monty_mode
     init_stoch = float(np.clip(args.stochastic, 0.0, 1.0))
+    init_unass_stoch = float(np.clip(args.unassigned_stochastic, 0.0, 1.0))
+    init_wm_radius = float(np.clip(args.wm_radius, 0.0, 1.0))
 
     print(f"⏳ Подключение к video_world_server (порт {args.video_port})...")
     vid_conn = None
@@ -234,7 +238,10 @@ def main():
             vid_conn = Client(("localhost", args.video_port), authkey=b"video_world")
         except Exception:
             time.sleep(0.5)
-    print(f"✅ [VIDEO-RUNNER] Видео-сервер 3D-DiT подключен! (Monty={init_monty_mode.upper()}, Stochastic={init_stoch:.2f})")
+    print(
+        f"✅ [VIDEO-RUNNER] Видео-сервер 3D-DiT подключен! "
+        f"(Monty={init_monty_mode.upper()}, Stoch={init_stoch:.2f}, UnassStoch={init_unass_stoch:.2f}, Radius={init_wm_radius:.2f})"
+    )
 
     lore_reader = RegionalLoreReader(lore_file=args.video_lore)
     router = SelfSufficientHeterarchyRouter(args.users)
@@ -255,6 +262,9 @@ def main():
     runtime_state = {
         "monty_mode": init_monty_mode,
         "stochastic": init_stoch,
+        "unassigned_stochastic": init_unass_stoch,
+        "wm_radius": init_wm_radius,
+        "seed": int(args.seed),
         "auto_active_boost": True,
         "active_user_gain": float(args.active_gain),
         "inactive_base_gain": float(args.inactive_gain),
@@ -264,12 +274,12 @@ def main():
         },
         "cascade_rate": 1.0,
         "psi_threshold": 0.55,
-        "geodesic_lock": 0.18,
-        "num_frames": 5,
-        "context_ring_len": 16,
+        "geodesic_lock": init_wm_radius,
+        "num_frames": 9,
+        "context_ring_len": 9,
         "steps": 4,
         "genesis_steps": 12,
-        "cfg_scale": 3.2,
+        "cfg_scale": 3.0,
         "current_active_role": "FCz",
         "force_reset_genesis": True,
         "running": True,
@@ -321,10 +331,17 @@ def main():
                             amodal_engine.set_monty_mode(runtime_state["monty_mode"])
                         if "stochastic" in cfg:
                             runtime_state["stochastic"] = float(np.clip(float(cfg["stochastic"]), 0.0, 1.0))
+                        if "unassigned_stochastic" in cfg:
+                            runtime_state["unassigned_stochastic"] = float(np.clip(float(cfg["unassigned_stochastic"]), 0.0, 1.0))
+                        if "wm_radius" in cfg:
+                            runtime_state["wm_radius"] = float(np.clip(float(cfg["wm_radius"]), 0.0, 1.0))
+                        if "geodesic_lock" in cfg:
+                            runtime_state["geodesic_lock"] = float(np.clip(float(cfg["geodesic_lock"]), 0.02, 0.80))
+                            runtime_state["wm_radius"] = runtime_state["geodesic_lock"]
                         for k in (
                             "auto_active_boost", "active_user_gain", "inactive_base_gain",
                             "cross_region_bleed", "cascade_rate", "psi_threshold",
-                            "geodesic_lock", "num_frames", "context_ring_len",
+                            "num_frames", "context_ring_len",
                             "steps", "genesis_steps", "cfg_scale"
                         ):
                             if k in cfg:
@@ -332,6 +349,15 @@ def main():
                         if "region_gains" in cfg and isinstance(cfg["region_gains"], dict):
                             runtime_state["region_gains"].update(cfg["region_gains"])
                         amodal_engine.cross_region_bleed = float(runtime_state["cross_region_bleed"])
+                    elif cmd == "set_device_mapping":
+                        s_name = str(msg.get("stream_name", "")).strip()
+                        r_val = str(msg.get("role", "FCz")).strip()
+                        u_val = str(msg.get("user", "User1")).strip()
+                        if s_name:
+                            router.set_device_mapping(s_name, r_val, u_val)
+                        if r_val and r_val.upper() not in ("NONE", "OFF", "UNASSIGNED"):
+                            runtime_state["current_active_role"] = EXTENDED_ROLE_TO_FUNCTIONAL.get(r_val, "FCz")
+                        print(f"🎛️ [VIDEO DEVICE MAP] '{s_name}' -> Роль: {r_val} (Субъект: {u_val})")
                     elif cmd == "set_device_role":
                         raw_role = str(msg.get("role", "FCz")).strip()
                         func_role = EXTENDED_ROLE_TO_FUNCTIONAL.get(raw_role, "FCz")
@@ -394,21 +420,27 @@ def main():
             if not has_live:
                 if hud:
                     hud.render_waiting()
-                time.sleep(0.02)
+                time.sleep(0.01)
                 continue
 
             wm_tensor_128x4096 = compile_per_region_full_rank_wm_tensor_gpu(bus)
             meta = bus.meta_64
+            monty_code = int(round(float(meta[27].item())))
+            cur_monty_mode = MONTY_CODE_TO_STR.get(monty_code, runtime_state["monty_mode"])
 
             active_region_mask = {}
             for r_idx, r_name in enumerate(REGION_ROLES):
-                active_region_mask[r_name] = bool(meta[21 + r_idx].item() > 0.5)
+                is_phys_dev = bool(meta[21 + r_idx].item() > 0.5)
+                if cur_monty_mode == "off":
+                    active_region_mask[r_name] = is_phys_dev
+                else:
+                    active_region_mask[r_name] = True
 
             if not any(active_region_mask.values()):
                 active_region_mask[runtime_state["current_active_role"]] = True
 
             primary_active_role = next(
-                (r for r in ["FCz", "AFz", "F3", "F4", "Fpz"] if active_region_mask.get(r, False)),
+                (r for r in ["FCz", "AFz", "F3", "F4", "Fpz"] if bool(meta[21 + ROLE_TO_BUS_IDX[r]].item() > 0.5)),
                 runtime_state["current_active_role"]
             )
             runtime_state["current_active_role"] = primary_active_role
@@ -419,9 +451,10 @@ def main():
 
             effective_gains = {}
             for r_name in REGION_ROLES:
+                is_phys_here = bool(meta[21 + ROLE_TO_BUS_IDX[r_name]].item() > 0.5)
                 manual_g = float(runtime_state["region_gains"].get(r_name, runtime_state["inactive_base_gain"]))
                 if runtime_state["auto_active_boost"]:
-                    if active_region_mask.get(r_name, False):
+                    if is_phys_here:
                         effective_gains[r_name] = float(max(manual_g, runtime_state["active_user_gain"]))
                     else:
                         effective_gains[r_name] = float(min(manual_g, max(0.02, runtime_state["inactive_base_gain"])))
@@ -438,9 +471,12 @@ def main():
                 float(meta[15].item()),
             ]
 
+            has_ipc = (bus.is_owner or bus.attached_pid > 0)
+
             req_msg = {
                 "cmd": "step_full_rank",
                 "wm_embeds_128x4096": wm_tensor_128x4096.detach().cpu().numpy(),
+                "wm_5x5x32x120": None if has_ipc else bus.wm_field_5x5x32x120.detach().cpu().numpy(),
                 "lore_sections": lore_reader.get_copy(),
                 "beta_wall_lock": beta_wall_lock,
                 "active_region_mask": active_region_mask,
@@ -449,12 +485,15 @@ def main():
                 "persistence": pers_val,
                 "surprise": surp_val,
                 "kuramoto": kuramoto_val,
-                "monty_mode": runtime_state["monty_mode"],
+                "monty_mode": cur_monty_mode,
                 "stochastic": float(runtime_state["stochastic"]),
+                "unassigned_stochastic": float(runtime_state["unassigned_stochastic"]),
+                "wm_radius": float(runtime_state["wm_radius"]),
+                "seed": int(runtime_state["seed"]),
                 "video_params": {
                     "cascade_rate": float(runtime_state["cascade_rate"]),
                     "psi_threshold": float(runtime_state["psi_threshold"]),
-                    "geodesic_lock": float(runtime_state["geodesic_lock"]),
+                    "geodesic_lock": float(runtime_state["wm_radius"]),
                     "num_frames": int(runtime_state["num_frames"]),
                     "context_ring_len": int(runtime_state["context_ring_len"]),
                     "steps": int(runtime_state["steps"]),
@@ -484,9 +523,10 @@ def main():
 
             if debug_tokens != last_debug_tag:
                 last_debug_tag = debug_tokens
-                active_list = [r for r, v in active_region_mask.items() if v]
+                phys_list = [r for i, r in enumerate(REGION_ROLES) if bool(meta[21 + i].item() > 0.5)]
                 print(
-                    f"🎬 [3D-DiT | Stoch:{runtime_state['stochastic']:.2f} | Monty:{runtime_state['monty_mode']} | Active:{active_list} | Ψ:{fpz_charge:.2f}] "
+                    f"🎬 [3D-DiT | Stoch:{runtime_state['stochastic']:.2f}(Unass:{runtime_state['unassigned_stochastic']:.2f}) "
+                    f"| Rad:{runtime_state['wm_radius']:.2f} | Monty:{cur_monty_mode} | PhysDevs:{phys_list} | Ψ:{fpz_charge:.2f}] "
                     f"{debug_tokens}"
                 )
 
@@ -496,7 +536,7 @@ def main():
                 "primary_role": primary_active_role,
                 "primary_active": True,
                 "ladder_stage": 1,
-                "monty_mode": runtime_state["monty_mode"],
+                "monty_mode": cur_monty_mode,
                 "monty_loss": round(float(meta[8].item()), 5),
                 "persistence": round(pers_val, 3),
                 "surprise": round(surp_val, 3),
@@ -547,8 +587,10 @@ def main():
                                 "monty_loss": telemetry["monty_loss"],
                                 "persistence": telemetry["persistence"],
                                 "surprise": telemetry["surprise"],
-                                "monty_mode": runtime_state["monty_mode"],
+                                "monty_mode": cur_monty_mode,
                                 "stochastic": runtime_state["stochastic"],
+                                "unassigned_stochastic": runtime_state["unassigned_stochastic"],
+                                "wm_radius": runtime_state["wm_radius"],
                                 "active_region_mask": active_region_mask,
                                 "region_gains": {k: round(v, 3) for k, v in effective_gains.items()},
                                 "active_concept_idx": act_c_idx,
@@ -556,39 +598,47 @@ def main():
                         except Exception:
                             video_ctrl_conn = None
 
-            for rgb_frame in frames:
-                frame_seq_id += 1
-                bgr = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
-
+            if frames:
                 if gateway_conn is None:
                     try:
                         gateway_conn = Client(("localhost", args.gateway_port), authkey=b"canvas")
                     except Exception:
                         gateway_conn = None
 
-                if gateway_conn is not None:
-                    try:
+                encoded_batch_jpgs = []
+                bgr_frames = []
+                for rgb_frame in frames:
+                    bgr = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+                    bgr_frames.append(bgr)
+                    if gateway_conn is not None:
                         _, enc_jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        encoded_batch_jpgs.append(enc_jpg.tobytes())
+
+                # Отправляем всю пачку кадров видео одним пакетом (без потери промежуточных шагов шарика!)
+                if gateway_conn is not None and encoded_batch_jpgs:
+                    frame_seq_id += len(encoded_batch_jpgs)
+                    try:
                         gateway_conn.send({
                             "frame_id": frame_seq_id,
                             "ts": time.time(),
-                            "gen_ms": gen_ms / max(1, len(frames)),
+                            "gen_ms": gen_ms,
                             "fps": fps,
-                            "actual_steps": len(frames),
-                            "w": rgb_frame.shape[1],
-                            "h": rgb_frame.shape[0],
+                            "actual_steps": int(runtime_state["steps"]),
+                            "w": frames[0].shape[1],
+                            "h": frames[0].shape[0],
                             "use_taesd": False,
                             "use_color": True,
-                            "jpg": enc_jpg.tobytes()
+                            "jpg_frames": encoded_batch_jpgs,
+                            "jpg": encoded_batch_jpgs[-1],
                         })
                     except Exception:
                         gateway_conn = None
 
-                if recorder_instance.is_recording:
-                    recorder_instance.push_frame(bgr, telemetry)
-
-                if hud:
-                    hud.render(rgb_frame, telemetry, fps=fps, dt=dt)
+                for idx_f, bgr in enumerate(bgr_frames):
+                    if recorder_instance.is_recording:
+                        recorder_instance.push_frame(bgr, telemetry)
+                    if hud:
+                        hud.render(frames[idx_f], telemetry, fps=fps, dt=dt)
 
     except KeyboardInterrupt:
         pass
@@ -602,3 +652,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
