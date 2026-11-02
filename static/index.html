@@ -288,6 +288,19 @@
                         <div class="bar-wrap"><div class="bar-fill-psi" id="fpzPsiBar"></div></div>
                     </div>
                 </div>
+                
+                <div class="mt-6">
+                    <label>🎯 Стохастика Активных Регионов 3D-DiT (0.00 = 100% Управление мозгом | 1.00 = Обычный DiT): <b id="vStochVal" style="color:#00ffc8;">0.00</b></label>
+                    <input type="range" id="vStochastic" min="0" max="1" step="0.05" value="0.00">
+                </div>
+                <div class="mt-4">
+                    <label>🌌 Стохастика Пустых Регионов 3D-DiT (1.00 = Живой фон | 0.00 = Строгий детерминизм для учёных): <b id="vUnassStochVal" style="color:#38bdf8;">1.00</b></label>
+                    <input type="range" id="vUnassignedStochastic" min="0" max="1" step="0.05" value="1.00">
+                </div>
+                <div class="mt-4">
+                    <label>🧭 Радиус области концепта 3D-DiT (0.05 = Строго внутри концепта | 0.80 = Широкая модуляция S³): <b id="vWmRadiusVal" style="color:#fbbf24;">0.25</b></label>
+                    <input type="range" id="vWmRadius" min="0.02" max="0.80" step="0.02" value="0.25">
+                </div>
 
                 <label class="mt-6">Порегионная Динамика / Стабильность (0.04 = Стабилен, 0.92 = Супер-Реалтайм):</label>
                 <div class="reg-gain-grid">
@@ -333,24 +346,29 @@
 
                 <div class="grid-4 mt-6">
                     <div>
-                        <label>Микро-Блок:</label>
+                        <label>Блок (сек):</label>
                         <select id="vNumFrames">
-                            <option value="5" selected>5 кадр (0.16с)</option>
-                            <option value="9">9 кадр (0.35с)</option>
-                            <option value="17">17 кадр (0.70с)</option>
+                            <option value="9" selected>0.33с (8 кадр)</option>
+                            <option value="17">0.67с (16 кадр)</option>
+                            <option value="25">1.00с (24 кадр)</option>
                         </select>
                     </div>
                     <div>
-                        <label>Контекст (кадр):</label>
-                        <input type="number" id="vContextRing" value="16" min="4" max="32" step="2">
+                        <label>Контекст (кадр/сек):</label>
+                        <select id="vContextRing">
+                            <option value="1">0.04с (1 кадр — Быстрый)</option>
+                            <option value="9" selected>0.35с (9 кадр — Плавный)</option>
+                            <option value="17">0.70с (17 кадр — Глубокий)</option>
+                            <option value="25">1.05с (25 кадр — Макс. память)</option>
+                        </select>
                     </div>
                     <div>
                         <label>Geodesic Lock:</label>
-                        <input type="number" id="vGeodesicLock" value="0.24" min="0.04" max="0.65" step="0.02">
+                        <input type="number" id="vGeodesicLock" value="0.25" min="0.04" max="0.65" step="0.02">
                     </div>
                     <div>
                         <label>Шаги DiT:</label>
-                        <input type="number" id="vSteps" value="4" min="2" max="10" step="1">
+                        <input type="number" id="vSteps" value="6" min="4" max="14" step="1">
                     </div>
                 </div>
                 <div class="grid-3 mt-4">

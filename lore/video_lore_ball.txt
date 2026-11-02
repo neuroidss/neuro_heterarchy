@@ -1,0 +1,20 @@
+[FPZ]
+white ball in black void
+
+[AFZ]
+white ball in black void
+
+[F3]
+white ball in black void
+
+[F4]
+white ball in black void
+
+[FCZ]
+white ball in black void moving down
+white ball in black void moving up
+white ball in black void moving left
+white ball in black void moving right
+
+[NEGATIVE]
+

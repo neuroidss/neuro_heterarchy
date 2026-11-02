@@ -54,6 +54,12 @@ const dom = {
     afzStageBar: document.getElementById('afzStageBar'),
     fpzPsiTxt: document.getElementById('fpzPsiTxt'),
     fpzPsiBar: document.getElementById('fpzPsiBar'),
+    vStochastic: document.getElementById('vStochastic'),
+    vStochVal: document.getElementById('vStochVal'),
+    vUnassignedStochastic: document.getElementById('vUnassignedStochastic'),
+    vUnassStochVal: document.getElementById('vUnassStochVal'),
+    vWmRadius: document.getElementById('vWmRadius'),
+    vWmRadiusVal: document.getElementById('vWmRadiusVal'),
     vBoxFpz: document.getElementById('vBoxFpz'),
     vBoxAfz: document.getElementById('vBoxAfz'),
     vBoxF3: document.getElementById('vBoxF3'),
@@ -88,6 +94,8 @@ const dom = {
     diffStochVal: document.getElementById('diffStochVal'),
     diffUnassignedStochastic: document.getElementById('diffUnassignedStochastic'),
     diffUnassStochVal: document.getElementById('diffUnassStochVal'),
+    diffWmRadius: document.getElementById('diffWmRadius'),
+    diffWmRadiusVal: document.getElementById('diffWmRadiusVal'),
     diffResolution: document.getElementById('diffResolution'),
     diffTaesd: document.getElementById('diffTaesd'),
     diffSteps: document.getElementById('diffSteps'),
@@ -108,6 +116,8 @@ const dom = {
     mStochVal: document.getElementById('mStochVal'),
     mUnassignedStochastic: document.getElementById('mUnassignedStochastic'),
     mUnassStochVal: document.getElementById('mUnassStochVal'),
+    mWmRadius: document.getElementById('mWmRadius'),
+    mWmRadiusVal: document.getElementById('mWmRadiusVal'),
     mStrLow: document.getElementById('mStrLow'),
     mStrHigh: document.getElementById('mStrHigh'),
     mEmaSmooth: document.getElementById('mEmaSmooth'),
@@ -124,12 +134,7 @@ const dom = {
     recBadge: document.getElementById('recBadge'),
 
     deviceCardTemplate: document.getElementById('deviceCardTemplate'),
-    conceptChipTemplate: document.getElementById('conceptChipTemplate'),
-
-diffWmRadius: document.getElementById('diffWmRadius'),
-     diffWmRadiusVal: document.getElementById('diffWmRadiusVal'),
-     mWmRadius: document.getElementById('mWmRadius'),
-     mWmRadiusVal: document.getElementById('mWmRadiusVal')
+    conceptChipTemplate: document.getElementById('conceptChipTemplate')
 };
 
 function getSavedDeviceConfig(devId) {
@@ -448,10 +453,35 @@ async function resetVideoGenesis() {
     });
 }
 
-async function updateVideoTransformerConfig() {
+async function updateVideoTransformerConfig(sourceEl = null) {
     const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
+
+    const rawVStoch = parseFloat(dom.vStochastic ? dom.vStochastic.value : 0.0);
+    const vStoch = Number.isNaN(rawVStoch) ? 0.0 : Math.max(0.0, Math.min(1.0, rawVStoch));
+    if (dom.vStochVal) dom.vStochVal.textContent = vStoch.toFixed(2);
+
+    const rawVUnass = parseFloat(dom.vUnassignedStochastic ? dom.vUnassignedStochastic.value : 1.0);
+    const vUnassStoch = Number.isNaN(rawVUnass) ? 1.0 : Math.max(0.0, Math.min(1.0, rawVUnass));
+    if (dom.vUnassStochVal) dom.vUnassStochVal.textContent = vUnassStoch.toFixed(2);
+
+    let vRad = 0.25;
+    if (sourceEl === dom.vGeodesicLock && dom.vGeodesicLock) {
+        vRad = Math.max(0.02, Math.min(0.80, parseFloat(dom.vGeodesicLock.value) || 0.25));
+        if (dom.vWmRadius) dom.vWmRadius.value = vRad;
+    } else if (dom.vWmRadius) {
+        vRad = Math.max(0.02, Math.min(0.80, parseFloat(dom.vWmRadius.value) || 0.25));
+        if (dom.vGeodesicLock) dom.vGeodesicLock.value = vRad;
+    } else if (dom.vGeodesicLock) {
+        vRad = Math.max(0.02, Math.min(0.80, parseFloat(dom.vGeodesicLock.value) || 0.25));
+    }
+    if (dom.vWmRadiusVal) dom.vWmRadiusVal.textContent = vRad.toFixed(2);
+
     const payload = {
         monty_mode: mMode,
+        stochastic: vStoch,
+        unassigned_stochastic: vUnassStoch,
+        wm_radius: vRad,
+        geodesic_lock: vRad,
         region_gains: {
             Fpz: parseFloat(dom.vGainFpz.value) || 0.06,
             AFz: parseFloat(dom.vGainAfz.value) || 0.08,
@@ -465,7 +495,6 @@ async function updateVideoTransformerConfig() {
         cross_region_bleed: parseFloat(dom.vCrossBleed.value) || 0.25,
         cascade_rate: parseFloat(dom.vCascadeRate.value) || 1.0,
         psi_threshold: parseFloat(dom.vPsiThresh.value) || 0.55,
-        geodesic_lock: parseFloat(dom.vGeodesicLock.value) || 0.24,
         num_frames: parseInt(dom.vNumFrames.value) || 5,
         context_ring_len: parseInt(dom.vContextRing.value) || 16,
         steps: parseInt(dom.vSteps.value) || 4,
@@ -558,10 +587,10 @@ function onManualParamChange(presetOverride = 'custom') {
     const res = dom.diffResolution ? dom.diffResolution.value : "512x384";
     const useTaesd = dom.diffTaesd ? (dom.diffTaesd.value === "1") : true;
     const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
-    
+
     const rawRad = parseFloat(dom.diffWmRadius ? dom.diffWmRadius.value : 0.15);
-     const wmRadius = Number.isNaN(rawRad) ? 0.15 : Math.max(0.02, Math.min(0.80, rawRad));
-     if (dom.diffWmRadiusVal) dom.diffWmRadiusVal.textContent = wmRadius.toFixed(2);
+    const wmRadius = Number.isNaN(rawRad) ? 0.15 : Math.max(0.02, Math.min(0.80, rawRad));
+    if (dom.diffWmRadiusVal) dom.diffWmRadiusVal.textContent = wmRadius.toFixed(2);
 
     dom.diffSteps.value = steps;
     dom.diffCfg.value = cfg;
@@ -646,6 +675,22 @@ sse.addEventListener('state', (e) => {
         if (dom.fpzPsiTxt) dom.fpzPsiTxt.textContent = `${psiPct}%`;
         if (dom.fpzPsiBar) dom.fpzPsiBar.style.width = `${psiPct}%`;
 
+        if (dom.vStochastic && document.activeElement !== dom.vStochastic && v.stochastic !== undefined) {
+            dom.vStochastic.value = v.stochastic;
+            if (dom.vStochVal) dom.vStochVal.textContent = parseFloat(v.stochastic).toFixed(2);
+        }
+        if (dom.vUnassignedStochastic && document.activeElement !== dom.vUnassignedStochastic && v.unassigned_stochastic !== undefined) {
+            dom.vUnassignedStochastic.value = v.unassigned_stochastic;
+            if (dom.vUnassStochVal) dom.vUnassStochVal.textContent = parseFloat(v.unassigned_stochastic).toFixed(2);
+        }
+        if (dom.vWmRadius && document.activeElement !== dom.vWmRadius && v.wm_radius !== undefined) {
+            dom.vWmRadius.value = v.wm_radius;
+            if (dom.vWmRadiusVal) dom.vWmRadiusVal.textContent = parseFloat(v.wm_radius).toFixed(2);
+            if (dom.vGeodesicLock && document.activeElement !== dom.vGeodesicLock) {
+                dom.vGeodesicLock.value = v.wm_radius;
+            }
+        }
+
         if (v.region_gains) {
             if (document.activeElement !== dom.vGainFpz) dom.vGainFpz.value = v.region_gains.Fpz ?? 0.06;
             if (document.activeElement !== dom.vGainAfz) dom.vGainAfz.value = v.region_gains.AFz ?? 0.08;
@@ -690,6 +735,10 @@ sse.addEventListener('state', (e) => {
         if (dom.diffUnassignedStochastic && document.activeElement !== dom.diffUnassignedStochastic && st.world.unassigned_stochastic !== undefined) {
             dom.diffUnassignedStochastic.value = st.world.unassigned_stochastic;
             if (dom.diffUnassStochVal) dom.diffUnassStochVal.textContent = parseFloat(st.world.unassigned_stochastic).toFixed(2);
+        }
+        if (dom.diffWmRadius && document.activeElement !== dom.diffWmRadius && st.world.wm_radius !== undefined) {
+            dom.diffWmRadius.value = st.world.wm_radius;
+            if (dom.diffWmRadiusVal) dom.diffWmRadiusVal.textContent = parseFloat(st.world.wm_radius).toFixed(2);
         }
         if (dom.diffResolution && document.activeElement !== dom.diffResolution && st.world.resolution) {
             dom.diffResolution.value = st.world.resolution;
@@ -747,6 +796,10 @@ sse.addEventListener('state', (e) => {
         if (dom.mUnassignedStochastic && document.activeElement !== dom.mUnassignedStochastic && st.music.unassigned_stochastic !== undefined) {
             dom.mUnassignedStochastic.value = st.music.unassigned_stochastic;
             if (dom.mUnassStochVal) dom.mUnassStochVal.textContent = parseFloat(st.music.unassigned_stochastic).toFixed(2);
+        }
+        if (dom.mWmRadius && document.activeElement !== dom.mWmRadius && st.music.wm_radius !== undefined) {
+            dom.mWmRadius.value = st.music.wm_radius;
+            if (dom.mWmRadiusVal) dom.mWmRadiusVal.textContent = parseFloat(st.music.wm_radius).toFixed(2);
         }
 
         const bSec = (st.music.buffer_sec || 0).toFixed(2);
@@ -1226,10 +1279,10 @@ async function updateMusicConfig() {
     if (dom.mUnassStochVal) dom.mUnassStochVal.textContent = mUnassStoch.toFixed(2);
 
     const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
-    
+
     const rawMRad = parseFloat(dom.mWmRadius ? dom.mWmRadius.value : 0.15);
-     const mWmRadius = Number.isNaN(rawMRad) ? 0.15 : Math.max(0.02, Math.min(0.80, rawMRad));
-     if (dom.mWmRadiusVal) dom.mWmRadiusVal.textContent = mWmRadius.toFixed(2);
+    const mWmRadius = Number.isNaN(rawMRad) ? 0.15 : Math.max(0.02, Math.min(0.80, rawMRad));
+    if (dom.mWmRadiusVal) dom.mWmRadiusVal.textContent = mWmRadius.toFixed(2);
 
     dom.mStrLow.value = sLow;
     dom.mStrHigh.value = sHigh;
@@ -1253,7 +1306,7 @@ async function updateMusicConfig() {
             strength_low: sLow,
             strength_high: sHigh,
             ema_smooth: ema,
-wm_radius: mWmRadius
+            wm_radius: mWmRadius
         })
     });
 }
@@ -1291,12 +1344,17 @@ window.addEventListener('DOMContentLoaded', async () => {
         dom.btnAddVideoConcept.addEventListener('click', addVideoRegionConcept);
     }
     [
+        dom.vStochastic, dom.vUnassignedStochastic, dom.vWmRadius
+    ].forEach(inp => {
+        if (inp) inp.addEventListener('input', () => updateVideoTransformerConfig(inp));
+    });
+    [
         dom.vGainFpz, dom.vGainAfz, dom.vGainF3, dom.vGainF4, dom.vGainFcz,
         dom.vAutoBoost, dom.vActiveUserGain, dom.vInactiveBaseGain,
         dom.vNumFrames, dom.vContextRing, dom.vGeodesicLock, dom.vSteps,
         dom.vCrossBleed, dom.vCascadeRate, dom.vPsiThresh
     ].forEach(inp => {
-        if (inp) inp.addEventListener('change', updateVideoTransformerConfig);
+        if (inp) inp.addEventListener('change', () => updateVideoTransformerConfig(inp));
     });
 
     dom.btnAddVision.addEventListener('click', addVisionConcept);
@@ -1351,9 +1409,9 @@ window.addEventListener('DOMContentLoaded', async () => {
             });
         }
     });
-    
+
     if (dom.diffWmRadius) dom.diffWmRadius.addEventListener('input', () => onManualParamChange('custom'));
-     if (dom.mWmRadius) dom.mWmRadius.addEventListener('input', () => { if (dom.musicPreset) dom.musicPreset.value = 'custom'; updateMusicConfig(); });
+    if (dom.mWmRadius) dom.mWmRadius.addEventListener('input', () => { if (dom.musicPreset) dom.musicPreset.value = 'custom'; updateMusicConfig(); });
 
     dom.btnRecStart.addEventListener('click', () => toggleRecording(true));
     dom.btnRecStop.addEventListener('click', () => toggleRecording(false));
@@ -1379,4 +1437,3 @@ window.addEventListener('DOMContentLoaded', async () => {
         console.error("Ошибка начальной загрузки:", err);
     }
 });
-
