@@ -1,0 +1,202 @@
+{
+  "world_name": "Mode_03_Four_Entity_Heterarchical_RPS_Choice_Arena",
+  "arena_context_desc": "sharp top-down view over a smooth pitch-black obsidian abyss",
+  "static_hold_desc": "smooth pitch-black obsidian abyss without movement",
+  "negative_desc": "gravel, sand, dirt, brown mud, blurry, noisy, text, watermark, box, cage, wireframe",
+  "archetypes": {
+    "e0_s0": {
+      "element_tag": "FCz_GAMMA",
+      "role_tag": "WM_AGENT",
+      "display_name": "e0:Blue-Lance[S0]",
+      "essence_desc": "a pulsing electric-blue crystalline spearhead core",
+      "action_desc": "projects a piercing cyan kinetic laser wave across the obsidian void",
+      "defense_desc": "crystalline spear lattice",
+      "impact_effect_desc": "shattering vortex rings"
+    },
+    "e0_s1": {
+      "element_tag": "FCz_RIPPLE",
+      "role_tag": "WM_AGENT",
+      "display_name": "e0:Cobalt-Turbine[S1]",
+      "essence_desc": "a spinning cobalt-blue multi-bladed plasma turbine",
+      "action_desc": "whirls at supersonic speed, generating shockwave ripples across the floor",
+      "defense_desc": "centrifugal plasma shield",
+      "impact_effect_desc": "cutting through barriers"
+    },
+    "e0_s2": {
+      "element_tag": "FCz_THETA",
+      "role_tag": "WM_AGENT",
+      "display_name": "e0:Arc-Crown[S2]",
+      "essence_desc": "a radiant sapphire lightning crown with branching arcs",
+      "action_desc": "discharges forked blue lightning bolts into the adjacent structure",
+      "defense_desc": "high-voltage corona",
+      "impact_effect_desc": "overcharging target state"
+    },
+    "e1_s0": {
+      "element_tag": "AFz_DELTA",
+      "role_tag": "WM_AGENT",
+      "display_name": "e1:Emerald-Vortex[S0]",
+      "essence_desc": "a radiant emerald-green spiral vortex archway",
+      "action_desc": "pulls surrounding light inward and synthesizes a glowing green nova",
+      "defense_desc": "spiral event horizon",
+      "impact_effect_desc": "dissolving monolith walls"
+    },
+    "e1_s1": {
+      "element_tag": "AFz_THETA",
+      "role_tag": "WM_AGENT",
+      "display_name": "e1:Jade-Lotus[S1]",
+      "essence_desc": "a blooming bioluminescent jade-green crystalline lotus",
+      "action_desc": "unfurls glowing emerald petals that engulf and transmute the target",
+      "defense_desc": "regenerative jade petals",
+      "impact_effect_desc": "enveloping rigid stone"
+    },
+    "e1_s2": {
+      "element_tag": "AFz_GAMMA",
+      "role_tag": "WM_AGENT",
+      "display_name": "e1:Viridian-Sun[S2]",
+      "essence_desc": "a blazing viridian-green miniature plasma sun",
+      "action_desc": "erupts with concentric emerald solar flares across the obsidian arena",
+      "defense_desc": "radiant plasma corona",
+      "impact_effect_desc": "melting dark barriers"
+    },
+    "e2_s0": {
+      "element_tag": "F3_BETA",
+      "role_tag": "WM_AGENT",
+      "display_name": "e2:Violet-Monolith[S0]",
+      "essence_desc": "a towering dark-violet obsidian monolith prism",
+      "action_desc": "deflects incoming trajectories and refracts them into golden rays",
+      "defense_desc": "impenetrable prism wall",
+      "impact_effect_desc": "deflecting star limbs"
+    },
+    "e2_s1": {
+      "element_tag": "F3_GAMMA",
+      "role_tag": "WM_AGENT",
+      "display_name": "e2:Amethyst-Mirror[S1]",
+      "essence_desc": "a geometric array of floating amethyst crystal mirrors",
+      "action_desc": "folds space and reflects golden-magenta beams onto the star creature",
+      "defense_desc": "reflective crystal array",
+      "impact_effect_desc": "splitting target morphology"
+    },
+    "e2_s2": {
+      "element_tag": "F3_RIPPLE",
+      "role_tag": "WM_AGENT",
+      "display_name": "e2:Magenta-Fortress[S2]",
+      "essence_desc": "an interlocking magenta-gold hexagonal bastion",
+      "action_desc": "expands geometric forcefields that reshape the approaching star into gold",
+      "defense_desc": "hexagonal bastion",
+      "impact_effect_desc": "forging golden tentacles"
+    },
+    "e3_s3": {
+      "element_tag": "F4_STAR",
+      "role_tag": "WM_AGENT",
+      "display_name": "e3:Blue-Star[S3]",
+      "essence_desc": "a crisp articulated bioluminescent blue five-limbed starfish creature",
+      "action_desc": "crawls rapidly forward across the pitch-black obsidian abyss with agile limbs",
+      "defense_desc": "articulated blue star",
+      "impact_effect_desc": "charging forward"
+    },
+    "e3_s4": {
+      "element_tag": "F4_GLIDER",
+      "role_tag": "WM_AGENT",
+      "display_name": "e3:Golden-Glider[S4]",
+      "essence_desc": "a glowing golden-cyan multi-tentacled star creature with extended feelers",
+      "action_desc": "glides smoothly in a wide arc, extending radiant golden limbs",
+      "defense_desc": "agile golden feelers",
+      "impact_effect_desc": "wrapping around beacons"
+    },
+    "e3_s5": {
+      "element_tag": "F4_NOVA",
+      "role_tag": "WM_AGENT",
+      "display_name": "e3:Crimson-Nova[S5]",
+      "essence_desc": "a blazing crimson-and-gold crystalline nova star creature",
+      "action_desc": "pulsates with blinding ruby-gold shockwaves that shatter blue crystals",
+      "defense_desc": "supernova core",
+      "impact_effect_desc": "overpowering blue lance"
+    }
+  },
+  "stages": [
+    {
+      "global_stage": 1,
+      "stage_title": "RPS_Branch_1_e2_Catalyzes_e3_Morph",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_s0", "e0_s1", "e0_s2"]},
+        {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
+        {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
+        {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s3", "e3_s4", "e3_s5"]}
+      ],
+      "quest": {
+        "active_slot_idx": 3,
+        "catalyst_slot_idx": 2,
+        "driver_tag": "CAT(e2->e3)",
+        "reaction_formula": "e2[CAT] + e3[SUB] --> e2[INV] + e3[MORPH]",
+        "ongoing_hypothesis": "the star creature is approaching the violet-magenta crystal structure in the dark void",
+        "completed_hypothesis": "the star creature ignites with golden-crimson tentacles as the crystal structure refracts light into it",
+        "failed_hypothesis": "the creature vanishes into darkness",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    },
+    {
+      "global_stage": 2,
+      "stage_title": "RPS_Branch_2_e3_Catalyzes_e0_Morph",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_s0", "e0_s1", "e0_s2"]},
+        {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
+        {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
+        {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s4", "e3_s5", "e3_s3"]}
+      ],
+      "quest": {
+        "active_slot_idx": 0,
+        "catalyst_slot_idx": 3,
+        "driver_tag": "CAT(e3->e0)",
+        "reaction_formula": "e3[CAT] + e0[SUB] --> e3[INV] + e0[MORPH]",
+        "ongoing_hypothesis": "the blue crystalline core is stationary before the radiant golden-crimson star",
+        "completed_hypothesis": "the golden-crimson star energizes the blue core, transforming it into a whirling cobalt plasma turbine with lightning arcs",
+        "failed_hypothesis": "the blue core fades away",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    },
+    {
+      "global_stage": 3,
+      "stage_title": "RPS_Branch_3_e0_Catalyzes_e1_Morph",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_s1", "e0_s2", "e0_s0"]},
+        {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
+        {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
+        {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s4", "e3_s5", "e3_s3"]}
+      ],
+      "quest": {
+        "active_slot_idx": 1,
+        "catalyst_slot_idx": 0,
+        "driver_tag": "CAT(e0->e1)",
+        "reaction_formula": "e0[CAT] + e1[SUB] --> e0[INV] + e1[MORPH]",
+        "ongoing_hypothesis": "the emerald vortex is dim beside the electric-blue turbine",
+        "completed_hypothesis": "piercing blue lightning from the turbine ignites the emerald structure into a blooming jade lotus and blazing green sun",
+        "failed_hypothesis": "the green vortex collapses",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    },
+    {
+      "global_stage": 4,
+      "stage_title": "RPS_Branch_4_e1_Catalyzes_e2_Morph",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_s1", "e0_s2", "e0_s0"]},
+        {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s1", "e1_s2", "e1_s0"]},
+        {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
+        {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s3", "e3_s4", "e3_s5"]}
+      ],
+      "quest": {
+        "active_slot_idx": 2,
+        "catalyst_slot_idx": 1,
+        "driver_tag": "CAT(e1->e2)",
+        "reaction_formula": "e1[CAT] + e2[SUB] --> e1[INV] + e2[MORPH]",
+        "ongoing_hypothesis": "the dark violet monolith stands rigid before the blazing emerald lotus",
+        "completed_hypothesis": "emerald plasma waves engulf the monolith and recrystallize it into floating amethyst mirrors and magenta-gold forcefields",
+        "failed_hypothesis": "the monolith crumbles into dust",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    }
+  ]
+}
