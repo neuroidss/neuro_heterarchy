@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v10.7 (SMOOTH VIDEO ROLLOUT STREAMER)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v11.0 (3D-DiT + 2D DIFFUSION + MUSICGEN)
 ===================================================================================
-- Плавный проигрыватель пачек кадров `jpg_frames` для 3D-DiT Video World:
-  ни один промежуточный кадр движения шарика больше не отбрасывается!
+- Полная поддержка нового 3D-DiT движка (neuro_run.py) наравне с 2D Diffusion и MusicGen:
+  * Живое регулирование радиуса рабочей памяти (wm_radius), стохастики (stochastic),
+    режима HUD (off/minimal/full), числа шагов (steps), CFG (cfg_scale), контекста (context_latents)
+    и длины шага (step_latents).
+  * Универсальный редактор лора: читает и .json манифесты (configs/), и .txt лоры (lore/),
+    позволяя добавлять/удалять концепты по регионам [FCZ, AFZ, F3, F4, FPZ, NEGATIVE] на лету!
 ===================================================================================
 """
 
@@ -142,61 +146,111 @@ def normalize_lore_relpath(p: str | None) -> str:
 
 
 def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
+    """
+    Универсальный парсер лора: понимает и .json манифесты (configs/mode_*.json),
+    и порегионные .txt файлы (lore/*.txt), раскладывая их по секциям [FPZ, AFZ, F3, F4, FCZ, NEGATIVE].
+    """
     sections = {"FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []}
     rel_p = normalize_lore_relpath(lore_path)
     if not rel_p:
         return sections
     full_p = os.path.join(BASE_DIR, rel_p)
-    if os.path.isfile(full_p):
-        cur = None
-        unassigned = []
-        with open(full_p, "r", encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if not s or s.startswith("#"):
-                    continue
-                if s.startswith("[") and s.endswith("]"):
-                    cur = s[1:-1].strip().upper()
-                    if cur not in sections:
-                        sections[cur] = []
+    if not os.path.isfile(full_p) and os.path.isfile(rel_p):
+        full_p = rel_p
+    if not os.path.isfile(full_p):
+        return sections
+
+    if full_p.endswith(".json"):
+        try:
+            with open(full_p, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if raw.get("arena_context_desc"):
+                sections["FPZ"].append(str(raw["arena_context_desc"]))
+            if raw.get("negative_desc"):
+                sections["NEGATIVE"].append(str(raw["negative_desc"]))
+            archetypes = raw.get("archetypes", {})
+            stages = raw.get("stages", [])
+            if stages:
+                for slot in stages[0].get("entities", []):
+                    b_up = str(slot.get("control_binding", "FCZ")).upper()
+                    reg_k = "FCZ"
+                    for cand in ("FCZ", "AFZ", "F3", "F4", "FPZ"):
+                        if cand in b_up:
+                            reg_k = cand
+                            break
+                    for aid in slot.get("allowed_pool", []):
+                        arch = archetypes.get(aid, {})
+                        desc = f"{arch.get('essence_desc', '')} {arch.get('action_desc', '')}".strip()
+                        if desc and desc not in sections[reg_k]:
+                            sections[reg_k].append(desc)
+            return sections
+        except Exception:
+            return sections
+
+    cur = None
+    unassigned = []
+    with open(full_p, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if s.startswith("[") and s.endswith("]"):
+                cur = s[1:-1].strip().upper()
+                if cur not in sections:
+                    sections[cur] = []
+            else:
+                if cur is None:
+                    unassigned.append(s)
                 else:
-                    if cur is None:
-                        unassigned.append(s)
-                    else:
-                        sections[cur].append(s)
-        if unassigned:
-            for r_k in ("FPZ", "AFZ", "F3", "F4", "FCZ"):
-                if not sections[r_k]:
-                    sections[r_k] = list(unassigned)
-        non_empty = next((sections[r] for r in ("FPZ", "AFZ", "F3", "F4", "FCZ") if sections[r]), [])
-        if non_empty:
-            for r_k in ("FPZ", "AFZ", "F3", "F4", "FCZ"):
-                if not sections[r_k]:
-                    sections[r_k] = list(non_empty)
+                    sections[cur].append(s)
+    if unassigned:
+        for r_k in ("FPZ", "AFZ", "F3", "F4", "FCZ"):
+            if not sections[r_k]:
+                sections[r_k] = list(unassigned)
+    non_empty = next((sections[r] for r in ("FPZ", "AFZ", "F3", "F4", "FCZ") if sections[r]), [])
+    if non_empty:
+        for r_k in ("FPZ", "AFZ", "F3", "F4", "FCZ"):
+            if not sections[r_k]:
+                sections[r_k] = list(non_empty)
     return sections
 
 
 def discover_available_lore_files() -> list[str]:
-    lore_dir = os.path.join(BASE_DIR, "lore")
-    found = [""]
-    if os.path.isdir(lore_dir):
-        for fname in sorted(os.listdir(lore_dir)):
-            if fname.endswith(".txt") or fname.endswith(".json"):
-                found.append(f"lore/{fname}")
+    found = []
+    for folder in ("configs", ".", "lore"):
+        d_path = os.path.join(BASE_DIR, folder) if folder != "." else BASE_DIR
+        if os.path.isdir(d_path):
+            for fname in sorted(os.listdir(d_path)):
+                if folder == "." and not (fname.startswith("mode_") and fname.endswith(".json")):
+                    continue
+                if fname.endswith(".json") or fname.endswith(".txt"):
+                    rel = f"{folder}/{fname}" if folder != "." else fname
+                    if rel not in found:
+                        found.append(rel)
     return found
 
 
 video_state = {
     "connected": False,
-    "lore_file": "",
+    "preset": "balanced",
+    "lore_file": "configs/mode_03_semantic_maze_gm.json",
     "available_lores": discover_available_lore_files(),
     "sections": {
         "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
     },
-    "monty_mode": "missing_only",
+    "monty_mode": "off",
     "stochastic": 0.0,
-    "unassigned_stochastic": 1.0,
-    "wm_radius": 0.25,
+    "unassigned_stochastic": 0.0,
+    "wm_radius": 0.35,
+    "geodesic_lock": 0.35,
+    "hud_mode": "minimal",
+    "context_latents": 1,
+    "step_latents": 2,
+    "num_frames": 17,
+    "context_ring_len": 9,
+    "steps": 6,
+    "genesis_steps": 12,
+    "cfg_scale": 3.2,
     "region_gains": {
         "Fpz": 0.06,
         "AFz": 0.08,
@@ -210,18 +264,17 @@ video_state = {
     "cross_region_bleed": 0.25,
     "cascade_rate": 1.0,
     "psi_threshold": 0.55,
-    "geodesic_lock": 0.25,
-    "num_frames": 9,
-    "context_ring_len": 9,
-    "steps": 4,
-    "genesis_steps": 12,
-    "cfg_scale": 3.0,
     "fps": 0.0,
     "gen_ms": 0.0,
+    "rtf": 1.0,
+    "play_speed": 1.0,
+    "feigenbaum_r": 3.72,
+    "reaction_formula": "",
+    "branch_scores": {},
     "debug_tokens": "",
     "fpz_meta_charge": 0.0,
     "afz_stage_progress": 0.0,
-    "active_region_mask": {"Fpz": False, "AFz": False, "F3": False, "F4": False, "FCz": True},
+    "active_region_mask": {"Fpz": True, "AFz": True, "F3": True, "F4": True, "FCz": True},
     "active_concept_idx": {"Fpz": 0, "AFz": 0, "F3": 0, "F4": 0, "FCz": 0}
 }
 video_state_lock = threading.Lock()
@@ -578,7 +631,8 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     for k, v in data["region_gains"].items():
                         video_state["region_gains"][k] = float(np.clip(float(v), 0.0, 1.0))
                 for k in (
-                    "monty_mode", "stochastic", "unassigned_stochastic", "wm_radius",
+                    "preset", "monty_mode", "stochastic", "unassigned_stochastic", "wm_radius",
+                    "hud_mode", "context_latents", "step_latents",
                     "auto_active_boost", "active_user_gain", "inactive_base_gain",
                     "cross_region_bleed", "cascade_rate", "psi_threshold",
                     "geodesic_lock", "num_frames", "context_ring_len",
@@ -587,10 +641,15 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     if k in data:
                         video_state[k] = data[k]
                 cfg_copy = {
+                    "preset": str(video_state.get("preset", "custom")),
                     "monty_mode": str(video_state["monty_mode"]),
                     "stochastic": float(video_state["stochastic"]),
                     "unassigned_stochastic": float(video_state["unassigned_stochastic"]),
                     "wm_radius": float(video_state["wm_radius"]),
+                    "geodesic_lock": float(video_state["wm_radius"]),
+                    "hud_mode": str(video_state.get("hud_mode", "minimal")),
+                    "context_latents": int(video_state.get("context_latents", 1)),
+                    "step_latents": int(video_state.get("step_latents", 2)),
                     "region_gains": dict(video_state["region_gains"]),
                     "auto_active_boost": bool(video_state["auto_active_boost"]),
                     "active_user_gain": float(video_state["active_user_gain"]),
@@ -598,7 +657,6 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     "cross_region_bleed": float(video_state["cross_region_bleed"]),
                     "cascade_rate": float(video_state["cascade_rate"]),
                     "psi_threshold": float(video_state["psi_threshold"]),
-                    "geodesic_lock": float(video_state["geodesic_lock"]),
                     "num_frames": int(video_state["num_frames"]),
                     "context_ring_len": int(video_state["context_ring_len"]),
                     "steps": int(video_state["steps"]),
@@ -825,10 +883,6 @@ class ThreadedHTTPServer(ThreadingHTTPServer):
 
 
 def smooth_video_pacer_thread():
-    """
-    Плавно подает все промежуточные кадры пачки видео в MJPEG-поток браузера,
-    чтобы шарик двигался непрерывно без пропусков!
-    """
     global latest_jpeg_frame, latest_jpeg_id, latest_jpeg_ts
     while True:
         if not video_playback_deque:
@@ -984,15 +1038,6 @@ def ipc_video_control_listener():
                 active_video_ctrl_conn = conn
             with video_state_lock:
                 video_state["connected"] = True
-                has_gw_sections = any(len(v) > 0 for v in video_state["sections"].values())
-                if has_gw_sections:
-                    try:
-                        conn.send({
-                            "cmd": "update_lore_sections",
-                            "sections": {k: list(v) for k, v in video_state["sections"].items()}
-                        })
-                    except Exception:
-                        pass
             broadcast_full_state()
 
             while True:
@@ -1007,8 +1052,9 @@ def ipc_video_control_listener():
                             runner_secs = msg.get("sections")
                             if isinstance(runner_secs, dict) and any(len(v) > 0 for v in runner_secs.values()):
                                 video_state["sections"] = runner_secs
-                            if "monty_mode" in msg:
-                                video_state["monty_mode"] = msg["monty_mode"]
+                            for k in ("stochastic", "wm_radius", "hud_mode", "context_latents", "step_latents", "steps", "cfg_scale"):
+                                if k in msg:
+                                    video_state[k] = msg[k]
                             video_state["available_lores"] = discover_available_lore_files()
                         broadcast_full_state()
                     elif cmd == "video_telemetry":
@@ -1016,24 +1062,22 @@ def ipc_video_control_listener():
                             video_state["connected"] = True
                             video_state["fps"] = msg.get("fps", 0.0)
                             video_state["gen_ms"] = msg.get("gen_ms", 0.0)
+                            video_state["rtf"] = msg.get("rtf", 1.0)
+                            video_state["play_speed"] = msg.get("play_speed", 1.0)
+                            video_state["feigenbaum_r"] = msg.get("feigenbaum_r", 3.72)
+                            video_state["reaction_formula"] = msg.get("reaction_formula", "")
+                            video_state["branch_scores"] = msg.get("branch_scores", {})
                             video_state["debug_tokens"] = msg.get("debug_tokens", "")
                             video_state["fpz_meta_charge"] = msg.get("fpz_meta_charge", 0.0)
                             video_state["afz_stage_progress"] = msg.get("afz_stage_progress", 0.0)
-                            if "monty_mode" in msg:
-                                video_state["monty_mode"] = msg["monty_mode"]
-                            if "stochastic" in msg:
-                                video_state["stochastic"] = msg["stochastic"]
-                            if "unassigned_stochastic" in msg:
-                                video_state["unassigned_stochastic"] = msg["unassigned_stochastic"]
-                            if "wm_radius" in msg:
-                                video_state["wm_radius"] = msg["wm_radius"]
-                                video_state["geodesic_lock"] = msg["wm_radius"]
-                            if "active_region_mask" in msg:
-                                video_state["active_region_mask"] = msg["active_region_mask"]
-                            if "region_gains" in msg:
-                                video_state["region_gains"] = msg["region_gains"]
-                            if "active_concept_idx" in msg:
-                                video_state["active_concept_idx"] = msg["active_concept_idx"]
+                            for k in (
+                                "monty_mode", "stochastic", "unassigned_stochastic", "wm_radius",
+                                "hud_mode", "context_latents", "step_latents", "steps", "cfg_scale",
+                                "active_region_mask", "region_gains", "active_concept_idx"
+                            ):
+                                if k in msg:
+                                    video_state[k] = msg[k]
+                            video_state["geodesic_lock"] = video_state["wm_radius"]
                         with world_state_lock:
                             world_state["active_thought"] = msg.get("debug_tokens", "")
                             world_state["monty_loss"] = msg.get("monty_loss", 0.0)
@@ -1155,14 +1199,14 @@ def main():
     parser.add_argument('--cert', type=str, default=None)
     parser.add_argument('--key', type=str, default=None)
     parser.add_argument('--lore', type=str, default=None)
-    parser.add_argument('--video-lore', type=str, default=None)
+    parser.add_argument('--video-lore', type=str, default="configs/mode_03_semantic_maze_gm.json")
     parser.add_argument('--music-lore', type=str, default=None)
     args = parser.parse_args()
 
     port = args.port or args.pos_port or int(os.environ.get("HTTP_PORT", HTTP_PORT))
 
     raw_diff_lore  = args.lore if args.lore is not None else os.environ.get("LORE_PATH", "")
-    raw_video_lore = args.video_lore if args.video_lore is not None else os.environ.get("VIDEO_LORE_PATH", "")
+    raw_video_lore = args.video_lore if args.video_lore is not None else os.environ.get("VIDEO_LORE_PATH", "configs/mode_03_semantic_maze_gm.json")
     raw_music_lore = args.music_lore if args.music_lore is not None else os.environ.get("MUSIC_LORE_PATH", "")
 
     diff_lore_rel  = normalize_lore_relpath(raw_diff_lore)
@@ -1207,4 +1251,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

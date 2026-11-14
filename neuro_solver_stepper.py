@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-neuro_solver_stepper.py — Чистый латентный интегратор 128D (Без потокенного смешивания разных предложений)
+neuro_solver_stepper.py — Полноранговый латентный интегратор 128D с живым морфингом от WM_RADIUS
+================================================================================================
+- УБРАНА linear_quadratic_sigmas, которая держала sigma=0.99 первые полшага и замораживала кадр!
+  Возвращена честная динамическая шкала Эйлера (set_scheduler_timesteps), дающая глубокий
+  морфинг кристаллов, молний и щупалец на каждом блоке.
+- УБРАНА привязка к первому кадру сессии (genesis_ref_latent_5d), которая не давала цветам и формам
+  меняться при переходе между стадиями.
+- Ползунок wm_radius ∈ [0.02, 0.80] теперь напрямую управляет:
+  1) углом вращения гиперсферы S^3 от всех 19,200 мод рабочей памяти;
+  2) податливостью маски контекста (cond_strength = 0.88 - 0.45 * wm_radius), позволяя
+     регулировать динамику мира от плавной медитации (radius=0.10) до бурного морфинга (radius=0.65)!
 """
 
 from __future__ import annotations
+import math
 from typing import Any
 import torch
 import torch.nn.functional as F
@@ -12,7 +23,7 @@ from neuro_ltx_backend import LTXModelBackend, rescale_noise_cfg
 
 
 @torch.no_grad()
-def tone_map_latents_ltx(latents: torch.Tensor, compression: float = 0.25) -> torch.Tensor:
+def tone_map_latents_ltx(latents: torch.Tensor, compression: float = 0.12) -> torch.Tensor:
     if compression <= 0.0:
         return latents
     scale_factor = float(compression) * 0.75
@@ -25,21 +36,25 @@ def tone_map_latents_ltx(latents: torch.Tensor, compression: float = 0.25) -> to
 @torch.no_grad()
 def stabilize_sliding_latents(
     curr_latents: torch.Tensor,
-    ref_latents: torch.Tensor | None,
-    factor: float = 0.25,
+    prev_tail_latents: torch.Tensor | None,
+    factor: float = 0.10,
 ) -> torch.Tensor:
+    """
+    Стабилизирует дисперсию только относительно ХВОСТА ПРЕДЫДУЩЕГО ОКНА (а не первого кадра сессии!),
+    сохраняя 100% свободу смены цветов и геометрии при переходе к новым стадиям и концептам.
+    """
     eps = 1e-6
     mu_curr = curr_latents.mean(dim=(2, 3, 4), keepdim=True)
     sigma_curr = curr_latents.std(dim=(2, 3, 4), keepdim=True).clamp(min=eps)
 
-    if ref_latents is not None and factor > 0.0:
-        mu_ref = ref_latents.mean(dim=(2, 3, 4), keepdim=True).to(curr_latents.device, curr_latents.dtype)
-        sigma_ref = ref_latents.std(dim=(2, 3, 4), keepdim=True).to(curr_latents.device, curr_latents.dtype).clamp(min=eps)
+    if prev_tail_latents is not None and factor > 0.0:
+        mu_ref = prev_tail_latents.mean(dim=(2, 3, 4), keepdim=True).to(curr_latents.device, curr_latents.dtype)
+        sigma_ref = prev_tail_latents.std(dim=(2, 3, 4), keepdim=True).to(curr_latents.device, curr_latents.dtype).clamp(min=eps)
         target_mu = (1.0 - factor) * mu_curr + factor * (mu_ref * 0.85)
-        target_sigma = torch.clamp((1.0 - factor) * sigma_curr + factor * sigma_ref, min=0.65, max=1.05)
+        target_sigma = torch.clamp((1.0 - factor) * sigma_curr + factor * sigma_ref, min=0.78, max=1.12)
         curr_latents = ((curr_latents - mu_curr) / sigma_curr) * target_sigma + target_mu
 
-    return tone_map_latents_ltx(curr_latents, compression=0.25)
+    return tone_map_latents_ltx(curr_latents, compression=0.12)
 
 
 @torch.no_grad()
@@ -61,15 +76,93 @@ class LatentFlowWindowStepper:
         self,
         backend: LTXModelBackend,
         referee: Any = None,
-        steps: int = 20,
-        cfg_scale: float = 4.0,
+        steps: int = 6,
+        cfg_scale: float = 3.2,
         guidance_rescale: float = 0.7,
     ):
         self.backend = backend
         self.referee = referee
-        self.steps = steps
-        self.cfg_scale = cfg_scale
-        self.guidance_rescale = guidance_rescale
+        self.steps = max(2, int(steps))
+        self.cfg_scale = float(cfg_scale)
+        self.guidance_rescale = float(guidance_rescale)
+        self.last_velocity_5d: torch.Tensor | None = None
+        self._s3_bases_cache: dict[tuple, list[torch.Tensor]] = {}
+        self._wm_accum_phase_field: torch.Tensor | None = None
+
+    @torch.no_grad()
+    def _build_wm_s3_noise(
+        self,
+        shape: tuple[int, int, int, int, int],
+        base_seed: int,
+        stochastic: float,
+        wm_radius: float,
+        wm_19200_vec: torch.Tensor | None,
+        wm_probe_emb: torch.Tensor,
+        gen_rand: torch.Generator | None,
+        device: torch.device,
+        step_new_frames: int = 2,
+    ) -> torch.Tensor:
+        key = (shape, base_seed, device)
+        n_vox = int(shape[1] * shape[2] * shape[3] * shape[4])
+
+        if key not in self._s3_bases_cache:
+            self._s3_bases_cache.clear()
+            g1 = torch.Generator(device=device).manual_seed(101 + base_seed)
+            g2 = torch.Generator(device=device).manual_seed(202 + base_seed)
+            g3 = torch.Generator(device=device).manual_seed(303 + base_seed)
+            g4 = torch.Generator(device=device).manual_seed(404 + base_seed)
+            self._s3_bases_cache[key] = [
+                torch.randn(shape, generator=g1, device=device, dtype=torch.float32),
+                torch.randn(shape, generator=g2, device=device, dtype=torch.float32),
+                torch.randn(shape, generator=g3, device=device, dtype=torch.float32),
+                torch.randn(shape, generator=g4, device=device, dtype=torch.float32),
+            ]
+        else:
+            shift_t = max(1, int(step_new_frames))
+            for idx_b in range(4):
+                self._s3_bases_cache[key][idx_b] = torch.roll(
+                    self._s3_bases_cache[key][idx_b], shifts=-shift_t, dims=2
+                )
+
+        b1, b2, b3, b4 = self._s3_bases_cache[key]
+
+        if wm_19200_vec is not None and wm_19200_vec.numel() > 0:
+            raw_wm = wm_19200_vec.to(device=device, dtype=torch.float32).reshape(-1)
+        else:
+            raw_wm = wm_probe_emb.to(device=device, dtype=torch.float32).reshape(-1)
+
+        wm_std = raw_wm.std(unbiased=False).clamp(min=1e-5)
+        wm_whitened = (raw_wm - raw_wm.mean()) / wm_std
+
+        reps = (n_vox // wm_whitened.numel()) + 1
+        wm_vox = wm_whitened.repeat(reps)[:n_vox].view(shape)
+
+        rad = float(max(0.02, min(1.0, wm_radius)))
+        if self._wm_accum_phase_field is None or self._wm_accum_phase_field.shape != shape:
+            self._wm_accum_phase_field = wm_vox * (rad * 1.1)
+        else:
+            self._wm_accum_phase_field = torch.remainder(
+                torch.roll(self._wm_accum_phase_field, shifts=-max(1, int(step_new_frames)), dims=2)
+                + wm_vox * (rad * 1.25),
+                2.0 * math.pi,
+            )
+
+        scale_ang = math.pi * 1.35 * rad
+        phi_a = self._wm_accum_phase_field + wm_vox * scale_ang
+        phi_b = torch.roll(self._wm_accum_phase_field, shifts=32, dims=1) - torch.roll(wm_vox, shifts=16, dims=1) * scale_ang
+        phi_c = torch.roll(self._wm_accum_phase_field, shifts=64, dims=1) * 0.7 + torch.roll(wm_vox, shifts=48, dims=1) * (scale_ang * 0.6)
+
+        g12 = torch.cos(phi_a) * b1 + torch.sin(phi_a) * b2
+        g34 = torch.cos(phi_b) * b3 + torch.sin(phi_b) * b4
+        g_wm = torch.cos(phi_c) * g12 + torch.sin(phi_c) * g34
+
+        stoch = float(max(0.0, min(1.0, stochastic)))
+        if stoch <= 0.001:
+            return g_wm
+
+        g_rand = torch.randn(shape, generator=gen_rand, device=device, dtype=torch.float32)
+        mix_ang = stoch * (math.pi * 0.5)
+        return math.cos(mix_ang) * g_wm + math.sin(mix_ang) * g_rand
 
     @torch.no_grad()
     def run_window(
@@ -85,11 +178,15 @@ class LatentFlowWindowStepper:
         entity_probes: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
         passive_emb: torch.Tensor | None = None,
         passive_mask: torch.Tensor | None = None,
-        total_lat_frames: int = 5,
-        h_lat: int = 14,
-        w_lat: int = 20,
+        total_lat_frames: int = 3,
+        h_lat: int = 8,
+        w_lat: int = 12,
         gen: torch.Generator | None = None,
         is_continuation_block: bool = False,
+        stochastic: float = 0.0,
+        wm_radius: float = 0.35,
+        base_seed: int = 42,
+        wm_19200_vec: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, float]:
         pipe = self.backend.pipe
         device = self.backend.device
@@ -97,20 +194,51 @@ class LatentFlowWindowStepper:
 
         in_channels = self.backend.transformer.config.in_channels
         video_seq_len = total_lat_frames * h_lat * w_lat
+
+        # ИСПОЛЬЗУЕМ ШТАТНУЮ РАВНОМЕРНУЮ ШКАЛУ ЭЙЛЕРА (вместо linear_quadratic_sigmas, которая замораживала кадр!):
         timesteps = self.backend.set_scheduler_timesteps(self.steps, video_seq_len)
 
+        n_cond = 0
+        if is_continuation_block and anchor_latent_0 is not None:
+            n_cond = min(anchor_latent_0.shape[2], total_lat_frames - 1)
+        step_new_frames = max(1, total_lat_frames - n_cond)
+
         shape = (1, in_channels, total_lat_frames, h_lat, w_lat)
-        noise = torch.randn(shape, generator=gen, device=device, dtype=torch.float32)
+        noise = self._build_wm_s3_noise(
+            shape=shape,
+            base_seed=base_seed,
+            stochastic=stochastic,
+            wm_radius=wm_radius,
+            wm_19200_vec=wm_19200_vec,
+            wm_probe_emb=pos_emb,
+            gen_rand=gen,
+            device=device,
+            step_new_frames=step_new_frames,
+        )
 
         latents_5d = noise.clone()
         cond_mask_5d = torch.zeros((1, 1, total_lat_frames, h_lat, w_lat), device=device, dtype=torch.float32)
 
-        if is_continuation_block and anchor_latent_0 is not None:
-            latents_5d[:, :, :1] = anchor_latent_0[:, :, -1:].clone()
-            cond_mask_5d[:, :, :1] = 1.0
+        if is_continuation_block and anchor_latent_0 is not None and n_cond > 0:
+            anchor_prefix_5d = anchor_latent_0[:, :, -n_cond:].clone()
+            # Чем выше wm_radius, тем свободнее морфится опорный кадр под действием новой мысли!
+            rad_clamped = float(max(0.02, min(0.85, wm_radius)))
+            tail_lock = float(max(0.45, min(0.88, 0.88 - 0.42 * rad_clamped)))
+            if n_cond == 1:
+                cond_mask_5d[:, :, 0:1] = tail_lock
+            else:
+                for c_i in range(n_cond - 1):
+                    cond_mask_5d[:, :, c_i : c_i + 1] = min(0.92, tail_lock + 0.12)
+                cond_mask_5d[:, :, n_cond - 1 : n_cond] = tail_lock
+
+            latents_5d[:, :, :n_cond] = (
+                anchor_prefix_5d * cond_mask_5d[:, :, :n_cond]
+                + noise[:, :, :n_cond] * (1.0 - cond_mask_5d[:, :, :n_cond])
+            )
 
         latents_packed = pipe._pack_latents(latents_5d, 1, 1).to(torch.float32)
         cond_mask_packed = pipe._pack_latents(cond_mask_5d, 1, 1).squeeze(-1).to(device)
+        init_latents_packed = latents_packed.clone()
 
         rope_scale = (
             self.backend.temporal_ratio / 16.0,
@@ -118,24 +246,34 @@ class LatentFlowWindowStepper:
             float(self.backend.spatial_ratio),
         )
 
-        # Используем строго 2 потока (neg_emb и чистый pos_emb без наложения двух разных предложений!)
-        batch_prompt_embeds = torch.cat([neg_emb, pos_emb], dim=0)
-        batch_prompt_mask = torch.cat([neg_mask, pos_mask], dim=0)
-        cond_mask_batch2 = torch.cat([cond_mask_packed, cond_mask_packed], dim=0)
+        use_cfg_overall = self.cfg_scale > 1.05
+        cfg_cutoff_step = max(2, int(math.ceil(len(timesteps) * 0.75)))
 
-        dominance_ratio = 1.0
-        probe_step_idx = max(2, int(len(timesteps) * 0.30))
+        batch2_prompt_embeds = torch.cat([neg_emb, pos_emb], dim=0) if use_cfg_overall else pos_emb
+        batch2_prompt_mask = torch.cat([neg_mask, pos_mask], dim=0) if use_cfg_overall else pos_mask
+        cond_mask_batch2 = torch.cat([cond_mask_packed, cond_mask_packed], dim=0) if use_cfg_overall else cond_mask_packed
 
+        noise_pred_final = None
         for i, t in enumerate(timesteps):
-            latent_input = torch.cat([latents_packed, latents_packed], dim=0)
-            t_expand = t.expand(latent_input.shape[0]).unsqueeze(-1).float()
-            t_per_token = t_expand * (1.0 - cond_mask_batch2)
+            do_cfg_step = use_cfg_overall and (i < cfg_cutoff_step)
+            if do_cfg_step:
+                latent_input = torch.cat([latents_packed, latents_packed], dim=0)
+                t_expand = t.expand(2).unsqueeze(-1).float()
+                t_per_token = torch.min(t_expand, (1.0 - cond_mask_batch2) * 1000.0)
+                p_emb = batch2_prompt_embeds
+                p_msk = batch2_prompt_mask
+            else:
+                latent_input = latents_packed
+                t_expand = t.expand(1).unsqueeze(-1).float()
+                t_per_token = torch.min(t_expand, (1.0 - cond_mask_packed) * 1000.0)
+                p_emb = pos_emb
+                p_msk = pos_mask
 
-            noise_pred_2 = self.backend.transformer(
+            noise_pred_raw = self.backend.transformer(
                 hidden_states=latent_input.to(dtype),
-                encoder_hidden_states=batch_prompt_embeds,
+                encoder_hidden_states=p_emb,
                 timestep=t_per_token,
-                encoder_attention_mask=batch_prompt_mask,
+                encoder_attention_mask=p_msk,
                 num_frames=total_lat_frames,
                 height=h_lat,
                 width=w_lat,
@@ -143,42 +281,30 @@ class LatentFlowWindowStepper:
                 return_dict=False,
             )[0].float()
 
-            noise_uncond, noise_text = noise_pred_2.chunk(2)
-            t_single = t_per_token.chunk(2)[0]
-
-            if i == probe_step_idx and self.referee is not None and entity_probes and len(entity_probes) >= 2:
-                dominance_ratio = self.referee.compute_mid_clash_dominance(
-                    noisy_latents_packed=latents_packed,
-                    t_per_token=t_single,
-                    v_uncond=noise_uncond,
-                    v_clash_text=noise_text,
-                    entity_probes=entity_probes,
-                    passive_void_embeds=passive_emb if passive_emb is not None else walk_in_emb,
-                    passive_void_mask=passive_mask if passive_mask is not None else walk_in_mask,
-                    t_lat=total_lat_frames,
-                    h_lat=h_lat,
-                    w_lat=w_lat,
-                    rope_scale=rope_scale,
-                )
-
-            noise_cfg = noise_uncond + self.cfg_scale * (noise_text - noise_uncond)
-            noise_pred_final = rescale_noise_cfg(noise_cfg, noise_text, guidance_rescale=self.guidance_rescale)
-
-            noise_pred_5d = pipe._unpack_latents(noise_pred_final, total_lat_frames, h_lat, w_lat, 1, 1)
-            curr_latents_5d = pipe._unpack_latents(latents_packed, total_lat_frames, h_lat, w_lat, 1, 1)
-
-            if is_continuation_block:
-                gen_noise = noise_pred_5d[:, :, 1:]
-                gen_lat = curr_latents_5d[:, :, 1:]
-                step_lat = self.backend.scheduler.step(gen_noise, t, gen_lat, return_dict=False)[0]
-                curr_latents_5d = torch.cat([curr_latents_5d[:, :, :1], step_lat], dim=2)
+            if do_cfg_step:
+                noise_uncond, noise_text = noise_pred_raw.chunk(2)
+                noise_cfg = noise_uncond + self.cfg_scale * (noise_text - noise_uncond)
+                noise_pred_final = rescale_noise_cfg(noise_cfg, noise_text, guidance_rescale=self.guidance_rescale)
             else:
-                curr_latents_5d = self.backend.scheduler.step(noise_pred_5d, t, curr_latents_5d, return_dict=False)[0]
+                noise_pred_final = noise_pred_raw
 
-            latents_packed = pipe._pack_latents(curr_latents_5d, 1, 1)
+            denoised_packed = self.backend.scheduler.step(
+                noise_pred_final, t, latents_packed, return_dict=False
+            )[0]
+
+            if is_continuation_block and n_cond > 0:
+                t_norm = float(t.item()) / 1000.0
+                tokens_to_denoise = (t_norm - 1e-6 < (1.0 - cond_mask_packed)).unsqueeze(-1)
+                latents_packed = torch.where(tokens_to_denoise, denoised_packed, init_latents_packed)
+            else:
+                latents_packed = denoised_packed
+
+        if noise_pred_final is not None:
+            self.last_velocity_5d = pipe._unpack_latents(
+                noise_pred_final, total_lat_frames, h_lat, w_lat, 1, 1
+            ).float()
 
         unpacked_z0 = pipe._unpack_latents(latents_packed, total_lat_frames, h_lat, w_lat, 1, 1).float()
-        ref_5d = genesis_ref_latent_5d if genesis_ref_latent_5d is not None else unpacked_z0
-        unpacked_z0 = stabilize_sliding_latents(unpacked_z0, ref_5d, factor=0.25)
+        unpacked_z0 = stabilize_sliding_latents(unpacked_z0, anchor_latent_0, factor=0.10)
 
-        return unpacked_z0, float(dominance_ratio)
+        return unpacked_z0, 1.0

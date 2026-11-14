@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-neuro_engine.py — Гетерархический движок N агентов рабочей памяти с полноранговым выбором ветвей
-================================================================================================
-- Никаких рельсов (curr_idx + 1): следующая стадия выбирается динамически на основе
-  128D-резонанса всех конкурирующих каталитических ветвей (chosen_next_stage_idx).
-- Каждый агент отслеживает своё текущее состояние в persistent_entity_states и выбирает
-  следующее целевое состояние из своего allowed_pool через 524,288-D рабочую память.
+neuro_engine.py — Гетерархический движок N агентов с живым морфингом от Рабочей Памяти при 0% стохастике
+========================================================================================================
+- Передает полноранговый 19,200-D вектор рабочей памяти ведущего региона прямо в латентную сферу S^3
+  интегратора LatentFlowWindowStepper, чтобы даже при stochastic = 0.0 каждый блок непрерывно
+  морфился и двигался под управлением фазы рабочей памяти!
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ import multiprocessing as mp
 from multiprocessing.connection import Client
 import time
 import gc
+import cv2
 import numpy as np
 import torch
 
@@ -22,7 +22,9 @@ mp.current_process().authkey = b"battle_ltx"
 
 from neuro_world import GameWorldManifest, StageEntitySlot, compose_entity_semantics
 from neuro_controller import SymmetricBotController
-from neuro_clash_hud import draw_identity_hud
+from neuro_ltx_backend import LTXModelBackend, RemoteLTXModelBackend
+from neuro_referee import CoordinateFreeHistoryReferee, LatentIdentityFrameTelemetry
+from neuro_solver_stepper import LatentFlowWindowStepper, imprint_allegiance_spin
 
 
 class UniversalLatentAutobattlerEngine:
@@ -30,30 +32,39 @@ class UniversalLatentAutobattlerEngine:
     def __init__(
         self,
         manifest: GameWorldManifest,
-        width: int = 640,
-        height: int = 448,
-        prep_seconds: float = 2.5,
-        combat_seconds: float = 1.5,
+        width: int = 384,
+        height: int = 256,
+        prep_seconds: float = 1.0,
+        combat_seconds: float = 1.0,
         game_mode: str = "strict_ko",
         max_overtime_chunks: int = 12,
-        steps: int = 20,
-        cfg_scale: float = 4.0,
+        steps: int = 6,
+        cfg_scale: float = 3.0,
         seed: int = 42,
         battle_server_port: int = 6008,
         force_local: bool = False,
         monochrome: bool = False,
+        context_lat_frames: int = 1,
+        step_lat_frames: int = 2,
+        stochastic: float = 0.0,
+        wm_radius: float = 0.35,
     ):
         self.manifest = manifest
-        self.width = (width // 32) * 32
-        self.height = (height // 32) * 32
+        self.width = max(256, (width // 32) * 32)
+        self.height = max(192, (height // 32) * 32)
         self.monochrome = bool(monochrome)
 
         self.game_mode = game_mode
-        self.steps = max(12, int(steps))
+        self.steps = max(2, int(steps))
         self.cfg_scale = float(cfg_scale)
         self.base_seed = int(seed)
         self.battle_server_port = int(battle_server_port)
         self.force_local = bool(force_local)
+
+        self.context_lat_frames = max(1, int(context_lat_frames))
+        self.step_lat_frames = max(1, int(step_lat_frames))
+        self.stochastic = float(np.clip(stochastic, 0.0, 1.0))
+        self.wm_radius = float(np.clip(wm_radius, 0.0, 1.0))
 
         self.curr_idx = 0
         self.block_idx = 0
@@ -71,41 +82,84 @@ class UniversalLatentAutobattlerEngine:
         self.source_mode_overrides: dict[str, str] = {}
 
         self.local_genesis_5d: torch.Tensor | None = None
-        self.local_last_clean_latent_1frame: torch.Tensor | None = None
+        self.local_context_latents_5d: torch.Tensor | None = None
 
-        self.server_conn = None
         self.backend = None
-        self.referee = None
-        self.stepper = None
-
         if not self.force_local and self.battle_server_port > 0:
             try:
                 conn = Client(("localhost", self.battle_server_port), authkey=b"battle_ltx")
                 conn.send({"cmd": "ping"})
                 ping_resp = conn.recv()
                 if isinstance(ping_resp, dict) and ping_resp.get("status") == "ok":
-                    self.server_conn = conn
-                    print(f"⚡ [ENGINE] Подключено к neuro_battle_server (localhost:{self.battle_server_port}).")
+                    self.backend = RemoteLTXModelBackend(conn=conn, ping_info=ping_resp)
+                    print(
+                        f"⚡ [ENGINE] Подключено к серверу весов (localhost:{self.battle_server_port}). "
+                        f"Режим: {self.width}x{self.height}, steps={self.steps}, cfg={self.cfg_scale:.1f}, "
+                        f"stoch={self.stochastic:.2f}, wm_rad={self.wm_radius:.2f}, "
+                        f"ctx_lat={self.context_lat_frames}, step_lat={self.step_lat_frames}"
+                    )
             except Exception:
-                self.server_conn = None
+                self.backend = None
 
-        if self.server_conn is None:
+        if self.backend is None:
             print("ℹ️ [ENGINE] Запуск локального LTX-Video в VRAM...")
-            from neuro_ltx_backend import LTXModelBackend
-            from neuro_referee import CoordinateFreeHistoryReferee
-            from neuro_solver_stepper import LatentFlowWindowStepper
-
             self.backend = LTXModelBackend()
-            self.device = self.backend.device
-            self.dtype = self.backend.dtype
-            self.referee = CoordinateFreeHistoryReferee(self.backend.transformer, self.device, self.dtype)
-            self.stepper = LatentFlowWindowStepper(
-                backend=self.backend,
-                referee=self.referee,
-                steps=self.steps,
-                cfg_scale=self.cfg_scale,
-                guidance_rescale=0.7,
-            )
+
+        self.device = self.backend.device
+        self.dtype = self.backend.dtype
+        self.referee = CoordinateFreeHistoryReferee(self.backend.transformer, self.device, self.dtype)
+        self.stepper = LatentFlowWindowStepper(
+            backend=self.backend,
+            referee=self.referee,
+            steps=self.steps,
+            cfg_scale=self.cfg_scale,
+            guidance_rescale=0.7,
+        )
+
+        self._warmup_manifest_semantics()
+
+    @torch.no_grad()
+    def _warmup_manifest_semantics(self):
+        t0 = time.perf_counter()
+        prompts_to_warm = set()
+        prompts_to_warm.add(self.manifest.negative_desc)
+        prompts_to_warm.add(self.manifest.static_hold_desc)
+
+        arch_sentences: dict[str, str] = {}
+        for aid, arch in self.manifest.archetypes.items():
+            sentence = f"{arch.essence_desc} {arch.action_desc}".strip()
+            if sentence and not sentence.endswith("."):
+                sentence += "."
+            arch_sentences[aid] = sentence
+            probe_p = f"{self.manifest.arena_context_desc}. {sentence}".strip()
+            prompts_to_warm.add(probe_p)
+
+        for st in self.manifest.stages:
+            prompts_to_warm.add(f"{self.manifest.arena_context_desc}. {st.quest.ongoing_hypothesis}")
+            prompts_to_warm.add(f"{self.manifest.arena_context_desc}. {st.quest.completed_hypothesis}")
+            if st.quest.failed_hypothesis:
+                prompts_to_warm.add(f"{self.manifest.arena_context_desc}. {st.quest.failed_hypothesis}")
+
+            cat_i = st.quest.catalyst_slot_idx
+            sub_i = st.quest.active_slot_idx
+            if 0 <= cat_i < len(st.entities) and 0 <= sub_i < len(st.entities):
+                cat_pool = st.entities[cat_i].allowed_pool or list(arch_sentences.keys())
+                sub_pool = st.entities[sub_i].allowed_pool or list(arch_sentences.keys())
+                for c_id in cat_pool:
+                    for s_id in sub_pool:
+                        s_cat = arch_sentences.get(c_id, "")
+                        s_sub = arch_sentences.get(s_id, "")
+                        non_empty = [x for x in (s_cat, s_sub) if x]
+                        scene_p = f"{self.manifest.arena_context_desc}." + (" " + " ".join(non_empty) if non_empty else "")
+                        prompts_to_warm.add(scene_p)
+
+        print(f"🔥 [T5 WARMUP] Предвычисление {len(prompts_to_warm)} полных сцен и зондов T5 (один раз)...", flush=True)
+        for p in prompts_to_warm:
+            self.backend.encode_semantics(p, max_len=128)
+        if hasattr(self.backend, "offload_t5_to_cpu"):
+            self.backend.offload_t5_to_cpu()
+        dt = time.perf_counter() - t0
+        print(f"✅ [T5 WARMUP] Готово за {dt:.1f}с! T5 выгружен из VRAM, в цикле 0.0 мс на T5!", flush=True)
 
     def set_entity_source(self, slot_id: str, source_mode: str):
         self.source_mode_overrides[slot_id] = source_mode
@@ -130,10 +184,16 @@ class UniversalLatentAutobattlerEngine:
         binding = self._get_effective_binding(slot, idx)
         if slot_key not in self.entity_controllers:
             self.entity_controllers[slot_key] = SymmetricBotController(
-                slot_key, self.manifest.archetypes, source_mode=binding
+                slot_key,
+                self.manifest.archetypes,
+                source_mode=binding,
+                stochastic=self.stochastic,
+                wm_radius=self.wm_radius,
             )
         ctrl = self.entity_controllers[slot_key]
         ctrl.source_mode = binding
+        ctrl.stochastic = self.stochastic
+        ctrl.wm_radius = self.wm_radius
         ctrl.attempt_num = self.block_idx + 1
         return ctrl
 
@@ -151,11 +211,15 @@ class UniversalLatentAutobattlerEngine:
             for aid in pool_ids:
                 arch = self.manifest.archetypes.get(aid)
                 if arch:
+                    sentence = f"{arch.essence_desc} {arch.action_desc}".strip()
+                    if sentence and not sentence.endswith("."):
+                        sentence += "."
+                    probe_p = f"{self.manifest.arena_context_desc}. {sentence}".strip()
                     slot_candidates.append({
                         "state_id": aid,
                         "display_name": arch.display_name,
-                        "probe_prompt": f"{self.manifest.arena_context_desc}. {arch.essence_desc} {arch.action_desc}.",
-                        "scene_sentence": f"{arch.essence_desc} {arch.action_desc}.",
+                        "probe_prompt": probe_p,
+                        "scene_sentence": sentence,
                     })
             pool_payload.append(slot_candidates)
         return pool_payload, curr_states
@@ -174,7 +238,9 @@ class UniversalLatentAutobattlerEngine:
         return branches
 
     @torch.no_grad()
-    def execute_turn_step(self) -> tuple[list[np.ndarray], float, float, str, dict]:
+    def execute_turn_step(
+        self,
+    ) -> tuple[list[np.ndarray], list[LatentIdentityFrameTelemetry], float, float, str, dict]:
         t0 = time.perf_counter()
         stage = self.manifest.stages[self.curr_idx]
         n_ents = max(1, len(stage.entities))
@@ -192,11 +258,10 @@ class UniversalLatentAutobattlerEngine:
         reset_stage_stream = self.need_hard_genesis
         self.need_hard_genesis = False
 
-        scene_prompt, walk_in_prompt, start_probes, target_probes, matchup_tag = compose_entity_semantics(
+        _, walk_in_prompt, _, _, _ = compose_entity_semantics(
             self.active_entity_parties, self.manifest, stage=stage
         )
 
-        entity_bindings = [self._get_effective_binding(slot, idx_s) for idx_s, slot in enumerate(stage.entities)]
         entity_pool_candidates, entity_current_states = self._build_pool_candidates_payload(stage)
         candidate_branch_specs = self._build_candidate_branches_payload()
 
@@ -208,215 +273,192 @@ class UniversalLatentAutobattlerEngine:
             else ""
         )
 
-        step_seed = (
-            self.base_seed
-            + stage.global_stage * 1009
-            + self.block_idx * 53
-        ) % 2147483647
+        if self.stochastic <= 0.001:
+            step_seed = (self.base_seed + stage.global_stage * 1009) % 2147483647
+        else:
+            step_seed = (
+                self.base_seed
+                + stage.global_stage * 1009
+                + int(self.block_idx * 53 * self.stochastic)
+            ) % 2147483647
         spin_seed = self.base_seed + stage.global_stage
 
-        if self.server_conn is not None:
-            req = {
-                "cmd": "execute_battle_window",
-                "global_stage": stage.global_stage,
-                "reset_stage_stream": reset_stage_stream,
-                "maneuver_phase": self.maneuver_phase,
-                "block_idx": self.block_idx,
-                "unit_probe_cmds": target_probes,
-                "entity_bindings": entity_bindings,
-                "entity_pool_candidates": entity_pool_candidates,
-                "entity_current_states": entity_current_states,
-                "candidate_branch_specs": candidate_branch_specs,
-                "arena_context_desc": self.manifest.arena_context_desc,
-                "ongoing_hyp": ongoing_hyp,
-                "completed_hyp": completed_hyp,
-                "failed_hyp": failed_hyp,
-                "completion_gain": stage.quest.completion_gain,
-                "entropy_drain": stage.quest.entropy_drain,
-                "active_slot_idx": stage.quest.active_slot_idx,
-                "catalyst_slot_idx": stage.quest.catalyst_slot_idx,
-                "driver_tag": stage.quest.driver_tag,
-                "init_entity_transitions": self.entity_transitions,
-                "init_entity_coherences": self.entity_coherences,
-                "init_quest_progress": self.quest_progress_pct,
-                "walk_in_prompt": walk_in_prompt,
-                "scene_prompt": scene_prompt,
-                "negative_desc": self.manifest.negative_desc,
-                "static_hold_desc": self.manifest.static_hold_desc,
-                "width": self.width,
-                "height": self.height,
-                "steps": self.steps,
-                "cfg_scale": self.cfg_scale,
-                "step_seed": step_seed,
-                "spin_seed": spin_seed,
-                "matchup_tag": matchup_tag,
-            }
-            self.server_conn.send(req)
-            resp = self.server_conn.recv()
-            full_video_frames = resp["full_video_frames"]
-            dom_ratio = float(resp["dom_ratio"])
-            traj = resp["traj"]
-            high_dim_ctx = resp["high_dim_ctx"].from_ipc_safe()
-            scene_prompt = resp.get("scene_prompt", scene_prompt)
-            matchup_tag = resp.get("matchup_tag", matchup_tag)
+        h_lat = self.height // self.backend.spatial_ratio
+        w_lat = self.width // self.backend.spatial_ratio
+
+        if reset_stage_stream or self.local_context_latents_5d is None:
+            anchor_latent = None
+            is_cont = False
+            total_lat_frames = max(3, self.context_lat_frames + self.step_lat_frames)
         else:
-            from neuro_solver_stepper import imprint_allegiance_spin
+            anchor_latent = self.local_context_latents_5d[:, :, -self.context_lat_frames:].clone()
+            is_cont = True
+            total_lat_frames = anchor_latent.shape[2] + self.step_lat_frames
 
-            h_lat = self.height // self.backend.spatial_ratio
-            w_lat = self.width // self.backend.spatial_ratio
-            total_lat_frames = 5
+        steered_probe_pairs: list[tuple[torch.Tensor, torch.Tensor]] = [None] * n_ents  # type: ignore
+        entity_choice_distributions: list[dict[str, float]] = [{} for _ in range(n_ents)]
+        dynamic_state_labels: list[str] = ["" for _ in range(n_ents)]
+        chosen_sentences: list[str] = []
 
-            if reset_stage_stream or self.local_last_clean_latent_1frame is None:
-                anchor_latent = None
-                is_cont = False
+        catalyst_field_128x4096: torch.Tensor | None = None
+        eval_order = [i for i in range(n_ents) if i != stage.quest.active_slot_idx] + (
+            [stage.quest.active_slot_idx] if 0 <= stage.quest.active_slot_idx < n_ents else []
+        )
+
+        for idx_e in eval_order:
+            slot = stage.entities[idx_e]
+            ctrl = self._get_controller(slot, idx_e)
+            pool_items = entity_pool_candidates[idx_e]
+            cur_st_id = entity_current_states[idx_e]
+            pool_ids = [item["state_id"] for item in pool_items]
+            pool_prompts = [item["probe_prompt"] for item in pool_items]
+            pool_sents = {item["state_id"]: item["scene_sentence"] for item in pool_items}
+
+            enc_pairs = [self.backend.encode_semantics(p, max_len=128) for p in pool_prompts]
+            bank_K = torch.cat([ep[0] for ep in enc_pairs], dim=0)
+            masks_K = [ep[1] for ep in enc_pairs]
+
+            ext_cat = catalyst_field_128x4096 if idx_e == stage.quest.active_slot_idx else None
+
+            start_id, target_id, steered_emb, probs_dict = ctrl.select_concept_full_rank_524288d(
+                pool_ids=pool_ids,
+                candidate_embeds_Kx128x4096=bank_K,
+                device=self.device,
+                current_state_id=cur_st_id,
+                catalyst_field_128x4096=ext_cat,
+            )
+            t_idx = pool_ids.index(target_id) if target_id in pool_ids else 0
+            steered_probe_pairs[idx_e] = (steered_emb.to(self.dtype), masks_K[t_idx])
+            entity_choice_distributions[idx_e] = probs_dict
+
+            if idx_e == stage.quest.catalyst_slot_idx:
+                catalyst_field_128x4096 = steered_emb[0].detach().float()
+                dynamic_state_labels[idx_e] = f"e{idx_e}:{target_id}[CAT]"
+                chosen_sentences.insert(0, pool_sents.get(target_id, ""))
+            elif idx_e == stage.quest.active_slot_idx:
+                dynamic_state_labels[idx_e] = f"e{idx_e}:{start_id}->{target_id}"
+                chosen_sentences.append(pool_sents.get(target_id, ""))
             else:
-                anchor_latent = self.local_last_clean_latent_1frame.clone()
-                is_cont = True
+                dynamic_state_labels[idx_e] = f"e{idx_e}:{target_id}[HOLD]"
 
-            steered_probe_pairs = []
-            entity_choice_distributions = []
-            dynamic_state_labels = []
-            chosen_sentences = []
+        non_empty = [s for s in chosen_sentences if s]
+        scene_prompt = f"{self.manifest.arena_context_desc}." + (" " + " ".join(non_empty) if non_empty else "")
+        matchup_tag = " | ".join(dynamic_state_labels)
 
-            for idx_e, slot in enumerate(stage.entities):
-                ctrl = self._get_controller(slot, idx_e)
-                pool_items = entity_pool_candidates[idx_e]
-                cur_st_id = entity_current_states[idx_e]
-                pool_ids = [item["state_id"] for item in pool_items]
-                pool_prompts = [item["probe_prompt"] for item in pool_items]
-                pool_sents = {item["state_id"]: item["scene_sentence"] for item in pool_items}
+        pos_emb, pos_mask = self.backend.encode_semantics(scene_prompt, max_len=128)
+        walk_in_emb, walk_in_mask = pos_emb, pos_mask
+        neg_emb, neg_mask = self.backend.encode_semantics(self.manifest.negative_desc, max_len=128)
+        passive_pair = self.backend.encode_semantics(self.manifest.static_hold_desc, max_len=128)
+        ongoing_pair = self.backend.encode_semantics(ongoing_hyp, max_len=128)
+        completed_pair = self.backend.encode_semantics(completed_hyp, max_len=128)
+        failed_pair = self.backend.encode_semantics(failed_hyp, max_len=128) if failed_hyp else None
 
-                enc_pairs = [self.backend.encode_semantics(p, max_len=128) for p in pool_prompts]
-                bank_K = torch.cat([ep[0] for ep in enc_pairs], dim=0)
-                masks_K = [ep[1] for ep in enc_pairs]
+        drv_idx = (
+            stage.quest.catalyst_slot_idx
+            if 0 <= stage.quest.catalyst_slot_idx < len(stage.entities)
+            else stage.quest.active_slot_idx
+        )
+        drv_ctrl = self._get_controller(stage.entities[drv_idx], drv_idx)
+        steered_pos_emb = drv_ctrl.steer_semantic_probe_full_rank(pos_emb, device=self.device).to(self.dtype)
 
-                start_id, target_id, steered_emb, probs_dict = ctrl.select_concept_full_rank_524288d(
-                    pool_ids=pool_ids,
-                    candidate_embeds_Kx128x4096=bank_K,
-                    device=self.device,
-                    current_state_id=cur_st_id,
-                )
-                t_idx = pool_ids.index(target_id) if target_id in pool_ids else 0
-                steered_probe_pairs.append((steered_emb.to(self.dtype), masks_K[t_idx]))
-                entity_choice_distributions.append(probs_dict)
+        # Собираем полноранговое 19,200-D поле рабочей памяти активной пары (Catalyst + Substrate)
+        # для прямого вращения латентной сферы S^3:
+        sub_ctrl = self._get_controller(stage.entities[stage.quest.active_slot_idx], stage.quest.active_slot_idx)
+        wm_cat_vec = drv_ctrl.latest_region_wm_19200
+        wm_sub_vec = sub_ctrl.latest_region_wm_19200
+        if wm_cat_vec is not None and wm_sub_vec is not None:
+            combined_wm_19200 = wm_cat_vec * 0.55 + wm_sub_vec * 0.45
+        else:
+            combined_wm_19200 = wm_cat_vec if wm_cat_vec is not None else wm_sub_vec
 
-                if idx_e == stage.quest.active_slot_idx:
-                    dynamic_state_labels.append(f"e{idx_e}:{start_id}->{target_id}")
-                    chosen_sentences.append(pool_sents.get(target_id, ""))
-                elif idx_e == stage.quest.catalyst_slot_idx:
-                    top_cat_id = max(probs_dict, key=probs_dict.get) if probs_dict else start_id
-                    dynamic_state_labels.append(f"e{idx_e}:{top_cat_id}[CAT]")
-                    chosen_sentences.insert(0, pool_sents.get(top_cat_id, ""))
-                else:
-                    top_hold_id = max(probs_dict, key=probs_dict.get) if probs_dict else start_id
-                    dynamic_state_labels.append(f"e{idx_e}:{top_hold_id}[HOLD]")
+        gen = torch.Generator(device=self.device).manual_seed(step_seed)
+        rope_scale = (
+            self.backend.temporal_ratio / 16.0,
+            float(self.backend.spatial_ratio),
+            float(self.backend.spatial_ratio),
+        )
 
-            if chosen_sentences:
-                scene_prompt = f"{self.manifest.arena_context_desc}. " + " ".join([s for s in chosen_sentences if s])
-            matchup_tag = " | ".join(dynamic_state_labels)
+        self.stepper.steps = self.steps
+        self.stepper.cfg_scale = self.cfg_scale
 
-            walk_in_emb, walk_in_mask = self.backend.encode_semantics(walk_in_prompt, max_len=128)
-            pos_emb, pos_mask = self.backend.encode_semantics(scene_prompt, max_len=128)
-            neg_emb, neg_mask = self.backend.encode_semantics(self.manifest.negative_desc, max_len=128)
-            passive_pair = self.backend.encode_semantics(self.manifest.static_hold_desc, max_len=128)
-            ongoing_pair = self.backend.encode_semantics(ongoing_hyp, max_len=128)
-            completed_pair = self.backend.encode_semantics(completed_hyp, max_len=128)
-            failed_pair = self.backend.encode_semantics(failed_hyp, max_len=128) if failed_hyp else None
+        unpacked_z0, dom_ratio = self.stepper.run_window(
+            anchor_latent_0=anchor_latent,
+            genesis_ref_latent_5d=self.local_genesis_5d,
+            walk_in_emb=walk_in_emb,
+            walk_in_mask=walk_in_mask,
+            pos_emb=steered_pos_emb,
+            pos_mask=pos_mask,
+            neg_emb=neg_emb,
+            neg_mask=neg_mask,
+            entity_probes=steered_probe_pairs,
+            passive_emb=passive_pair[0],
+            passive_mask=passive_pair[1],
+            total_lat_frames=total_lat_frames,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            gen=gen,
+            is_continuation_block=is_cont,
+            stochastic=self.stochastic,
+            wm_radius=self.wm_radius,
+            base_seed=spin_seed,
+            wm_19200_vec=combined_wm_19200,
+        )
 
-            drv_idx = (
-                stage.quest.catalyst_slot_idx
-                if 0 <= stage.quest.catalyst_slot_idx < len(stage.entities)
-                else stage.quest.active_slot_idx
-            )
-            drv_ctrl = self._get_controller(stage.entities[drv_idx], drv_idx)
-            steered_pos_emb = drv_ctrl.steer_semantic_probe_full_rank(pos_emb, device=self.device).to(self.dtype)
+        self.local_context_latents_5d = unpacked_z0[:, :, -self.context_lat_frames:].detach().clone()
 
-            gen = torch.Generator(device=self.device).manual_seed(step_seed)
-            rope_scale = (
-                self.backend.temporal_ratio / 16.0,
-                float(self.backend.spatial_ratio),
-                float(self.backend.spatial_ratio),
-            )
+        if not is_cont:
+            unpacked_z0 = imprint_allegiance_spin(unpacked_z0, base_seed=spin_seed)
+            self.local_genesis_5d = unpacked_z0[:, :, :2].detach().clone()
+            clean_video_frames = self.backend.decode_latents_chunk(unpacked_z0, generator=gen)
+            eval_lat = unpacked_z0
+        else:
+            n_vae_ctx = min(1, unpacked_z0.shape[2] - self.step_lat_frames)
+            decode_window_lat = n_vae_ctx + self.step_lat_frames
+            decoded_chunk = self.backend.decode_latents_chunk(unpacked_z0[:, :, -decode_window_lat:], generator=gen)
+            n_new_px = self.step_lat_frames * int(self.backend.temporal_ratio)
+            clean_video_frames = decoded_chunk[-n_new_px:] if len(decoded_chunk) > n_new_px else decoded_chunk[1:]
+            eval_lat = unpacked_z0[:, :, -self.step_lat_frames:]
 
-            unpacked_z0, dom_ratio = self.stepper.run_window(
-                anchor_latent_0=anchor_latent,
-                genesis_ref_latent_5d=self.local_genesis_5d,
-                walk_in_emb=walk_in_emb,
-                walk_in_mask=walk_in_mask,
-                pos_emb=steered_pos_emb,
-                pos_mask=pos_mask,
-                neg_emb=neg_emb,
-                neg_mask=neg_mask,
-                entity_probes=steered_probe_pairs,
-                passive_emb=passive_pair[0],
-                passive_mask=passive_pair[1],
-                total_lat_frames=total_lat_frames,
-                h_lat=h_lat,
-                w_lat=w_lat,
-                gen=gen,
-                is_continuation_block=is_cont,
-            )
+        if self.monochrome:
+            clean_video_frames = [
+                cv2.cvtColor(cv2.cvtColor(f, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
+                for f in clean_video_frames
+            ]
 
-            self.local_last_clean_latent_1frame = unpacked_z0[:, :, -1:].detach().clone()
-
-            if not is_cont:
-                unpacked_z0 = imprint_allegiance_spin(unpacked_z0, base_seed=spin_seed)
-                self.local_genesis_5d = unpacked_z0[:, :, :2].detach().clone()
-                full_video_frames = self.backend.decode_latents_chunk(unpacked_z0, generator=gen)
-                eval_lat = unpacked_z0
-            else:
-                decoded_all = self.backend.decode_latents_chunk(unpacked_z0, generator=gen)
-                full_video_frames = decoded_all[1:] if len(decoded_all) > 1 else decoded_all
-                eval_lat = unpacked_z0[:, :, 1:]
-
-            traj, high_dim_ctx = self.referee.evaluate_generative_quest_and_entities(
-                unpacked_latents_5d=eval_lat,
-                origin_anchor_5d=self.local_genesis_5d,
-                entity_probe_embeds_list=steered_probe_pairs,
-                ongoing_hyp_embeds=ongoing_pair,
-                completed_hyp_embeds=completed_pair,
-                failed_hyp_embeds=failed_pair,
-                passive_void_embeds=passive_pair,
-                rope_scale=rope_scale,
-                total_video_frames=len(full_video_frames),
-                matchup_tag=matchup_tag,
-                dom_ratio=dom_ratio,
-                gen=gen,
-                init_entity_coherences=self.entity_coherences,
-                init_quest_progress=self.quest_progress_pct,
-                completion_gain=stage.quest.completion_gain,
-                entropy_drain=stage.quest.entropy_drain,
-                maneuver_phase=self.maneuver_phase,
-                active_slot_idx=stage.quest.active_slot_idx,
-                catalyst_slot_idx=stage.quest.catalyst_slot_idx,
-                driver_tag=stage.quest.driver_tag,
-                entity_state_labels=dynamic_state_labels,
-                init_entity_transitions=self.entity_transitions,
-                entity_choice_distributions=entity_choice_distributions,
-                candidate_branch_specs=candidate_branch_specs,
-            )
+        traj, high_dim_ctx = self.referee.evaluate_generative_quest_and_entities(
+            unpacked_latents_5d=eval_lat,
+            origin_anchor_5d=anchor_latent if anchor_latent is not None else self.local_genesis_5d,
+            entity_probe_embeds_list=steered_probe_pairs,
+            ongoing_hyp_embeds=ongoing_pair,
+            completed_hyp_embeds=completed_pair,
+            failed_hyp_embeds=failed_pair,
+            passive_void_embeds=passive_pair,
+            rope_scale=rope_scale,
+            total_video_frames=len(clean_video_frames),
+            matchup_tag=matchup_tag,
+            dom_ratio=dom_ratio,
+            gen=gen,
+            init_entity_coherences=self.entity_coherences,
+            init_quest_progress=self.quest_progress_pct,
+            completion_gain=stage.quest.completion_gain,
+            entropy_drain=stage.quest.entropy_drain,
+            maneuver_phase=self.maneuver_phase,
+            active_slot_idx=stage.quest.active_slot_idx,
+            catalyst_slot_idx=stage.quest.catalyst_slot_idx,
+            driver_tag=stage.quest.driver_tag,
+            entity_state_labels=dynamic_state_labels,
+            init_entity_transitions=self.entity_transitions,
+            entity_choice_distributions=entity_choice_distributions,
+            candidate_branch_specs=candidate_branch_specs,
+            last_velocity_5d=self.stepper.last_velocity_5d,
+        )
 
         fin = traj[-1]
         self.entity_coherences = list(fin.entity_coherences)
         self.entity_transitions = list(fin.entity_transition_pcts)
         self.quest_progress_pct = float(fin.quest_progress_pct)
 
-        annotated_frames = [
-            draw_identity_hud(
-                rgb,
-                traj,
-                idx,
-                stage,
-                self.active_entity_parties,
-                self.manifest,
-                self.maneuver_phase + 1,
-                self.game_mode,
-                monochrome=self.monochrome,
-            )
-            for idx, rgb in enumerate(full_video_frames)
-        ]
-
-        dur_s = len(annotated_frames) / 16.0
+        dur_s = len(clean_video_frames) / 16.0
         quest_completed = (self.quest_progress_pct >= 95.0)
         act_coh = (
             self.entity_coherences[stage.quest.active_slot_idx]
@@ -435,16 +477,15 @@ class UniversalLatentAutobattlerEngine:
         else:
             self.maneuver_phase = 0
             if quest_completed:
-                # Фиксируем новое выбранное состояние расходника в глобальной памяти мира:
-                sub_idx = stage.quest.active_slot_idx
-                if sub_idx < len(high_dim_ctx.entity_state_labels):
-                    lbl = high_dim_ctx.entity_state_labels[sub_idx]
-                    if "->" in lbl:
-                        new_st = lbl.split("->", 1)[1].strip()
-                        s_key = stage.entities[sub_idx].slot_id or f"e{sub_idx}"
-                        self.persistent_entity_states[s_key] = new_st
+                for idx_s, slot_s in enumerate(stage.entities):
+                    s_key = slot_s.slot_id or f"e{idx_s}"
+                    if idx_s < len(high_dim_ctx.entity_state_labels):
+                        lbl = high_dim_ctx.entity_state_labels[idx_s]
+                        if "->" in lbl:
+                            self.persistent_entity_states[s_key] = lbl.split("->", 1)[1].strip()
+                        elif ":" in lbl and "[" in lbl:
+                            self.persistent_entity_states[s_key] = lbl.split(":", 1)[1].split("[", 1)[0].strip()
 
-                # Выбираем следующую ветку реакции НЕ по рельсам, а по победителю 128D-конкуренции ветвей:
                 if 0 <= high_dim_ctx.chosen_next_stage_idx < len(self.manifest.stages):
                     next_idx = high_dim_ctx.chosen_next_stage_idx
                 else:
@@ -462,13 +503,12 @@ class UniversalLatentAutobattlerEngine:
                 decision_log = f"REACTION RESET: Progress={self.quest_progress_pct:.1f}%"
 
         t_start = self.total_rendered_frames / 16.0
-        self.total_rendered_frames += len(annotated_frames)
+        self.total_rendered_frames += len(clean_video_frames)
         t_end = self.total_rendered_frames / 16.0
         self.block_idx += 1
         gen_ms = round((time.perf_counter() - t0) * 1000.0, 1)
-        fps = len(annotated_frames) / max(0.001, gen_ms / 1000.0)
+        fps = len(clean_video_frames) / max(0.001, gen_ms / 1000.0)
 
-        # Полный дебаг всех сделанных и отвергнутых выборов каждого агента в телеметрию:
         per_entity_choice_debug = {}
         for idx_c, c_dist in enumerate(high_dim_ctx.entity_choice_distributions):
             s_id = stage.entities[idx_c].slot_id if idx_c < len(stage.entities) else f"e{idx_c}"
@@ -482,7 +522,7 @@ class UniversalLatentAutobattlerEngine:
         telemetry_record = {
             "step": self.block_idx,
             "t": f"{t_start:.1f}-{t_end:.1f}",
-            "duration_sec": round(dur_s, 1),
+            "duration_sec": round(dur_s, 2),
             "global_stage": stage.global_stage,
             "stage_title": stage.stage_title,
             "reaction_formula": stage.quest.reaction_formula,
@@ -510,8 +550,8 @@ class UniversalLatentAutobattlerEngine:
             "prompt": scene_prompt,
         }
 
-        gc.collect()
-        torch.cuda.empty_cache()
+        if self.block_idx % 20 == 0:
+            gc.collect()
 
         info_tag = f"[S{stage.global_stage} {stage.quest.driver_tag} | {dur_s:.1f}s] {decision_log}"
-        return annotated_frames, gen_ms, fps, info_tag, telemetry_record
+        return clean_video_frames, traj, gen_ms, fps, info_tag, telemetry_record

@@ -1,0 +1,202 @@
+{
+  "world_name": "Mode_04_Forest_Fork_Neuro_Ritual_of_Initiation",
+  "arena_context_desc": "cinematic top-down view of a mystical ancient ritual forest clearing at night with glowing moss and dark obsidian roots",
+  "static_hold_desc": "still dark ancient forest clearing with motionless roots and silent moss",
+  "negative_desc": "gravel, sand, dirt, brown mud, blurry, noisy, text, watermark, box, cage, wireframe, modern buildings, cars, daytime glare",
+  "archetypes": {
+    "e0_s0": {
+      "element_tag": "FCz_LEFT_PATH",
+      "role_tag": "WM_SEEKER",
+      "display_name": "e0:Left-Lantern[S0]",
+      "essence_desc": "a glowing cyan-blue spirit lantern floating along the left fern trail",
+      "action_desc": "casts piercing sapphire light beams toward the left fork of the forest",
+      "defense_desc": "sapphire lantern ward",
+      "impact_effect_desc": "illuminating the left thicket"
+    },
+    "e0_s1": {
+      "element_tag": "FCz_CENTER_PATH",
+      "role_tag": "WM_SEEKER",
+      "display_name": "e0:Center-Torch[S1]",
+      "essence_desc": "a blazing golden ritual torch advancing straight down the central aisle",
+      "action_desc": "projects radiant solar rings straight ahead through the sacred grove",
+      "defense_desc": "golden fire aura",
+      "impact_effect_desc": "parting the central canopy"
+    },
+    "e0_s2": {
+      "element_tag": "FCz_RIGHT_PATH",
+      "role_tag": "WM_SEEKER",
+      "display_name": "e0:Right-Thurible[S2]",
+      "essence_desc": "a swinging crimson-violet ritual censer drifting toward the right root path",
+      "action_desc": "releases swirling magenta-gold incense waves into the right forest fork",
+      "defense_desc": "ritual incense veil",
+      "impact_effect_desc": "awakening the right grove"
+    },
+    "e1_s0": {
+      "element_tag": "AFz_THICKET",
+      "role_tag": "WM_FOREST",
+      "display_name": "e1:Emerald-Arch[S0]",
+      "essence_desc": "an overarching emerald-green canopy of giant bioluminescent ferns",
+      "action_desc": "parts its glowing green fronds to open a living archway in the woods",
+      "defense_desc": "interwoven fern vault",
+      "impact_effect_desc": "framing the forest stage"
+    },
+    "e1_s1": {
+      "element_tag": "AFz_SHRINE",
+      "role_tag": "WM_FOREST",
+      "display_name": "e1:Jade-Root-Circle[S1]",
+      "essence_desc": "a sacred amphitheater of intertwining jade-green glowing tree roots",
+      "action_desc": "unfurls luminous moss petals across the forest floor like a ritual mandala",
+      "defense_desc": "living root sanctuary",
+      "impact_effect_desc": "summoning the forest spirit"
+    },
+    "e1_s2": {
+      "element_tag": "AFz_COLONNADE",
+      "role_tag": "WM_FOREST",
+      "display_name": "e1:Amber-Sequoia-Hall[S2]",
+      "essence_desc": "a towering cathedral of ancient amber-gold tree trunks with glowing sap veins",
+      "action_desc": "resonates with concentric golden ripples through the woodland pillars",
+      "defense_desc": "ancient bark columns",
+      "impact_effect_desc": "channeling canopy light"
+    },
+    "e2_s0": {
+      "element_tag": "F3_TOTEM_STAG",
+      "role_tag": "WM_SPIRIT",
+      "display_name": "e2:Crystal-Stag[S0]",
+      "essence_desc": "a majestic translucent white-violet crystal stag spirit with branching antlers",
+      "action_desc": "steps into the clearing as its antlers refract golden-violet starlight",
+      "defense_desc": "crystalline antler crown",
+      "impact_effect_desc": "blessing the crossroads"
+    },
+    "e2_s1": {
+      "element_tag": "F3_TOTEM_MOTHS",
+      "role_tag": "WM_SPIRIT",
+      "display_name": "e2:Mask-Swarm[S1]",
+      "essence_desc": "a swirling chorus of luminescent amethyst-and-cyan ritual moth masks",
+      "action_desc": "dances in a hypnotic spiral around the clearing, folding space and shadows",
+      "defense_desc": "whirling mask chorus",
+      "impact_effect_desc": "transmuting the forest air"
+    },
+    "e2_s2": {
+      "element_tag": "F3_TOTEM_IDOL",
+      "role_tag": "WM_SPIRIT",
+      "display_name": "e2:Obsidian-Totem[S2]",
+      "essence_desc": "a carved magenta-gold obsidian totem monolith with glowing rune eyes",
+      "action_desc": "projects geometric forcefields of violet light across the mossy crossroads",
+      "defense_desc": "runic monolith ward",
+      "impact_effect_desc": "calling down the omen"
+    },
+    "e3_s3": {
+      "element_tag": "F4_OMEN_MIST",
+      "role_tag": "WM_OMEN",
+      "display_name": "e3:Silver-Vortex[S3]",
+      "essence_desc": "a swirling silver-cyan ritual mist vortex over a mirror-like forest pool",
+      "action_desc": "ripples with liquid starlight that reflects and transforms the seeker's flame",
+      "defense_desc": "mirror water eddy",
+      "impact_effect_desc": "cleansing the seeker"
+    },
+    "e3_s4": {
+      "element_tag": "F4_OMEN_STORM",
+      "role_tag": "WM_OMEN",
+      "display_name": "e3:Lightning-Font[S4]",
+      "essence_desc": "a crackling cobalt-gold ritual lightning font suspended above the roots",
+      "action_desc": "arcs with branching electric-gold tendrils that recharge the spirit lantern",
+      "defense_desc": "high-voltage corona",
+      "impact_effect_desc": "igniting new intent"
+    },
+    "e3_s5": {
+      "element_tag": "F4_OMEN_NOVA",
+      "role_tag": "WM_OMEN",
+      "display_name": "e3:Crimson-Eclipse[S5]",
+      "essence_desc": "a blazing ruby-and-gold astral eclipse ring hovering in the forest clearing",
+      "action_desc": "pulsates with ceremonial solar shockwaves thatrebirth the traveler's light",
+      "defense_desc": "astral eclipse halo",
+      "impact_effect_desc": "completing the initiation cycle"
+    }
+  },
+  "stages": [
+    {
+      "global_stage": 1,
+      "stage_title": "Act_I_The_Fork_Choice_Seeker_Parts_The_Forest",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_s0", "e0_s1", "e0_s2"]},
+        {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
+        {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
+        {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s3", "e3_s4", "e3_s5"]}
+      ],
+      "quest": {
+        "active_slot_idx": 1,
+        "catalyst_slot_idx": 0,
+        "driver_tag": "CAT(e0->e1)",
+        "reaction_formula": "e0[CAT:SEEKER] + e1[SUB:FOREST] --> e0[INV] + e1[PATH_OPENED]",
+        "ongoing_hypothesis": "the dark forest canopy stands closed before the floating ritual light at the crossroads",
+        "completed_hypothesis": "the ritual light illuminates the chosen fork and the glowing forest trees part into a luminous archway",
+        "failed_hypothesis": "the forest shadows swallow the trail",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    },
+    {
+      "global_stage": 2,
+      "stage_title": "Act_II_The_Awakening_Forest_Summons_Totem_Spirit",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_s0", "e0_s1", "e0_s2"]},
+        {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s1", "e1_s2", "e1_s0"]},
+        {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
+        {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s3", "e3_s4", "e3_s5"]}
+      ],
+      "quest": {
+        "active_slot_idx": 2,
+        "catalyst_slot_idx": 1,
+        "driver_tag": "CAT(e1->e2)",
+        "reaction_formula": "e1[CAT:FOREST] + e2[SUB:SPIRIT] --> e1[INV] + e2[SPIRIT_MANIFEST]",
+        "ongoing_hypothesis": "the glowing forest clearing is quiet as shadows gather near the roots",
+        "completed_hypothesis": "bioluminescent emerald and golden tree roots awaken a radiant crystal totem spirit in the center of the grove",
+        "failed_hypothesis": "the spirit dissolves into darkness",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    },
+    {
+      "global_stage": 3,
+      "stage_title": "Act_III_The_Invocation_Spirit_Calls_Elemental_Omen",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_s0", "e0_s1", "e0_s2"]},
+        {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s1", "e1_s2", "e1_s0"]},
+        {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s1", "e2_s2", "e2_s0"]},
+        {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s3", "e3_s4", "e3_s5"]}
+      ],
+      "quest": {
+        "active_slot_idx": 3,
+        "catalyst_slot_idx": 2,
+        "driver_tag": "CAT(e2->e3)",
+        "reaction_formula": "e2[CAT:SPIRIT] + e3[SUB:OMEN] --> e2[INV] + e3[OMEN_IGNITED]",
+        "ongoing_hypothesis": "the crystal totem spirit stands before the calm dark forest pool",
+        "completed_hypothesis": "violet-gold beams from the totem spirit ignite a swirling elemental omen of lightning and astral fire",
+        "failed_hypothesis": "the elemental omen fades into mist",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    },
+    {
+      "global_stage": 4,
+      "stage_title": "Act_IV_The_Initiation_Omen_Transmutes_The_Seeker",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_s0", "e0_s1", "e0_s2"]},
+        {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
+        {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
+        {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s4", "e3_s5", "e3_s3"]}
+      ],
+      "quest": {
+        "active_slot_idx": 0,
+        "catalyst_slot_idx": 3,
+        "driver_tag": "CAT(e3->e0)",
+        "reaction_formula": "e3[CAT:OMEN] + e0[SUB:SEEKER] --> e3[INV] + e0[SEEKER_REBORN]",
+        "ongoing_hypothesis": "the seeker's ritual light hovers before the surging elemental omen",
+        "completed_hypothesis": "the astral omen engulfs and transmutes the seeker's flame into a new radiant form for the next forest fork",
+        "failed_hypothesis": "the seeker's light is extinguished",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    }
+  ]
+}
