@@ -3,17 +3,10 @@
 ===================================================================================
 neuro_run.py — Единый 3D-DiT Видео-Модуль для Веб-Студии (:8080) и Локального Окна
 ===================================================================================
-- ПОЛНОСТЬЮ ЗАМЕНЯЕТ старый neuro_heterarchy_video.py в общем веб-стенде!
-- Подключается к web_cloud_gateway.py:
-  * Порт 6002 (authkey=b'canvas')     -> Плавный 16 FPS MJPEG видеопоток в браузер
-  * Порт 6007 (authkey=b'video_ctrl') -> Двусторонняя синхронизация с веб-панелью:
-    - Живая регулировка ползунков: Радиус концепта (wm_radius), Стохастика (stochastic),
-      Шаги DiT (steps), Контекст (context_latents), Блок кадров (step_latents), Сброс (reset_genesis).
-    - Живой Редактор Лора прямо из браузера: добавление/удаление концептов в регионы
-      [FCZ], [AFZ], [F3], [F4], [FPZ], [NEGATIVE] на лету перестраивает архетипы и пулы агентов!
-    - Переключение любых .json манифестов и .txt лор-файлов из выпадающего списка в браузере.
-- Пишет УЛЬТРА-КОМПАКТНЫЙ лог (telemetry_compact.jsonl, ~140 байт/строка), который легко
-  скопировать и прислать в чат для дебага!
+- Запускает фоновый 60 Гц LSL->VRAM конвейер (SharedAmodalCognitiveEngine + SelfSufficientHeterarchyRouter),
+  чтобы любая подключенная в браузере BLE-плата FreeEEG16 мгновенно (каждые 16 мс!) обновляла
+  96,000-D шину рабочей памяти HardwareVRAMBus прямо во время шагов денойзинга 3D-DiT!
+- Двусторонняя синхронизация с web_cloud_gateway.py (порт 6002 видео + порт 6007 управление и BLE-маппинг).
 ===================================================================================
 """
 
@@ -35,13 +28,21 @@ from neuro_world import (
     StageSpec,
     GameWorldManifest,
     ArchetypeSpec,
-    StageEntitySlot,
-    GenerativeQuestSpec,
 )
 from neuro_engine import UniversalLatentAutobattlerEngine
 from neuro_clash_hud import draw_identity_hud
 from neuro_referee import LatentIdentityFrameTelemetry
 from neuro_recorder import recorder_instance
+
+try:
+    from neuro_amodal_engine import (
+        SharedAmodalCognitiveEngine,
+        SelfSufficientHeterarchyRouter,
+        EXTENDED_ROLE_TO_FUNCTIONAL,
+    )
+    HAS_AMODAL_LSL_ENGINE = True
+except ImportError:
+    HAS_AMODAL_LSL_ENGINE = False
 
 MODE_TO_MANIFEST = {
     "walk": [
@@ -70,8 +71,13 @@ MODE_TO_MANIFEST = {
     ],
 }
 
-REGION_TO_SLOT_IDX = {"FCZ": 0, "AFZ": 1, "F3": 2, "F4": 3, "FPZ": 4}
-SLOT_IDX_TO_REGION = {0: "FCZ", 1: "AFZ", 2: "F3", 3: "F4", 4: "FPZ"}
+ROLE_TO_ENTITY_SLOT = {
+    "FCz": "e0",
+    "AFz": "e1",
+    "F3":  "e2",
+    "F4":  "e3",
+    "Fpz": "e0",
+}
 
 
 def resolve_manifest_path(mode: str | None, manifest_arg: str) -> str:
@@ -99,7 +105,7 @@ def manifest_to_web_sections(manifest: GameWorldManifest) -> dict[str, list[str]
 
     if manifest.stages:
         st0 = manifest.stages[0]
-        for idx, slot in enumerate(st0.entities):
+        for slot in st0.entities:
             reg_key = "FCZ"
             b_up = slot.control_binding.upper()
             for r_k in ("FCZ", "AFZ", "F3", "F4", "FPZ"):
@@ -125,7 +131,10 @@ def apply_web_sections_to_manifest(manifest: GameWorldManifest, sections: dict[s
         manifest.negative_desc = ", ".join(neg_list)
 
     fpz_list = [s.strip() for s in sections.get("FPZ", []) if s.strip()]
-    if fpz_list:
+    fcz_list = [s.strip() for s in sections.get("FCZ", []) if s.strip()]
+    if fpz_list and fpz_list == fcz_list:
+        manifest.arena_context_desc = ""
+    elif fpz_list:
         manifest.arena_context_desc = fpz_list[0].rstrip(".")
 
     for idx_s, reg_key in [(0, "FCZ"), (1, "AFZ"), (2, "F3"), (3, "F4")]:
@@ -150,7 +159,6 @@ def apply_web_sections_to_manifest(manifest: GameWorldManifest, sections: dict[s
 
 
 def build_compact_telemetry(telem: dict) -> dict:
-    """Сжимает телеметрию в 15 раз (~140 байт на строку), чтобы её легко было копировать в чат."""
     win_map = {}
     for k, v in telem.get("wm_524288d_choice_debug", {}).items():
         ch = v.get("chosen", {})
@@ -472,11 +480,44 @@ class SmoothRealtimeVideoPacer(threading.Thread):
                 time.sleep(target_dt - elapsed)
 
 
+def start_live_lsl_to_vram_bus_thread(pacer: SmoothRealtimeVideoPacer, users_arg: str = ""):
+    """
+    Запускает 60 Гц фоновый конвейер SharedAmodalCognitiveEngine, который принимает LSL-потоки
+    FreeEEG_<ID> от подключенных в браузере BLE-плат и непрерывно заполняет HardwareVRAMBus в GPU!
+    """
+    if not HAS_AMODAL_LSL_ENGINE:
+        return None, None
+
+    router = SelfSufficientHeterarchyRouter(users_arg)
+    amodal_engine = SharedAmodalCognitiveEngine(
+        router=router,
+        gamma_max=100.0,
+        strength_low=0.06,
+        strength_high=0.92,
+        cross_region_bleed=0.65,
+        monty_mode="off",
+    )
+
+    def _lsl_loop():
+        while pacer.running:
+            try:
+                amodal_engine.step(0.016)
+            except Exception:
+                pass
+            time.sleep(0.016)
+
+    threading.Thread(target=_lsl_loop, daemon=True).start()
+    print("🧠 [LIVE BLE/LSL -> VRAM BUS] 60 Гц конвейер рабочей памяти запущен! Любая BLE-плата из браузера сразу управляет 3D-DiT.")
+    return router, amodal_engine
+
+
 def start_web_studio_control_bridge(
     runner: UniversalLatentAutobattlerEngine,
     pacer: SmoothRealtimeVideoPacer,
     video_ctrl_port: int,
     initial_manifest_path: str,
+    router=None,
+    amodal_engine=None,
 ):
     ctrl_lock = threading.Lock()
     ctrl_conn = None
@@ -515,6 +556,8 @@ def start_web_studio_control_bridge(
                     cmd = msg.get("cmd")
                     if cmd == "update_video_config":
                         cfg = msg.get("config", {})
+                        if "monty_mode" in cfg and amodal_engine is not None:
+                            amodal_engine.set_monty_mode(str(cfg["monty_mode"]))
                         if "stochastic" in cfg:
                             runner.stochastic = float(np.clip(float(cfg["stochastic"]), 0.0, 1.0))
                         if "wm_radius" in cfg:
@@ -562,11 +605,20 @@ def start_web_studio_control_bridge(
                     elif cmd == "reset_genesis":
                         runner.need_hard_genesis = True
                         runner.maneuver_phase = 0
+                        if amodal_engine is not None:
+                            amodal_engine.reset_seals()
                         print("🔄 [WEB RESET] Сброс генезиса 3D-DiT по кнопке из браузера!")
                     elif cmd == "set_device_mapping":
+                        s_name = str(msg.get("stream_name", "")).strip()
                         r_val = str(msg.get("role", "FCz")).strip()
+                        u_val = str(msg.get("user", "User1")).strip()
+                        if router is not None and s_name:
+                            router.set_device_mapping(s_name, r_val, u_val)
                         if r_val and r_val.upper() not in ("NONE", "OFF", "UNASSIGNED"):
-                            runner.set_entity_source("e0", f"eeg:{r_val}")
+                            func_r = EXTENDED_ROLE_TO_FUNCTIONAL.get(r_val, "FCz") if HAS_AMODAL_LSL_ENGINE else r_val
+                            target_slot = ROLE_TO_ENTITY_SLOT.get(func_r, "e0")
+                            runner.set_entity_source(target_slot, f"eeg:{func_r}")
+                            print(f"📡 [BLE DEVICE MAPPED] Плата '{s_name}' (Субъект: {u_val}) -> Зона: {r_val} ({target_slot}=eeg:{func_r})")
                     elif cmd == "start_recording":
                         recorder_instance.start_session(session_name=msg.get("session_name"))
                     elif cmd == "stop_recording":
@@ -745,11 +797,16 @@ def main():
     )
     pacer.start()
 
+    # Запускаем 60 Гц конвейер LSL -> HardwareVRAMBus для подключенных в браузере BLE-плат:
+    router, amodal_engine = start_live_lsl_to_vram_bus_thread(pacer)
+
     push_web_telem = start_web_studio_control_bridge(
         runner=runner,
         pacer=pacer,
         video_ctrl_port=args.video_ctrl_port,
         initial_manifest_path=resolved_manifest,
+        router=router,
+        amodal_engine=amodal_engine,
     )
 
     video_writer = None
@@ -794,7 +851,6 @@ def main():
 
             push_web_telem(telemetry, fps=16.0 * pacer.play_speed, gen_ms=gen_ms)
 
-            # Компактный кольцевой лог (всегда <= 30 КБ, удобно копировать в чат!):
             compact_entry = build_compact_telemetry(telemetry)
             compact_line = json.dumps(compact_entry, ensure_ascii=False)
             compact_ring.append(compact_line)
@@ -819,9 +875,12 @@ def main():
         print("\n🛑 Stopped by user.")
     finally:
         pacer.running = False
+        if amodal_engine is not None:
+            amodal_engine.stop()
         if video_writer is not None:
             video_writer.release()
 
 
 if __name__ == "__main__":
     main()
+

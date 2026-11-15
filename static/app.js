@@ -50,6 +50,8 @@ const dom = {
     videoLagStatus: document.getElementById('videoLagStatus'),
     videoLoreSelect: document.getElementById('videoLoreSelect'),
     btnVideoResetGenesis: document.getElementById('btnVideoResetGenesis'),
+    videoPreset: document.getElementById('videoPreset'),
+    vHudMode: document.getElementById('vHudMode'),
     afzStageTxt: document.getElementById('afzStageTxt'),
     afzStageBar: document.getElementById('afzStageBar'),
     fpzPsiTxt: document.getElementById('fpzPsiTxt'),
@@ -77,10 +79,13 @@ const dom = {
     videoRegionConceptList: document.getElementById('videoRegionConceptList'),
     newVideoRegionInput: document.getElementById('newVideoRegionInput'),
     btnAddVideoConcept: document.getElementById('btnAddVideoConcept'),
+    vStepLatents: document.getElementById('vStepLatents'),
+    vContextLatents: document.getElementById('vContextLatents'),
     vNumFrames: document.getElementById('vNumFrames'),
     vContextRing: document.getElementById('vContextRing'),
     vGeodesicLock: document.getElementById('vGeodesicLock'),
     vSteps: document.getElementById('vSteps'),
+    vCfgScale: document.getElementById('vCfgScale'),
     vCrossBleed: document.getElementById('vCrossBleed'),
     vCascadeRate: document.getElementById('vCascadeRate'),
     vPsiThresh: document.getElementById('vPsiThresh'),
@@ -391,7 +396,7 @@ function renderSelectedVideoRegionConcepts() {
             chip.classList.add('video-active');
         }
         const txt = chip.querySelector('.concept-text');
-        txt.textContent = `${idx === activeIdx ? '★ ' : ''}[${regKey}#${idx + 1}] ${c.length > 44 ? c.slice(0, 44) + '…' : c}`;
+        txt.textContent = `${idx === activeIdx ? '★ ' : ''}[${regKey}#${idx + 1}] ${c.length > 48 ? c.slice(0, 48) + '…' : c}`;
         txt.title = c;
 
         const rmBtn = chip.querySelector('.concept-remove-btn');
@@ -453,8 +458,30 @@ async function resetVideoGenesis() {
     });
 }
 
-async function updateVideoTransformerConfig(sourceEl = null) {
-    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
+const VIDEO_PRESETS = {
+    meditation: { wmRadius: 0.08, stoch: 0.00, ctxLat: 2, stepLat: 1, steps: 6, cfg: 2.8 },
+    balanced:   { wmRadius: 0.35, stoch: 0.00, ctxLat: 1, stepLat: 2, steps: 6, cfg: 3.2 },
+    dynamic:    { wmRadius: 0.65, stoch: 0.00, ctxLat: 1, stepLat: 2, steps: 6, cfg: 3.6 }
+};
+
+function applyVideoPreset(presetKey) {
+    if (presetKey === 'custom') return;
+    const p = VIDEO_PRESETS[presetKey];
+    if (!p) return;
+    if (dom.vWmRadius) dom.vWmRadius.value = p.wmRadius;
+    if (dom.vStochastic) dom.vStochastic.value = p.stoch;
+    if (dom.vContextLatents) dom.vContextLatents.value = p.ctxLat;
+    if (dom.vStepLatents) dom.vStepLatents.value = p.stepLat;
+    if (dom.vSteps) dom.vSteps.value = p.steps;
+    if (dom.vCfgScale) dom.vCfgScale.value = p.cfg;
+    updateVideoTransformerConfig(null, presetKey);
+}
+
+async function updateVideoTransformerConfig(sourceEl = null, presetOverride = 'custom') {
+    if (dom.videoPreset && typeof presetOverride === 'string') {
+        dom.videoPreset.value = presetOverride;
+    }
+    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "off";
 
     const rawVStoch = parseFloat(dom.vStochastic ? dom.vStochastic.value : 0.0);
     const vStoch = Number.isNaN(rawVStoch) ? 0.0 : Math.max(0.0, Math.min(1.0, rawVStoch));
@@ -464,40 +491,51 @@ async function updateVideoTransformerConfig(sourceEl = null) {
     const vUnassStoch = Number.isNaN(rawVUnass) ? 1.0 : Math.max(0.0, Math.min(1.0, rawVUnass));
     if (dom.vUnassStochVal) dom.vUnassStochVal.textContent = vUnassStoch.toFixed(2);
 
-    let vRad = 0.25;
+    let vRad = 0.35;
     if (sourceEl === dom.vGeodesicLock && dom.vGeodesicLock) {
-        vRad = Math.max(0.02, Math.min(0.80, parseFloat(dom.vGeodesicLock.value) || 0.25));
+        vRad = Math.max(0.02, Math.min(0.85, parseFloat(dom.vGeodesicLock.value) || 0.35));
         if (dom.vWmRadius) dom.vWmRadius.value = vRad;
     } else if (dom.vWmRadius) {
-        vRad = Math.max(0.02, Math.min(0.80, parseFloat(dom.vWmRadius.value) || 0.25));
+        vRad = Math.max(0.02, Math.min(0.85, parseFloat(dom.vWmRadius.value) || 0.35));
         if (dom.vGeodesicLock) dom.vGeodesicLock.value = vRad;
     } else if (dom.vGeodesicLock) {
-        vRad = Math.max(0.02, Math.min(0.80, parseFloat(dom.vGeodesicLock.value) || 0.25));
+        vRad = Math.max(0.02, Math.min(0.85, parseFloat(dom.vGeodesicLock.value) || 0.35));
     }
     if (dom.vWmRadiusVal) dom.vWmRadiusVal.textContent = vRad.toFixed(2);
 
+    const hudMode = dom.vHudMode ? dom.vHudMode.value : "minimal";
+    const stepLat = dom.vStepLatents ? (parseInt(dom.vStepLatents.value) || 2) : 2;
+    const ctxLat = dom.vContextLatents ? (parseInt(dom.vContextLatents.value) || 1) : 1;
+    const steps = dom.vSteps ? (parseInt(dom.vSteps.value) || 6) : 6;
+    const cfgScale = dom.vCfgScale ? (parseFloat(dom.vCfgScale.value) || 3.2) : 3.2;
+
     const payload = {
+        preset: presetOverride,
         monty_mode: mMode,
         stochastic: vStoch,
         unassigned_stochastic: vUnassStoch,
         wm_radius: vRad,
         geodesic_lock: vRad,
+        hud_mode: hudMode,
+        step_latents: stepLat,
+        context_latents: ctxLat,
         region_gains: {
-            Fpz: parseFloat(dom.vGainFpz.value) || 0.06,
-            AFz: parseFloat(dom.vGainAfz.value) || 0.08,
-            F3:  parseFloat(dom.vGainF3.value)  || 0.08,
-            F4:  parseFloat(dom.vGainF4.value)  || 0.10,
-            FCz: parseFloat(dom.vGainFcz.value) || 0.92,
+            Fpz: dom.vGainFpz ? (parseFloat(dom.vGainFpz.value) || 0.06) : 0.06,
+            AFz: dom.vGainAfz ? (parseFloat(dom.vGainAfz.value) || 0.08) : 0.08,
+            F3:  dom.vGainF3  ? (parseFloat(dom.vGainF3.value)  || 0.08) : 0.08,
+            F4:  dom.vGainF4  ? (parseFloat(dom.vGainF4.value)  || 0.10) : 0.10,
+            FCz: dom.vGainFcz ? (parseFloat(dom.vGainFcz.value) || 0.92) : 0.92,
         },
-        auto_active_boost: dom.vAutoBoost.value === "1",
-        active_user_gain: parseFloat(dom.vActiveUserGain.value) || 0.92,
-        inactive_base_gain: parseFloat(dom.vInactiveBaseGain.value) || 0.06,
-        cross_region_bleed: parseFloat(dom.vCrossBleed.value) || 0.25,
-        cascade_rate: parseFloat(dom.vCascadeRate.value) || 1.0,
-        psi_threshold: parseFloat(dom.vPsiThresh.value) || 0.55,
-        num_frames: parseInt(dom.vNumFrames.value) || 5,
-        context_ring_len: parseInt(dom.vContextRing.value) || 16,
-        steps: parseInt(dom.vSteps.value) || 4,
+        auto_active_boost: dom.vAutoBoost ? (dom.vAutoBoost.value === "1") : true,
+        active_user_gain: dom.vActiveUserGain ? (parseFloat(dom.vActiveUserGain.value) || 0.92) : 0.92,
+        inactive_base_gain: dom.vInactiveBaseGain ? (parseFloat(dom.vInactiveBaseGain.value) || 0.06) : 0.06,
+        cross_region_bleed: dom.vCrossBleed ? (parseFloat(dom.vCrossBleed.value) || 0.25) : 0.25,
+        cascade_rate: dom.vCascadeRate ? (parseFloat(dom.vCascadeRate.value) || 1.0) : 1.0,
+        psi_threshold: dom.vPsiThresh ? (parseFloat(dom.vPsiThresh.value) || 0.55) : 0.55,
+        num_frames: dom.vNumFrames ? (parseInt(dom.vNumFrames.value) || (stepLat * 8 + 1)) : (stepLat * 8 + 1),
+        context_ring_len: dom.vContextRing ? (parseInt(dom.vContextRing.value) || 9) : 9,
+        steps: steps,
+        cfg_scale: cfgScale,
     };
     await fetch('/api/video/config', {
         method: 'POST',
@@ -690,30 +728,47 @@ sse.addEventListener('state', (e) => {
                 dom.vGeodesicLock.value = v.wm_radius;
             }
         }
+        if (dom.vHudMode && document.activeElement !== dom.vHudMode && v.hud_mode) {
+            dom.vHudMode.value = v.hud_mode;
+        }
+        if (dom.vStepLatents && document.activeElement !== dom.vStepLatents && v.step_latents) {
+            dom.vStepLatents.value = v.step_latents;
+        }
+        if (dom.vContextLatents && document.activeElement !== dom.vContextLatents && v.context_latents) {
+            dom.vContextLatents.value = v.context_latents;
+        }
+        if (dom.vSteps && document.activeElement !== dom.vSteps && v.steps) {
+            dom.vSteps.value = v.steps;
+        }
+        if (dom.vCfgScale && document.activeElement !== dom.vCfgScale && v.cfg_scale) {
+            dom.vCfgScale.value = v.cfg_scale;
+        }
 
         if (v.region_gains) {
-            if (document.activeElement !== dom.vGainFpz) dom.vGainFpz.value = v.region_gains.Fpz ?? 0.06;
-            if (document.activeElement !== dom.vGainAfz) dom.vGainAfz.value = v.region_gains.AFz ?? 0.08;
-            if (document.activeElement !== dom.vGainF3)  dom.vGainF3.value  = v.region_gains.F3  ?? 0.08;
-            if (document.activeElement !== dom.vGainF4)  dom.vGainF4.value  = v.region_gains.F4  ?? 0.10;
-            if (document.activeElement !== dom.vGainFcz) dom.vGainFcz.value = v.region_gains.FCz ?? 0.92;
+            if (dom.vGainFpz && document.activeElement !== dom.vGainFpz) dom.vGainFpz.value = v.region_gains.Fpz ?? 0.06;
+            if (dom.vGainAfz && document.activeElement !== dom.vGainAfz) dom.vGainAfz.value = v.region_gains.AFz ?? 0.08;
+            if (dom.vGainF3  && document.activeElement !== dom.vGainF3)  dom.vGainF3.value  = v.region_gains.F3  ?? 0.08;
+            if (dom.vGainF4  && document.activeElement !== dom.vGainF4)  dom.vGainF4.value  = v.region_gains.F4  ?? 0.10;
+            if (dom.vGainFcz && document.activeElement !== dom.vGainFcz) dom.vGainFcz.value = v.region_gains.FCz ?? 0.92;
         }
 
         if (v.active_region_mask) {
-            dom.vBoxFpz.classList.toggle('user-on', !!v.active_region_mask.Fpz);
-            dom.vBoxAfz.classList.toggle('user-on', !!v.active_region_mask.AFz);
-            dom.vBoxF3.classList.toggle('user-on',  !!v.active_region_mask.F3);
-            dom.vBoxF4.classList.toggle('user-on',  !!v.active_region_mask.F4);
-            dom.vBoxFcz.classList.toggle('user-on', !!v.active_region_mask.FCz);
+            if (dom.vBoxFpz) dom.vBoxFpz.classList.toggle('user-on', !!v.active_region_mask.Fpz);
+            if (dom.vBoxAfz) dom.vBoxAfz.classList.toggle('user-on', !!v.active_region_mask.AFz);
+            if (dom.vBoxF3)  dom.vBoxF3.classList.toggle('user-on',  !!v.active_region_mask.F3);
+            if (dom.vBoxF4)  dom.vBoxF4.classList.toggle('user-on',  !!v.active_region_mask.F4);
+            if (dom.vBoxFcz) dom.vBoxFcz.classList.toggle('user-on', !!v.active_region_mask.FCz);
         }
 
         if (dom.videoLagStatus) {
             if (v.connected) {
-                const vFps = (v.fps || 0).toFixed(1);
+                const vRtf = (v.rtf || 1.0).toFixed(2);
+                const vSpd = (v.play_speed || 1.0).toFixed(2);
                 const vMs = (v.gen_ms || 0).toFixed(0);
-                dom.videoLagStatus.textContent = `3D-DiT: ${vFps} FPS (${vMs} мс/блок) | ${v.debug_tokens || 'ONLINE'} 🟢`;
+                const rVal = (v.feigenbaum_r || 3.72).toFixed(3);
+                dom.videoLagStatus.textContent = `RTF: ${vRtf}x (Spd:${vSpd}x | ${vMs}мс) | r=${rVal} | ${v.debug_tokens || 'ONLINE'} 🟢`;
             } else {
-                dom.videoLagStatus.textContent = `3D-DiT: Автономный режим / Ожидание порта 6007`;
+                dom.videoLagStatus.textContent = `3D-DiT: Ожидание подключения порта 6007...`;
             }
         }
     }
@@ -1337,6 +1392,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (dom.btnVideoResetGenesis) {
         dom.btnVideoResetGenesis.addEventListener('click', resetVideoGenesis);
     }
+    if (dom.videoPreset) {
+        dom.videoPreset.addEventListener('change', (e) => applyVideoPreset(e.target.value));
+    }
     if (dom.videoRegionSelect) {
         dom.videoRegionSelect.addEventListener('change', renderSelectedVideoRegionConcepts);
     }
@@ -1346,15 +1404,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     [
         dom.vStochastic, dom.vUnassignedStochastic, dom.vWmRadius
     ].forEach(inp => {
-        if (inp) inp.addEventListener('input', () => updateVideoTransformerConfig(inp));
+        if (inp) inp.addEventListener('input', () => updateVideoTransformerConfig(inp, 'custom'));
     });
     [
+        dom.vHudMode, dom.vStepLatents, dom.vContextLatents, dom.vCfgScale,
         dom.vGainFpz, dom.vGainAfz, dom.vGainF3, dom.vGainF4, dom.vGainFcz,
         dom.vAutoBoost, dom.vActiveUserGain, dom.vInactiveBaseGain,
         dom.vNumFrames, dom.vContextRing, dom.vGeodesicLock, dom.vSteps,
         dom.vCrossBleed, dom.vCascadeRate, dom.vPsiThresh
     ].forEach(inp => {
-        if (inp) inp.addEventListener('change', () => updateVideoTransformerConfig(inp));
+        if (inp) inp.addEventListener('change', () => updateVideoTransformerConfig(inp, 'custom'));
     });
 
     dom.btnAddVision.addEventListener('click', addVisionConcept);

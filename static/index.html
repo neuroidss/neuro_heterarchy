@@ -241,8 +241,8 @@
                 <h3>🪜 Режим Колонки Монти & Межрегиональная Гетерархия</h3>
                 <label>Участие колонок Монти (SDR):</label>
                 <select id="montyModeSelect">
-                    <option value="off">🚫 ВЫКЛ (--no-monty: 100% Чистая полноранговая рабочая память)</option>
-                    <option value="missing_only" selected>⚡ Оператор пустых регионов (На девайсах — чистая рабочая память)</option>
+                    <option value="off" selected>🚫 ВЫКЛ (--no-monty: 100% Чистая полноранговая рабочая память)</option>
+                    <option value="missing_only">⚡ Оператор пустых регионов (На девайсах — чистая рабочая память)</option>
                     <option value="full">🧠 Полный Монти на всех 5 регионах</option>
                 </select>
 
@@ -259,131 +259,120 @@
             </div>
 
             <div class="panel panel-video">
-                <h3 style="color:#00ffc8;">🎬 3D-DiT Видео-Трансформер (Порегионная 524,288-D Гетерархия)</h3>
+                <h3 style="color:#00ffc8;">🎬 3D-DiT Видео-Мир (Гетерархия Катализаторов & 524,288-D Рабочая Память)</h3>
                 <div id="videoLagStatus" class="lag-status">
                     3D-DiT: Ожидание подключения порта 6007...
                 </div>
 
-                <label>Источник концептов (Пусто = Свободный 524,288-D дрейф по матрице T5):</label>
+                <label>Манифест Мира / Региональный Лор (.json / .txt):</label>
                 <div class="input-row">
                     <select id="videoLoreSelect">
-                        <option value="">[Пусто — Свободный 524,288-D дрейф без лор-файла]</option>
+                        <option value="configs/mode_03_semantic_maze_gm.json">configs/mode_03_semantic_maze_gm.json</option>
                     </select>
                     <button type="button" class="btn btn-blue btn-fixed" id="btnVideoResetGenesis">🔄 СБРОС</button>
-                </div>
-                
-                <label>Стартовая Карта / Картинка Мира (PNG/JPG):</label>
-                <div class="input-row">
-                    <input type="file" id="videoInitImageInput" accept="image/*">
-                    <button type="button" class="btn btn-green btn-fixed" id="btnUploadInitImage">🖼️ В МИР</button>
                 </div>
 
                 <div class="grid-2 mt-4">
                     <div>
-                        <label>AFz Интеграция (tau=1.2s): <b id="afzStageTxt" style="color:#38bdf8;">0%</b></label>
+                        <label>Режим динамики 3D-DiT (Пресеты):</label>
+                        <select id="videoPreset">
+                            <option value="meditation">🧘 Стазис / Фиксация (Rad 0.08, Ctx 2)</option>
+                            <option value="balanced" selected>⚖️ Живой Морфинг (Rad 0.35, Ctx 1)</option>
+                            <option value="dynamic">⚡ Бурный Катализ (Rad 0.65, Ctx 1)</option>
+                            <option value="custom">🛠️ Пользовательский</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Дебаг-HUD поверх видео:</label>
+                        <select id="vHudMode">
+                            <option value="off">🚫 Чистый мир (Без HUD)</option>
+                            <option value="minimal" selected>📊 Только строка RTF</option>
+                            <option value="full">🔬 Полный Дебаг-HUD (4 Агента)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid-2 mt-4">
+                    <div>
+                        <label>Прогресс Реакции (dS%): <b id="afzStageTxt" style="color:#38bdf8;">0%</b></label>
                         <div class="bar-wrap"><div class="bar-fill-stage" id="afzStageBar"></div></div>
                     </div>
                     <div>
-                        <label>Fpz Мета-Заряд (tau=5.0s): <b id="fpzPsiTxt" style="color:#d946ef;">0%</b></label>
+                        <label>Резонанс Катализатора: <b id="fpzPsiTxt" style="color:#d946ef;">0%</b></label>
                         <div class="bar-wrap"><div class="bar-fill-psi" id="fpzPsiBar"></div></div>
                     </div>
                 </div>
                 
                 <div class="mt-6">
-                    <label>🎯 Стохастика Активных Регионов 3D-DiT (0.00 = 100% Управление мозгом | 1.00 = Обычный DiT): <b id="vStochVal" style="color:#00ffc8;">0.00</b></label>
+                    <label>🧭 Радиус области концепта 3D-DiT (0.05 = Жесткая фиксация | 0.35 = Живой морфинг | 0.75 = Ураган S³): <b id="vWmRadiusVal" style="color:#fbbf24;">0.35</b></label>
+                    <input type="range" id="vWmRadius" min="0.02" max="0.85" step="0.02" value="0.35">
+                </div>
+                <div class="mt-4">
+                    <label>🎯 Стохастика 3D-DiT (0.00 = 100% Управление из Рабочей Памяти | 1.00 = Случайный дрейф): <b id="vStochVal" style="color:#00ffc8;">0.00</b></label>
                     <input type="range" id="vStochastic" min="0" max="1" step="0.05" value="0.00">
                 </div>
-                <div class="mt-4">
-                    <label>🌌 Стохастика Пустых Регионов 3D-DiT (1.00 = Живой фон | 0.00 = Строгий детерминизм для учёных): <b id="vUnassStochVal" style="color:#38bdf8;">1.00</b></label>
-                    <input type="range" id="vUnassignedStochastic" min="0" max="1" step="0.05" value="1.00">
-                </div>
-                <div class="mt-4">
-                    <label>🧭 Радиус области концепта 3D-DiT (0.05 = Строго внутри концепта | 0.80 = Широкая модуляция S³): <b id="vWmRadiusVal" style="color:#fbbf24;">0.25</b></label>
-                    <input type="range" id="vWmRadius" min="0.02" max="0.80" step="0.02" value="0.25">
+                <div class="mt-4" style="display:none;">
+                    <label>🌌 Стохастика Пустых Регионов: <b id="vUnassStochVal">0.00</b></label>
+                    <input type="range" id="vUnassignedStochastic" min="0" max="1" step="0.05" value="0.00">
                 </div>
 
-                <label class="mt-6">Порегионная Динамика / Стабильность (0.04 = Стабилен, 0.92 = Супер-Реалтайм):</label>
-                <div class="reg-gain-grid">
-                    <div class="reg-gain-box" id="vBoxFpz"><b>Fpz</b><input type="number" id="vGainFpz" value="0.06" min="0" max="1" step="0.04"></div>
-                    <div class="reg-gain-box" id="vBoxAfz"><b>AFz</b><input type="number" id="vGainAfz" value="0.08" min="0" max="1" step="0.04"></div>
-                    <div class="reg-gain-box" id="vBoxF3"><b>F3</b><input type="number" id="vGainF3" value="0.08" min="0" max="1" step="0.04"></div>
-                    <div class="reg-gain-box" id="vBoxF4"><b>F4</b><input type="number" id="vGainF4" value="0.10" min="0" max="1" step="0.04"></div>
-                    <div class="reg-gain-box user-on" id="vBoxFcz"><b>FCz</b><input type="number" id="vGainFcz" value="0.92" min="0" max="1" step="0.04"></div>
-                </div>
-
-                <div class="grid-3 mt-4">
-                    <div>
-                        <label>Авто-Буст Девайса:</label>
-                        <select id="vAutoBoost">
-                            <option value="1" selected>ВКЛ (Где девайс = Max)</option>
-                            <option value="0">Ручной по регионам</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label>Gain с девайсом:</label>
-                        <input type="number" id="vActiveUserGain" value="0.92" min="0.20" max="0.98" step="0.04">
-                    </div>
-                    <div>
-                        <label>Gain без девайса:</label>
-                        <input type="number" id="vInactiveBaseGain" value="0.06" min="0.00" max="0.50" step="0.02">
-                    </div>
-                </div>
-
-                <label class="mt-6">Пул концептов выбранного региона коры:</label>
+                <label class="mt-6">Живой Редактор Пулов Концептов по Регионам/Агентам (FCz=e0, AFz=e1, F3=e2, F4=e3):</label>
                 <select id="videoRegionSelect">
-                    <option value="FCZ" selected>[FCZ] — SMA (Гамма-динамика действий, tau=0.020s)</option>
-                    <option value="F3">[F3] — L-dlPFC (ON-подпространство структуры, tau=0.18s)</option>
-                    <option value="F4">[F4] — R-dlPFC (OFF-подпространство контекста, tau=0.18s)</option>
-                    <option value="AFZ">[AFZ] — dmPFC (Композиционные правила A ⊃ B, tau=0.65s)</option>
-                    <option value="FPZ">[FPZ] — BA10 (Смена мета-правил, tau=2.50s)</option>
-                    <option value="NEGATIVE">[NEGATIVE] — Исключаемое подпространство</option>
+                    <option value="FCZ" selected>[FCZ / Агент e0] — Быстрые действия (Blue-Lance / Turbine / Crown)</option>
+                    <option value="AFZ">[AFZ / Агент e1] — Макро-структура (Emerald-Vortex / Jade-Lotus / Sun)</option>
+                    <option value="F3">[F3 / Агент e2] — Геометрия и барьеры (Violet-Monolith / Mirror / Fortress)</option>
+                    <option value="F4">[F4 / Агент e3] — Морфология существа (Blue-Star / Glider / Crimson-Nova)</option>
+                    <option value="FPZ">[FPZ / Контекст арены] — Глобальная сцена мира</option>
+                    <option value="NEGATIVE">[NEGATIVE] — Исключаемые артефакты</option>
                 </select>
                 <div id="videoRegionConceptList" class="concept-container mt-4"></div>
                 <div class="input-row">
-                    <input type="text" id="newVideoRegionInput" placeholder="Добавить вектор-концепт в выбранный регион...">
-                    <button type="button" class="btn btn-green btn-fixed" id="btnAddVideoConcept">+ В РЕГИОН</button>
+                    <input type="text" id="newVideoRegionInput" placeholder="Добавить новый концепт/состояние в выбранного агента...">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnAddVideoConcept">+ В АГЕНТА</button>
                 </div>
 
                 <div class="grid-4 mt-6">
                     <div>
-                        <label>Блок (сек):</label>
-                        <select id="vNumFrames">
-                            <option value="9" selected>0.33с (8 кадр)</option>
-                            <option value="17">0.67с (16 кадр)</option>
-                            <option value="25">1.00с (24 кадр)</option>
+                        <label>Новых лат.кадров:</label>
+                        <select id="vStepLatents">
+                            <option value="1">1 лат (0.5с)</option>
+                            <option value="2" selected>2 лат (1.0с)</option>
+                            <option value="3">3 лат (1.5с)</option>
                         </select>
                     </div>
                     <div>
-                        <label>Контекст (кадр/сек):</label>
-                        <select id="vContextRing">
-                            <option value="1">0.04с (1 кадр — Быстрый)</option>
-                            <option value="9" selected>0.35с (9 кадр — Плавный)</option>
-                            <option value="17">0.70с (17 кадр — Глубокий)</option>
-                            <option value="25">1.05с (25 кадр — Макс. память)</option>
+                        <label>Контекст (лат):</label>
+                        <select id="vContextLatents">
+                            <option value="1" selected>1 лат (Живой)</option>
+                            <option value="2">2 лат (Плавный)</option>
+                            <option value="3">3 лат (Память)</option>
                         </select>
-                    </div>
-                    <div>
-                        <label>Geodesic Lock:</label>
-                        <input type="number" id="vGeodesicLock" value="0.25" min="0.04" max="0.65" step="0.02">
                     </div>
                     <div>
                         <label>Шаги DiT:</label>
-                        <input type="number" id="vSteps" value="6" min="4" max="14" step="1">
+                        <input type="number" id="vSteps" value="6" min="3" max="18" step="1">
+                    </div>
+                    <div>
+                        <label>CFG Контраст:</label>
+                        <input type="number" id="vCfgScale" value="3.2" min="1.2" max="5.5" step="0.2">
                     </div>
                 </div>
-                <div class="grid-3 mt-4">
-                    <div>
-                        <label>Проникновение:</label>
-                        <input type="number" id="vCrossBleed" value="0.25" min="0.00" max="0.80" step="0.05">
-                    </div>
-                    <div>
-                        <label>Каскад FCz➔Верх:</label>
-                        <input type="number" id="vCascadeRate" value="1.0" min="0.1" max="3.0" step="0.2">
-                    </div>
-                    <div>
-                        <label>Порог Fpz:</label>
-                        <input type="number" id="vPsiThresh" value="0.55" min="0.20" max="0.90" step="0.05">
-                    </div>
+
+                <div style="display:none;">
+                    <div id="vBoxFpz"><input type="number" id="vGainFpz" value="0.06"></div>
+                    <div id="vBoxAfz"><input type="number" id="vGainAfz" value="0.08"></div>
+                    <div id="vBoxF3"><input type="number" id="vGainF3" value="0.08"></div>
+                    <div id="vBoxF4"><input type="number" id="vGainF4" value="0.10"></div>
+                    <div id="vBoxFcz"><input type="number" id="vGainFcz" value="0.92"></div>
+                    <select id="vAutoBoost"><option value="1" selected>1</option></select>
+                    <input type="number" id="vActiveUserGain" value="0.92">
+                    <input type="number" id="vInactiveBaseGain" value="0.06">
+                    <input type="number" id="vGeodesicLock" value="0.35">
+                    <select id="vNumFrames"><option value="17" selected>17</option></select>
+                    <select id="vContextRing"><option value="9" selected>9</option></select>
+                    <input type="number" id="vCrossBleed" value="0.25">
+                    <input type="number" id="vCascadeRate" value="1.0">
+                    <input type="number" id="vPsiThresh" value="0.55">
                 </div>
             </div>
 
@@ -425,9 +414,9 @@
                 </div>
                 
                 <div class="mt-4">
-         <label>🧭 Радиус области концепта (Нестохастический конус: 0.05 = Строго внутри концепта | 0.50 = Далекий поиск): <b id="diffWmRadiusVal" style="color:#fbbf24;">0.15</b></label>
-         <input type="range" id="diffWmRadius" min="0.02" max="0.80" step="0.02" value="0.15">
-     </div>
+                    <label>🧭 Радиус области концепта 2D (0.05 = Строго внутри концепта | 0.50 = Далекий поиск): <b id="diffWmRadiusVal" style="color:#fbbf24;">0.15</b></label>
+                    <input type="range" id="diffWmRadius" min="0.02" max="0.80" step="0.02" value="0.15">
+                </div>
 
                 <div class="grid-3 mt-6">
                     <div>
@@ -507,9 +496,9 @@
                 </div>
                 
                 <div class="mt-4">
-         <label>🧭 Радиус области концепта Музыки (0.05 = Железный грув жанра | 0.50 = Широкая модуляция): <b id="mWmRadiusVal" style="color:#fbbf24;">0.15</b></label>
-         <input type="range" id="mWmRadius" min="0.02" max="0.80" step="0.02" value="0.15">
-     </div>
+                    <label>🧭 Радиус области концепта Музыки (0.05 = Железный грув жанра | 0.50 = Широкая модуляция): <b id="mWmRadiusVal" style="color:#fbbf24;">0.15</b></label>
+                    <input type="range" id="mWmRadius" min="0.02" max="0.80" step="0.02" value="0.15">
+                </div>
 
                 <div class="grid-3 mt-6">
                     <div><label>Min Str (Покой):</label><input type="number" id="mStrLow" value="0.25" min="0.05" max="0.80" step="0.05"></div>
@@ -593,4 +582,3 @@
     <script src="/static/app.js"></script>
 </body>
 </html>
-
