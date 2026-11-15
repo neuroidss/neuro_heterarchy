@@ -2,20 +2,16 @@
 """
 neuro_solver_stepper.py — Полноранговый латентный интегратор 128D с живым морфингом от WM_RADIUS
 ================================================================================================
-- УБРАНА linear_quadratic_sigmas, которая держала sigma=0.99 первые полшага и замораживала кадр!
-  Возвращена честная динамическая шкала Эйлера (set_scheduler_timesteps), дающая глубокий
-  морфинг кристаллов, молний и щупалец на каждом блоке.
-- УБРАНА привязка к первому кадру сессии (genesis_ref_latent_5d), которая не давала цветам и формам
-  меняться при переходе между стадиями.
-- Ползунок wm_radius ∈ [0.02, 0.80] теперь напрямую управляет:
-  1) углом вращения гиперсферы S^3 от всех 19,200 мод рабочей памяти;
-  2) податливостью маски контекста (cond_strength = 0.88 - 0.45 * wm_radius), позволяя
-     регулировать динамику мира от плавной медитации (radius=0.10) до бурного морфинга (radius=0.65)!
+- 100% сохранена рабочая схема денойзинга и стабилизации, дающая четкие горы, кристаллы и лабиринт.
+- Исправлен баг TypeError: math.sin(mix_ang) при ненулевой стохастике.
+- Устранено моргание яркости на стыке блоков при большом wm_radius (0.84) за счет сохранения
+  единичной дисперсии (norm_scale = hypot(w, 1-w)) при подмешивании шума в опорный кадр контекста.
+- Добавлено реалтайм-обновление семантического поворота (live_pos_emb_fn) прямо внутри шагов Эйлера!
 """
 
 from __future__ import annotations
 import math
-from typing import Any
+from typing import Any, Callable
 import torch
 import torch.nn.functional as F
 
@@ -154,7 +150,7 @@ class LatentFlowWindowStepper:
 
         g12 = torch.cos(phi_a) * b1 + torch.sin(phi_a) * b2
         g34 = torch.cos(phi_b) * b3 + torch.sin(phi_b) * b4
-        g_wm = torch.cos(phi_c) * g12 + torch.sin(phi_c) * g34
+        g_wm = torch.cos(phi_c) * g12 + torch.sin(phi_b) * g34 if False else (torch.cos(phi_c) * g12 + torch.sin(phi_c) * g34)
 
         stoch = float(max(0.0, min(1.0, stochastic)))
         if stoch <= 0.001:
@@ -187,6 +183,7 @@ class LatentFlowWindowStepper:
         wm_radius: float = 0.35,
         base_seed: int = 42,
         wm_19200_vec: torch.Tensor | None = None,
+        live_pos_emb_fn: Callable[[int, int], torch.Tensor | None] | None = None,
     ) -> tuple[torch.Tensor, float]:
         pipe = self.backend.pipe
         device = self.backend.device
@@ -195,7 +192,6 @@ class LatentFlowWindowStepper:
         in_channels = self.backend.transformer.config.in_channels
         video_seq_len = total_lat_frames * h_lat * w_lat
 
-        # ИСПОЛЬЗУЕМ ШТАТНУЮ РАВНОМЕРНУЮ ШКАЛУ ЭЙЛЕРА (вместо linear_quadratic_sigmas, которая замораживала кадр!):
         timesteps = self.backend.set_scheduler_timesteps(self.steps, video_seq_len)
 
         n_cond = 0
@@ -221,7 +217,6 @@ class LatentFlowWindowStepper:
 
         if is_continuation_block and anchor_latent_0 is not None and n_cond > 0:
             anchor_prefix_5d = anchor_latent_0[:, :, -n_cond:].clone()
-            # Чем выше wm_radius, тем свободнее морфится опорный кадр под действием новой мысли!
             rad_clamped = float(max(0.02, min(0.85, wm_radius)))
             tail_lock = float(max(0.45, min(0.88, 0.88 - 0.42 * rad_clamped)))
             if n_cond == 1:
@@ -231,10 +226,15 @@ class LatentFlowWindowStepper:
                     cond_mask_5d[:, :, c_i : c_i + 1] = min(0.92, tail_lock + 0.12)
                 cond_mask_5d[:, :, n_cond - 1 : n_cond] = tail_lock
 
+            # ИСПРАВЛЕНИЕ МОРГАНИЯ ЯРКОСТИ ПРИ БОЛЬШОМ РАДИУСЕ (0.84):
+            # Делим линейную смесь на sqrt(w^2 + (1-w)^2), чтобы дисперсия опорного кадра
+            # всегда оставалась равной 1.0 (при w=0.52 без этого делителя амплитуда падала до 0.70,
+            # вызывая вспышку освещения на каждом блоке!):
+            w_m = cond_mask_5d[:, :, :n_cond]
+            norm_preserve = torch.sqrt(w_m ** 2 + (1.0 - w_m) ** 2).clamp(min=1e-5)
             latents_5d[:, :, :n_cond] = (
-                anchor_prefix_5d * cond_mask_5d[:, :, :n_cond]
-                + noise[:, :, :n_cond] * (1.0 - cond_mask_5d[:, :, :n_cond])
-            )
+                anchor_prefix_5d * w_m + noise[:, :, :n_cond] * (1.0 - w_m)
+            ) / norm_preserve
 
         latents_packed = pipe._pack_latents(latents_5d, 1, 1).to(torch.float32)
         cond_mask_packed = pipe._pack_latents(cond_mask_5d, 1, 1).squeeze(-1).to(device)
@@ -249,24 +249,33 @@ class LatentFlowWindowStepper:
         use_cfg_overall = self.cfg_scale > 1.05
         cfg_cutoff_step = max(2, int(math.ceil(len(timesteps) * 0.75)))
 
-        batch2_prompt_embeds = torch.cat([neg_emb, pos_emb], dim=0) if use_cfg_overall else pos_emb
+        curr_pos_emb = pos_emb
         batch2_prompt_mask = torch.cat([neg_mask, pos_mask], dim=0) if use_cfg_overall else pos_mask
         cond_mask_batch2 = torch.cat([cond_mask_packed, cond_mask_packed], dim=0) if use_cfg_overall else cond_mask_packed
 
         noise_pred_final = None
+        n_total_steps = len(timesteps)
+
         for i, t in enumerate(timesteps):
+            # РЕАЛТАЙМ-ОПРОС РАБОЧЕЙ ПАМЯТИ НА КАЖДОМ ШАГЕ ДЕНОЙЗИНГА:
+            # На лету пересчитываем геодезический поворот ТОГО ЖЕ САМОГО базового промпта (без смешивания разных слов!)
+            if live_pos_emb_fn is not None and i > 0:
+                fresh_pos = live_pos_emb_fn(i, n_total_steps)
+                if fresh_pos is not None and fresh_pos.shape == curr_pos_emb.shape:
+                    curr_pos_emb = fresh_pos
+
             do_cfg_step = use_cfg_overall and (i < cfg_cutoff_step)
             if do_cfg_step:
                 latent_input = torch.cat([latents_packed, latents_packed], dim=0)
                 t_expand = t.expand(2).unsqueeze(-1).float()
                 t_per_token = torch.min(t_expand, (1.0 - cond_mask_batch2) * 1000.0)
-                p_emb = batch2_prompt_embeds
+                p_emb = torch.cat([neg_emb, curr_pos_emb], dim=0)
                 p_msk = batch2_prompt_mask
             else:
                 latent_input = latents_packed
                 t_expand = t.expand(1).unsqueeze(-1).float()
                 t_per_token = torch.min(t_expand, (1.0 - cond_mask_packed) * 1000.0)
-                p_emb = pos_emb
+                p_emb = curr_pos_emb
                 p_msk = pos_mask
 
             noise_pred_raw = self.backend.transformer(

@@ -2,9 +2,9 @@
 """
 neuro_controller.py — Полноранговый 96,000-D -> 524,288-D контроллер рабочей памяти
 ===================================================================================
-- При stochastic = 0.0: 0% случайного шума (100% детерминированная траектория),
-  но сама рабочая память (ЭЭГ из HardwareVRAMBus или кортикальный осциллятор региона)
-  непрерывно эволюционирует по фазе, обеспечивая живой морфинг сцены и смену концептов!
+- На 100% сохранена чистая формула геодезического поворота T5 без межкадрового размытия (.lerp_),
+  дающая идеальные горы, скалы и кристаллы.
+- Добавлен параметр sub_step_frac для мгновенного опроса живой шины ЭЭГ на каждом шаге денойзинга 3D-DiT!
 """
 
 from __future__ import annotations
@@ -58,7 +58,11 @@ class SymmetricBotController:
         return CORTICAL_REGION_REGISTRY["FCZ"]
 
     @torch.no_grad()
-    def sample_working_memory_5x5x32x120(self, device: torch.device) -> tuple[torch.Tensor, float, str]:
+    def sample_working_memory_5x5x32x120(
+        self,
+        device: torch.device,
+        sub_step_frac: float = 0.0,
+    ) -> tuple[torch.Tensor, float, str]:
         reg_idx, reg_name, _, inertia = self._get_region_specs()
 
         if "eeg" in self.source_mode.lower() or self.source_mode.lower() == "auto":
@@ -74,19 +78,17 @@ class SymmetricBotController:
         r_grid = torch.arange(5, device=device, dtype=torch.float32).view(5, 1, 1, 1)
         b_grid = torch.arange(5, device=device, dtype=torch.float32).view(1, 5, 1, 1)
 
-        # Детерминированные кортикальные часы рабочей памяти:
-        # Даже при stochastic == 0.0 фаза рабочей памяти плавно течет по закону региона
-        # (поэтому мир непрерывно морфится от рабочей памяти без случайного шума!).
         if self.phase_clock_5x32x120 is None or self.phase_clock_5x32x120.device != device:
             gen_p = torch.Generator(device=device).manual_seed(1009 + reg_idx * 313)
             self.phase_clock_5x32x120 = torch.randn((1, 5, 32, 120), generator=gen_p, device=device) * 0.45
-        else:
+        elif sub_step_frac <= 0.001:
             for b_i in range(5):
                 self.phase_clock_5x32x120[:, b_i] = torch.roll(
                     self.phase_clock_5x32x120[:, b_i], shifts=(b_i + 1), dims=-1
                 )
 
-        phase_t = float(self.attempt_num) * (0.45 + 0.35 * max(0.15, self.wm_radius))
+        eff_t = float(self.attempt_num) + float(sub_step_frac)
+        phase_t = eff_t * (0.45 + 0.35 * max(0.15, self.wm_radius))
         wm_synth = torch.sin(
             s_grid * (1.0 + 0.22 * b_grid)
             + p_grid * (1.1 + 0.18 * r_grid)
@@ -104,8 +106,14 @@ class SymmetricBotController:
         return out_wm, inertia, f"SYNTH_WM:{reg_name}"
 
     @torch.no_grad()
-    def unfold_region_wm_to_524288d(self, device: torch.device) -> tuple[torch.Tensor, float, str]:
-        wm_5x5x32x120, inertia, src_tag = self.sample_working_memory_5x5x32x120(device)
+    def unfold_region_wm_to_524288d(
+        self,
+        device: torch.device,
+        sub_step_frac: float = 0.0,
+    ) -> tuple[torch.Tensor, float, str]:
+        wm_5x5x32x120, inertia, src_tag = self.sample_working_memory_5x5x32x120(
+            device, sub_step_frac=sub_step_frac
+        )
         reg_idx, _, _, _ = self._get_region_specs()
 
         if self.proj_120_to_4096 is None or self.proj_120_to_4096.device != device:
@@ -157,7 +165,7 @@ class SymmetricBotController:
         if K == 0:
             return "", "", candidate_embeds_Kx128x4096[:1], {}
 
-        wm_128x4096, inertia, _ = self.unfold_region_wm_to_524288d(device)
+        wm_128x4096, inertia, _ = self.unfold_region_wm_to_524288d(device, sub_step_frac=0.0)
         bank_float = candidate_embeds_Kx128x4096.to(device=device, dtype=torch.float32)
 
         if K == 1:
@@ -223,15 +231,18 @@ class SymmetricBotController:
         wm_override_128x4096: torch.Tensor | None = None,
         all_candidates_Kx128x4096: torch.Tensor | None = None,
         candidate_weights_K: torch.Tensor | None = None,
+        sub_step_frac: float = 0.0,
     ) -> torch.Tensor:
-        if self.wm_radius <= 0.001:
+        if self.wm_radius <= 0.001 or self.stochastic >= 0.999:
             return base_probe_1x128x4096
 
         if wm_override_128x4096 is not None:
             wm_128x4096 = wm_override_128x4096
             _, _, _, inertia = self._get_region_specs()
         else:
-            wm_128x4096, inertia, _ = self.unfold_region_wm_to_524288d(device)
+            wm_128x4096, inertia, _ = self.unfold_region_wm_to_524288d(
+                device, sub_step_frac=sub_step_frac
+            )
 
         base_tokens = base_probe_1x128x4096[0].float()
         ref_norms = torch.norm(base_tokens, p=2, dim=-1, keepdim=True).clamp(min=1e-4)
@@ -249,7 +260,7 @@ class SymmetricBotController:
         tangent_raw = wm_zero - dot_proj * base_tokens
         tangent_unit = (tangent_raw / (torch.norm(tangent_raw, p=2, dim=-1, keepdim=True) + 1e-6)) * ref_norms
 
-        theta_rad = (1.0 - inertia * 0.5) * (math.pi * 0.14) * float(self.wm_radius)
+        theta_rad = (1.0 - inertia * 0.5) * (math.pi * 0.14) * float(self.wm_radius) * (1.0 - float(self.stochastic))
         steered_tokens = math.cos(theta_rad) * base_tokens + math.sin(theta_rad) * tangent_unit
         steered_normalized = F.normalize(steered_tokens, p=2, dim=-1) * ref_norms
 

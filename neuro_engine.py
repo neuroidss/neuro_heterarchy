@@ -359,10 +359,19 @@ class UniversalLatentAutobattlerEngine:
             else stage.quest.active_slot_idx
         )
         drv_ctrl = self._get_controller(stage.entities[drv_idx], drv_idx)
-        steered_pos_emb = drv_ctrl.steer_semantic_probe_full_rank(pos_emb, device=self.device).to(self.dtype)
+        steered_pos_emb = drv_ctrl.steer_semantic_probe_full_rank(
+            pos_emb, device=self.device, sub_step_frac=0.0
+        ).to(self.dtype)
 
-        # Собираем полноранговое 19,200-D поле рабочей памяти активной пары (Catalyst + Substrate)
-        # для прямого вращения латентной сферы S^3:
+        # Функция реалтайм-опроса рабочей памяти для каждого шага денойзинга 3D-DiT:
+        # вращает ТОТ ЖЕ САМЫЙ базовый промпт сцены pos_emb (не смешивая разные слова!),
+        # поэтому горы и объекты остаются 100% четкими, но реагируют на ЭЭГ внутри генерации блока!
+        def _live_pos_emb_fn(step_i: int, total_steps: int) -> torch.Tensor:
+            frac = float(step_i) / float(max(1, total_steps))
+            return drv_ctrl.steer_semantic_probe_full_rank(
+                pos_emb, device=self.device, sub_step_frac=frac
+            ).to(self.dtype)
+
         sub_ctrl = self._get_controller(stage.entities[stage.quest.active_slot_idx], stage.quest.active_slot_idx)
         wm_cat_vec = drv_ctrl.latest_region_wm_19200
         wm_sub_vec = sub_ctrl.latest_region_wm_19200
@@ -402,6 +411,7 @@ class UniversalLatentAutobattlerEngine:
             wm_radius=self.wm_radius,
             base_seed=spin_seed,
             wm_19200_vec=combined_wm_19200,
+            live_pos_emb_fn=_live_pos_emb_fn,
         )
 
         self.local_context_latents_5d = unpacked_z0[:, :, -self.context_lat_frames:].detach().clone()
