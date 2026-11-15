@@ -1,9 +1,9 @@
-# 🌌 EXOCORTEX 3D-DiT: INTRANSITIVE MUTABLE CATALYST HETERARCHY & 524,288-D WORKING MEMORY AUTOBATTLER ENGINE
+# 🌌 EXOCORTEX 3D-DiT: INTRANSITIVE MUTABLE CATALYST HETERARCHY, INTRA-BLOCK REALTIME WORKING MEMORY STEERING & 524,288-D AUTOBATTLER ENGINE
 
-> **100% Coordinate-Free 3D-DiT World Simulator (`LTX-Video`), Zero-Reduction $N$-Agent Cortical Working Memory Bus (`[5 Regions × 5 Bands × 32 Slots × 120 Dipoles] = 96,000-D` $\to$ `[K × 128 × 4096] = 524,288-D` T5-XXL), Intransitive Autocatalytic RPG Party-Building (Zero "Imba" Topology), Feigenbaum Edge-of-Chaos Dynamics ($\delta = 4.6692016$), Zero-Stochasticity Brain-Lock (`stochastic = 0.0` on $S^3$), and Smooth Realtime Video Pacer for Consumer 12GB GPUs (RTX 3060)**
+> **100% Coordinate-Free 3D-DiT World Simulator (`LTX-Video`), Zero-Reduction $N$-Agent Cortical Working Memory Bus (`[5 Regions × 5 Bands × 32 Slots × 120 Dipoles] = 96,000-D` $\to$ `[K × 128 × 4096] = 524,288-D` T5-XXL), Intra-Step Realtime Working Memory Injection (`live_pos_emb_fn`), Variance-Preserving Context Blending for High `--wm-radius` (`0.84+`), Intransitive Autocatalytic RPG Party-Building (Zero "Imba" Topology), Feigenbaum Edge-of-Chaos Dynamics ($\delta = 4.6692016$), and Unified Web Studio Integration (`:8080`)**
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-EE4C2C.svg?style=flat&logo=pytorch)](https://pytorch.org/)
-[![CUDA](https://img.shields.io/badge/CUDA-12GB_VRAM_Native_BF16_Fast_Stream-76B900.svg?style=flat&logo=nvidia)](https://developer.nvidia.com/cuda-zone)
+[![CUDA](https://img.shields.io/badge/CUDA-FP8_%7C_INT8_%7C_NF4_%7C_BF16_Fast_Stream-76B900.svg?style=flat&logo=nvidia)](https://developer.nvidia.com/cuda-zone)
 [![DOI:10.1007/BF02478259](https://img.shields.io/badge/DOI-10.1007%2FBF02478259-00b4d8.svg)](https://doi.org/10.1007/BF02478259)
 [![DOI:10.1007/BF01020332](https://img.shields.io/badge/DOI-10.1007%2FBF01020332-ff9f1c.svg)](https://doi.org/10.1007/BF01020332)
 [![DOI:10.1016/0022-5193(86)90047-9](https://img.shields.io/badge/DOI-10.1016%2F0022--5193(86)90047--9-2ec4b6.svg)](https://doi.org/10.1016/0022-5193(86)90047-9)
@@ -20,10 +20,10 @@
 ## 📑 Table of Contents
 1. [Core Paradigm: Intransitive Mutable Catalysts & Zero-Imba RPG Party-Building](#1-core-paradigm-intransitive-mutable-catalysts--zero-imba-rpg-party-building)
 2. [Six Non-Negotiable Engineering Axioms](#2-six-non-negotiable-engineering-axioms)
-3. [Zero-Reduction 96,000-D $\to$ 524,288-D Choice Selection & $S^3$ Brain-Lock (`stochastic = 0.0`)](#3-zero-reduction-96000-d-to-524288-d-choice-selection--s3-brain-lock-stochastic--00)
+3. [Intra-Block Realtime Working Memory Steering (`live_pos_emb_fn`) & Variance-Preserving High-Radius Morphing (`--wm-radius 0.84`)](#3-intra-block-realtime-working-memory-steering-live_pos_emb_fn--variance-preserving-high-radius-morphing---wm-radius-084)
 4. [Zero-Overhead 128D Feigenbaum Oracle ($\delta = 4.6692016$) & Dynamic Branch Competition](#4-zero-overhead-128d-feigenbaum-oracle-delta--46692016--dynamic-branch-competition)
-5. [RTX 3060 (12GB) Fast-Stream Optimizations & Smooth Realtime Video Pacer (`RTF` Meter)](#5-rtx-3060-12gb-fast-stream-optimizations--smooth-realtime-video-pacer-rtf-meter)
-6. [Toggleable Diagnostic HUD (`--hud off|minimal|full` & Hotkey `[H]`)](#6-toggleable-diagnostic-hud---hud-offminimalfull--hotkey-h)
+5. [Unified Web Studio Integration (`:8080`), 60 Hz BLE/LSL $\to$ VRAM Bus & Smooth Realtime Video Pacer](#5-unified-web-studio-integration-8080-60-hz-blelsl-to-vram-bus--smooth-realtime-video-pacer)
+6. [Toggleable Diagnostic HUD (`--hud off|minimal|full` & Hotkey `[H]`) & Ultra-Compact Telemetry](#6-toggleable-diagnostic-hud---hud-offminimalfull--hotkey-h--ultra-compact-telemetry)
 7. [Architecture & Module Map (Immortal Dumb Weights Server + Client Logic)](#7-architecture--module-map-immortal-dumb-weights-server--client-logic)
 8. [Quick Start & CLI Reference](#8-quick-start--cli-reference)
 9. [Comprehensive Scientific Bibliography & DOIs](#9-comprehensive-scientific-bibliography--dois)
@@ -40,7 +40,7 @@ Conventional game engines and AI simulators suffer from two opposite failure mod
 
 ### The Law of Mutable Catalysts (RPG Party-Building Ontology):
 1. **Local Catalytic Invariance (Asymmetry Within a Single Reaction):**
-   In any active reaction $e_{\text{cat}}(s_c) + e_{\text{sub}}(s_a) \longrightarrow e_{\text{cat}}(s_c) + e_{\text{sub}}(s_b)$, the **Catalyst** ($e_{\text{cat}}$) **is not consumed and is not mutated back by the substrate** (`INV: 100% [CAT]`). It acts as an unyielding morphogenetic field that drives the **Substrate** ($e_{\text{sub}}$) across a phase transition $s_a \to s_b$.
+   In any active reaction $e_{\text{cat}}(s_c) + e_{\text{sub}}(s_a) \longrightarrow e_{\text{cat}}(s_c) + e_{\text{sub}}(s_b)$, the **Catalyst** ($e_{\text{cat}}$) **is not consumed and is not mutated back by the substrate** (`INV[CAT]`). It acts as an unyielding morphogenetic field that drives the **Substrate** ($e_{\text{sub}}$) across a phase transition $s_a \to s_b$.
 2. **Global Intransitive Mutability (Zero "Imba" Across the Ring):**
    No entity is an invincible "imba". Every catalyst that is invariant in Reaction $k$ **becomes the mutable substrate in Reaction $m$** when acted upon by its own upstream counter-catalyst:
 
@@ -60,10 +60,10 @@ Conventional game engines and AI simulators suffer from two opposite failure mod
    [e2: F3 (Violet-Monolith / Amethyst-Mirror / Magenta-Fortress)] ──┘
 ```
 
-* **`CAT(e2 -> e3)`:** `e2` (`F3`) is the unconsumed catalyst (`INV:100%`); `e3` (`F4`) is the mutable substrate (`s3 -> s4/s5`).
-* **`CAT(e3 -> e0)`:** `e3` (`F4`) becomes the unconsumed catalyst (`INV:100%`); `e0` (`FCz`) becomes the mutable substrate (`s0 -> s1/s2`).
-* **`CAT(e0 -> e1)`:** `e0` (`FCz`) becomes the unconsumed catalyst (`INV:100%`); `e1` (`AFz`) becomes the mutable substrate (`s0 -> s1/s2`).
-* **`CAT(e1 -> e2)`:** `e1` (`AFz`) becomes the unconsumed catalyst (`INV:100%`); `e2` (`F3`) becomes the mutable substrate (`s0 -> s1/s2`).
+* **`CAT(e2 -> e3)`:** `e2` (`F3`) is the unconsumed catalyst (`INV[CAT]`); `e3` (`F4`) is the mutable substrate (`s3 -> s4/s5`).
+* **`CAT(e3 -> e0)`:** `e3` (`F4`) becomes the unconsumed catalyst (`INV[CAT]`); `e0` (`FCz`) becomes the mutable substrate (`s0 -> s1/s2`).
+* **`CAT(e0 -> e1)`:** `e0` (`FCz`) becomes the unconsumed catalyst (`INV[CAT]`); `e1` (`AFz`) becomes the mutable substrate (`s0 -> s1/s2`).
+* **`CAT(e1 -> e2)`:** `e1` (`AFz`) becomes the unconsumed catalyst (`INV[CAT]`); `e2` (`F3`) becomes the mutable substrate (`s0 -> s1/s2`).
 
 ---
 
@@ -75,28 +75,31 @@ Conventional game engines and AI simulators suffer from two opposite failure mod
    No `seed_norm_x`, `seed_norm_y`, `cv2.circle`, or 2D bounding boxes ever touch the latent canvas. All genesis and morphogenesis emerge 100% semantically from T5-XXL embeddings and 3D-DiT spatio-temporal attention.
 3. **🚫 Axiom 3 — Zero Dimensionality Reduction in Working Memory & Embeddings:**
    Never collapse the 5 cortical frequency bands ($\Delta, \Theta, \text{B}, \Gamma, \text{Ripples}$) via `.mean(dim=0)` or reduce T5 embeddings `[1, 128, 4096]` to low-dimensional scalars. All $5 \times 32 \times 120 = 19,200$ regional modes ($96,000\text{-D}$ globally) are unfolded directly into `[128, 4096]` ($524,288\text{-D}$) to select and steer concepts.
-4. **🚫 Axiom 4 — Strict Prohibition on Token-Wise Averaging or Mid-Sequence `<pad>` Splicing:**
-   Never linearly average two different T5 text embeddings `(1 - a) * emb_A + a * emb_B` or splice truncated `[:64]` buffers containing `<pad>` tokens in the middle of a sequence. All `(Catalyst, Substrate)` sentence pairs are cleanly encoded via T5-XXL during startup warmup (`_warmup_manifest_semantics`) and steered via norm-preserving orthogonal geodesic rotation (`steer_semantic_probe_full_rank`).
+4. **🚫 Axiom 4 — Strict Prohibition on Token-Wise Averaging (`.lerp_()`) Across Distinct T5 Prompts or Corrupting Flow-Matching Velocity:**
+   * Never linearly average or `.lerp_()` two different T5 text embeddings `(1 - a) * emb_A + a * emb_B` (where `</s>` and `<pad>` positions differ), as doing so destroys T5 token semantics and turns structured scenes (mountains, crystals, labyrinths) into blurry color blobs.
+   * Never corrupt the Euler velocity vector `noise_pred_final` predicted by the 3D-DiT transformer or replace 3D isotropic Gaussian bases $\mathcal{N}(0, \mathbf{I})$ with spatially correlated noise. All working memory steering operates strictly via norm-preserving orthogonal geodesic rotation (`steer_semantic_probe_full_rank`) around the active scene prompt `base_pos_emb` and isotropic $S^3$ basis rotation (`_build_wm_s3_noise`).
 5. **🚫 Axiom 5 — Pure Diagnostic HUD Separation (Post-Interpolation Overlay):**
    `execute_turn_step` returns **100% clean, unannotated video frames**. `neuro_clash_hud.py` is applied *after* temporal frame interpolation inside `SmoothRealtimeVideoPacer` (or hidden completely via `--hud off` / hotkey `[H]`), ensuring HUD text never ghosts during frame blending and never contaminates the latent state.
 6. **🚫 Axiom 6 — Immortal Zero-Logic Weights Server (`neuro_battle_server.py`):**
-   Heavy weights (4-bit NF4 T5-XXL, native `bfloat16` 3D-DiT, 3D-VAE) reside permanently in VRAM inside `neuro_battle_server.py` (`localhost:6008`). All game, controller, stepper, and referee logic executes on the client (`neuro_engine.py`), allowing code and manifest modifications with **zero server restarts**.
+   Heavy weights (4-bit NF4 T5-XXL, `--quant fp8|int8|nf4|bf16` 3D-DiT, and 3D-VAE) reside permanently in VRAM inside `neuro_battle_server.py` (`localhost:6008`). All game, controller, stepper, and referee logic executes on the client (`neuro_engine.py`), allowing code and manifest modifications with **zero server restarts**.
 
 ---
 
-## 3. Zero-Reduction 96,000-D $\to$ 524,288-D Choice Selection & $S^3$ Brain-Lock (`stochastic = 0.0`)
+## 3. Intra-Block Realtime Working Memory Steering (`live_pos_emb_fn`) & Variance-Preserving High-Radius Morphing (`--wm-radius 0.84`)
 
-In `neuro_controller.py` and `neuro_solver_stepper.py`:
-1. **Full-Band Unfolding (`unfold_region_wm_to_524288d`):**
-   All $5 \times 32 = 160$ band-slot vectors of length $120$ of the active region ($19,200$ modes) and all $96,000$ global modes (`[160, 600]`) are projected via orthonormal bases $\mathbf{P}_{120 \times 4096}$ and $\mathbf{P}_{600 \times 4096}$ into a full-rank working memory tensor $\mathbf{\Psi}_{\text{WM}} \in \mathbb{R}^{128 \times 4096}$ ($524,288\text{-D}$).
-2. **Full-Rank Candidate Scoring & Intra-Reaction Hysteresis (`select_concept_full_rank_524288d`):**
-   Given $K$ candidate concepts in an agent's `allowed_pool`, their T5-XXL embeddings $\mathbf{B} \in \mathbb{R}^{K \times 128 \times 4096}$ are centered against the pool mean $\bar{\mathbf{B}}$ and scored across all $524,288$ dimensions. During an ongoing reaction (`maneuver_phase > 0`), a hysteresis margin of $25\%$ (`latch_current_target`) prevents mid-reaction prompt flickering while continuously applying smooth 524,288-D geodesic rotation (`--wm-radius`).
-3. **Zero-Stochasticity Brain-Lock on the $S^3$ Hypersphere (`_build_wm_s3_noise`):**
-   When `--stochastic 0.0` is set:
-   * The block seed is held **strictly invariant** across blocks (`step_seed = base_seed + global_stage * 1009`), and synthetic phase clocks stop auto-advancing.
-   * Four mutually orthogonal Gaussian bases $(\mathbf{b}_1, \mathbf{b}_2, \mathbf{b}_3, \mathbf{b}_4) \sim \mathcal{N}(0, \mathbf{I})$ on the $S^3$ hypersphere are rotated exclusively by the three Euler–Hopf phase angles $(\phi_a, \phi_b, \phi_c)$ extracted from the live 524,288-D working memory tensor:
-     $$\mathbf{g}_{12} = \cos(\phi_a)\mathbf{b}_1 + \sin(\phi_a)\mathbf{b}_2, \qquad \mathbf{g}_{34} = \cos(\phi_b)\mathbf{b}_3 + \sin(\phi_b)\mathbf{b}_4, \qquad \mathbf{G}_{\text{WM}} = \cos(\phi_c)\mathbf{g}_{12} + \sin(\phi_c)\mathbf{g}_{34}$$
-   * Consequently, when the user stabilizes their cortical phase pattern, the generative world locks into a stable attractor without random jumps.
+In `neuro_controller.py`, `neuro_solver_stepper.py`, and `neuro_engine.py`:
+
+1. **Intra-Step Realtime Working Memory Injection (`live_pos_emb_fn` Inside the Denoising Loop):**
+   Even when generating a 1.0s–1.5s video block (`--step-latents 2` or `3` with `--steps 6..18`), the engine does not wait until the end of the block to read new cortical states. Inside `for i, t in enumerate(timesteps)` in `LatentFlowWindowStepper.run_window`:
+   * On every denoising step $i$ (every ~150 ms), `live_pos_emb_fn(i, n_total_steps)` polls the live 60 Hz `HardwareVRAMBus` (`wm_field_5x5x32x120`) and recomputes the orthogonal geodesic rotation of the **current scene prompt** `pos_emb` in **< 0.2 ms** on the GPU (zero T5 encoder calls).
+   * Because it rotates the *same* base prompt `pos_emb` within its tangent cone while strictly preserving token norms (`ref_norms`), objects (mountains, cliffs, crystals, creatures) remain 100% sharp while responding in real time to cortical phase shifts during block generation.
+2. **Variance-Preserving Context Blending (Eliminating Lighting Flicker at `--wm-radius 0.84`):**
+   When conditioning on `n_cond` context latent frames (`anchor_prefix_5d`) with a high working memory radius (e.g., `wm_radius = 0.84`, where `tail_lock = 0.88 - 0.42 * 0.84 = 0.527`), a naive linear blend $w \cdot \mathbf{z}_{\text{anchor}} + (1 - w)\cdot \boldsymbol{\epsilon}$ reduces the variance of the conditioning frame to $w^2 + (1-w)^2 \approx 0.501$ ($\sigma \approx 0.707$), causing a brightness flash at every block boundary.
+   `LatentFlowWindowStepper` normalizes the context blend by $\sqrt{w^2 + (1 - w)^2}$:
+   $$\mathbf{z}_{\text{cond}} = \frac{w\,\mathbf{z}_{\text{anchor}} + (1 - w)\,\boldsymbol{\epsilon}_{S^3}}{\sqrt{w^2 + (1 - w)^2}}$$
+   preserving exact unit variance ($\sigma = 1.0$) across block seams at any `wm_radius` $\in [0.02, 0.95]$.
+3. **Isotropic $S^3$ Hypersphere Rotation (`_build_wm_s3_noise`):**
+   Four mutually independent isotropic Gaussian bases $(\mathbf{b}_1, \mathbf{b}_2, \mathbf{b}_3, \mathbf{b}_4) \sim \mathcal{N}(0, \mathbf{I})$ on $S^3$ are rotated by the working memory phase field $(\phi_a, \phi_b, \phi_c)$ and blended with stochastic noise via `math.cos(mix_ang) * g_wm + math.sin(mix_ang) * g_rand`, maintaining exact $\mathcal{N}(0, \mathbf{I})$ statistics at every voxel.
 
 ---
 
@@ -104,42 +107,38 @@ In `neuro_controller.py` and `neuro_solver_stepper.py`:
 
 In `neuro_referee.py`:
 1. **Zero Extra 3D-DiT Forward Passes (< 0.5 ms Execution):**
-   Instead of running 8+ separate 3D-DiT forward passes per block for the referee, `LatentFlowWindowStepper` captures the terminal 128D velocity tensor `last_velocity_5d` directly from the final denoising step. `CoordinateFreeHistoryReferee` projects the full-rank 524,288-D agent and hypothesis differentials ($\Delta\mathbf{E}_i = \mathbf{E}_i - \mathbf{E}_{\text{passive}}$) into the 128D Hilbert space and evaluates alignment with `last_velocity_5d` in **< 0.5 ms**.
+   `LatentFlowWindowStepper` captures the terminal 128D velocity tensor `last_velocity_5d` directly from the final denoising step. `CoordinateFreeHistoryReferee` projects the full-rank 524,288-D agent and hypothesis differentials ($\Delta\mathbf{E}_i = \mathbf{E}_i - \mathbf{E}_{\text{passive}}$) into the 128D Hilbert space and evaluates alignment with `last_velocity_5d` in **< 0.5 ms**.
 2. **Feigenbaum Edge-of-Chaos Integrator:**
    $$\delta = 4.669201609102990\dots, \qquad \alpha = 2.502907875095892\dots, \qquad r_\infty = 3.569945671870944\dots$$
    $$r_{\text{cat}} = r_\infty + \frac{(C_{\text{res}} - 0.35) + 1.2\,\Delta P}{\delta} \in [2.90, 3.92]$$
 3. **128D Reaction Branch Competition (`reaction_branch_scores`):**
-   All candidate catalytic branches `CAT(e_c -> e_s)` compete simultaneously in 524,288-D / 128D space; upon reaching $100\%$ reaction completion, the world transitions to the winning branch `chosen_next_stage_idx`.
+   All candidate catalytic branches `CAT(e_c -> e_s)` compete simultaneously in 524,288-D / 128D space; upon reaching $\ge 95\%$ reaction completion, the world transitions to the winning branch `chosen_next_stage_idx`.
 
 ---
 
-## 5. RTX 3060 (12GB) Fast-Stream Optimizations & Smooth Realtime Video Pacer (`RTF` Meter)
+## 5. Unified Web Studio Integration (`:8080`), 60 Hz BLE/LSL $\to$ VRAM Bus & Smooth Realtime Video Pacer
 
-To achieve continuous, non-jerky world generation on a single consumer **RTX 3060 (12GB VRAM)**:
+`neuro_run.py` serves as the unified 3D-DiT engine for both local Pygame windows (`--show-window`) and the **NeuroCanvas Production Web Studio (`web_cloud_gateway.py` on `:8080`)**:
 
-1. **Native `bfloat16` Transformer Execution (No Slow Software `float8` Casting on 12GB GPUs):**
-   On Ampere GPUs (RTX 3060), software `enable_layerwise_casting(torch.float8_e4m3fn)` incurs a ~35% per-layer dequantization penalty. Since the entire LTX-Video pipeline (4-bit NF4 T5-XXL + native `bfloat16` 3D-DiT + 3D-VAE) fits in **~7.3 GB VRAM**, `neuro_ltx_backend.py` keeps the 3D-DiT in native `bfloat16` on all GPUs with $\ge 9.5\text{ GB}$ VRAM.
-2. **Startup T5 Pair Pre-Warming (`_warmup_manifest_semantics` = 0.0 ms T5 in Loop):**
-   All individual archetype probes and all $(K_{\text{cat}} \times K_{\text{sub}})$ scene combinations are encoded once at startup and cached in VRAM. During live generation, T5 encoding takes **0.0 ms**.
-3. **Minimal Latent Step (`--step-latents 1` = 8 Frames / 0.5s) + Selective CFG:**
-   * Each step generates **1 new latent frame** (`8` RGB frames = `0.5s` of video) conditioned on `--context-latents` (`1` or `2` latent frames).
-   * **Selective CFG (`neuro_solver_stepper.py`):** Classifier-Free Guidance (`batch=2`, `cfg=2.6`) is executed only on the first half of the denoising steps (e.g., steps 1–2 of 4) to establish sharp crystal/nebula structure and reject brown mud, while the remaining steps execute with `batch=1` (`pos_emb` only), cutting transformer compute by **40%**.
-   * **Inter-Block Latent & Optical Cross-Fade:** The boundary between the context tail and the new latent frame is smoothly blended in latent space (`inertia_blend`) and across the first 3 RGB frames in `SmoothRealtimeVideoPacer`, eliminating visible block seams.
-4. **Smooth Realtime Video Pacer (`SmoothRealtimeVideoPacer` in `neuro_run.py`):**
-   Modeled after the adaptive resampler in `music_render_logic.py`:
-   * Continuously measures the **Realtime Factor (`RTF = raw_video_ms / gen_ms`)**.
-   * If `RTF < 1.0` (e.g., `0.5s` of video generated in `0.75s` $\to$ `RTF = 0.67x`), the pacer automatically stretches playback (`play_speed = 0.67x`) via smooth linear frame interpolation (`cv2.addWeighted`) so the visual stream flows at a constant **16 FPS with zero pauses or freezes**.
-   * If `RTF >= 1.0`, the HUD and terminal explicitly display the percentage of **spare compute headroom** (e.g., `+20% ZAPAS -> OK TO ADD --context-latents 2`), telling you when you can safely increase `--context-latents` or `--steps`.
+1. **Full Web Bluetooth (BLE) `FreeEEG16` Support (`app.js` / `static/app.js` $\to$ `/api/eeg_push` $\to$ 60 Hz `SharedAmodalCognitiveEngine`):**
+   * Clicking **`+ ПОДКЛЮЧИТЬ ПЛАТУ (BLE)`** in the browser connects to `FreeEEG16/24` over Web Bluetooth GATT, verifies hardware PGA gain (`4x..32x`), displays live packet rate (Hz) and 16-channel rail saturation boxes, and streams samples to `/api/eeg_push` (`DynamicLSLRouter` $\to$ `FreeEEG_<ID>`).
+   * Inside `neuro_run.py`, `start_live_lsl_to_vram_bus_thread` runs `SharedAmodalCognitiveEngine` at **60 Hz (every 16 ms)**, demodulating volume-conduction-free $ci\text{PLV} \in [-1, +1]$ across all 5 bands and publishing the 96,000-D working memory tensor directly into `HardwareVRAMBus` in GPU VRAM.
+   * Changing the cortical zone (`FCz`, `AFz`, `F3`, `F4`, `Fpz`) on the device card in the browser dynamically routes that board to the corresponding `WM-Agent` (`e0..e3`) on the fly.
+2. **Live Web Controls & Universal Lore Editor (`localhost:6007`):**
+   * Adjust `--wm-radius`, `--stochastic`, `--hud` (`off` | `minimal` | `full`), `--step-latents`, `--context-latents`, `--steps`, and `--cfg` live from the browser sliders.
+   * Switch between `.json` world manifests (`configs/mode_*.json`) and `.txt` lore files (`lore/world_lore.txt`, `lore/maze_lore.txt`), or add/remove concepts per region (`[FCZ]`, `[AFZ]`, `[F3]`, `[F4]`, `[FPZ]`, `[NEGATIVE]`) in real time. When loading plain `.txt` lores (e.g., mountains/forests/oceans), `apply_web_sections_to_manifest` automatically clears any previous `arena_context_desc` so scenes render 100% true to the new lore.
+3. **Smooth Realtime Video Pacer (`SmoothRealtimeVideoPacer` on `localhost:6002`):**
+   * Continuously measures `RTF = raw_video_ms / gen_ms` and adapts `play_speed` via linear frame interpolation so the stream flows at a constant **16 FPS with zero pauses or freezes**.
 
 ---
 
-## 6. Toggleable Diagnostic HUD (`--hud off|minimal|full` & Hotkey `[H]`)
+## 6. Toggleable Diagnostic HUD (`--hud off|minimal|full` & Hotkey `[H]`) & Ultra-Compact Telemetry
 
-You can control or hide the diagnostic overlay both via CLI flags and live during a run:
-* **`--hud off` (or `--no-hud`):** **Default for Neurofeedback.** Renders a 100% clean, unannotated generative world in the Pygame window, browser stream (`:8080`), and saved `.mp4`, while writing full telemetry to the terminal and `_telemetry.jsonl`.
-* **`--hud minimal`:** Displays only a thin top status bar showing `RTF`, `PlaySpd`, `Lag (ms)` / `Headroom (%)`, `Gen (ms)`, `dS%`, and Feigenbaum `r`.
-* **`--hud full`:** Displays the full 4-agent choice cards (`*WIN` vs. `oALT`), bottom trajectory graph, and 128D branch competition, with all percentages smoothly interpolated at 60 FPS across frames.
-* **Live Hotkey `[H]` in the Pygame Window:** Cycles `OFF` $\to$ `MINIMAL` $\to$ `FULL` $\to$ `OFF` on the fly without interrupting generation.
+* **`--hud off` (or `--no-hud`):** Renders a 100% clean, unannotated generative world in the Pygame window, browser stream (`:8080`), and saved `.mp4`.
+* **`--hud minimal`:** Displays a thin top status bar showing `RTF`, `PlaySpd`, `Lag (ms)` / `ZAPAS (%)`, `Gen (ms)`, `dS%`, and Feigenbaum `r`.
+* **`--hud full`:** Displays the 4-agent choice cards (`*WIN` vs. `oALT`), bottom trajectory graph, and 128D branch competition.
+* **Live Hotkey `[H]` in Pygame (or Dropdown in Web Studio):** Cycles `OFF` $\to$ `MINIMAL` $\to$ `FULL` on the fly.
+* **Ultra-Compact Ring Log (`telemetry_compact.jsonl`):** Writes a 200-line ring buffer (~140 bytes/line) with `step`, `t`, `stg`, `drv`, `dS`, `P+`, `r`, `cat_res`, `win`, `branches`, `rtf`, `spd`, and `ms` for instant copy-pasting into chat.
 
 ---
 
@@ -147,29 +146,33 @@ You can control or hide the diagnostic overlay both via CLI flags and live durin
 
 | File | Role in the Heterarchy |
 | :--- | :--- |
-| **`neuro_battle_server.py`** | **Immortal Zero-Logic Weights Server (`localhost:6008`):** holds T5-XXL, 3D-DiT, and 3D-VAE in VRAM (`ping`, `encode_semantics`, `transformer_forward`, `decode_latents`). Never requires a restart when engine, controller, or referee code changes. |
-| **`neuro_ltx_backend.py`** | `LTXModelBackend` (server-side native `bfloat16` container with 512px VAE tiling threshold) and `RemoteLTXModelBackend` (client-side `float16` IPC proxy with local prompt cache). |
+| **`neuro_battle_server.py`** | **Immortal Zero-Logic Weights Server (`localhost:6008`):** holds T5-XXL, 3D-DiT (`--quant fp8\|int8\|nf4\|bf16`), and 3D-VAE in VRAM with OOM guards and T5 CPU offloading. Never requires a restart when engine, controller, or referee code changes. |
+| **`neuro_ltx_backend.py`** | `LTXModelBackend` (server-side container with Denoising VAE Decoder `decode_t=0.05`, `decode_noise_scale=0.025`) and `RemoteLTXModelBackend` (client-side `float16` IPC proxy with local prompt cache). |
 | **`neuro_vram_bus.py`** | Zero-copy CUDA IPC shared memory bus (`318,576` floats) exposing `wm_field_5x5x32x120`. |
-| **`neuro_controller.py`** | `SymmetricBotController`: unfolds all 96,000 cortical modes into `524,288-D` (`[128, 4096]`), selects concepts with intra-reaction hysteresis, and locks synthetic clocks when `stochastic == 0.0`. |
-| **`neuro_solver_stepper.py`** | `LatentFlowWindowStepper`: 1-latent-step integrator with `linear_quadratic_sigmas`, selective CFG, $S^3$ spherical working-memory noise rotation, and inter-block latent cross-fading. |
+| **`neuro_controller.py`** | `SymmetricBotController`: unfolds all 96,000 cortical modes into `524,288-D` (`[128, 4096]`), selects concepts, and performs norm-preserving geodesic rotation (`steer_semantic_probe_full_rank`) with intra-step `sub_step_frac` support. |
+| **`neuro_solver_stepper.py`** | `LatentFlowWindowStepper`: 128D Euler Flow-Matching integrator with isotropic $S^3$ working-memory rotation, variance-preserving context blending (`norm_preserve`), and intra-step realtime callback (`live_pos_emb_fn`). |
 | **`neuro_referee.py`** | `CoordinateFreeHistoryReferee`: zero-overhead (< 0.5 ms) 128D/524,288-D Feigenbaum $\delta = 4.669$ oracle and multi-branch competition evaluator. |
-| **`neuro_engine.py`** | `UniversalLatentAutobattlerEngine`: pre-warms all T5 pairs at startup, orchestrates $N$ agents, and returns clean video frames + telemetry trajectories. |
+| **`neuro_engine.py`** | `UniversalLatentAutobattlerEngine`: pre-warms all T5 pairs at startup (0.0 ms T5 in loop), orchestrates $N$ agents, provides `_live_pos_emb_fn` during denoising steps, and returns clean video frames + telemetry. |
 | **`neuro_clash_hud.py`** | Post-interpolation diagnostic HUD overlay. |
-| **`neuro_run.py`** | CLI launcher containing `SmoothRealtimeVideoPacer` (continuous 16 FPS frame interpolation, `RTF` headroom meter, Pygame window with `[H]` HUD toggle, and JSONL logger). |
+| **`neuro_run.py`** | Unified launcher with `SmoothRealtimeVideoPacer` (port `6002`), Web Studio bridge (port `6007`), 60 Hz `SharedAmodalCognitiveEngine` BLE/LSL $\to$ VRAM bus thread, and `telemetry_compact.jsonl` logger. |
+| **`web_cloud_gateway.py` & `app.js`** | Unified HTTPS Web Studio (`:8080`) with Web Bluetooth GATT `FreeEEG16` connection, live 3D-DiT sliders, and regional lore editor. |
 
 ---
 
 ## 8. Quick Start & CLI Reference
 
 ```bash
-# Terminal 1: Launch Immortal Weights Server in VRAM (Once per boot)
-python3 neuro_battle_server.py --port 6008
+# Terminal 1: Launch Immortal Weights Server in VRAM (Once per boot; default --quant fp8 ~1.9GB VRAM)
+python3 neuro_battle_server.py --port 6008 --quant fp8
 
-# Terminal 2 (Option A): Pure Brain-Locked World (stochastic=0.0, Clean Screen without HUD, [H] to toggle RTF bar)
-python3 neuro_run.py --mode maze --show-window --stochastic 0.0 --wm-radius 0.25 --context-latents 1 --steps 4 --cfg 2.6 --hud off
+# Terminal 2 (Optional): Launch Unified Web Studio Gateway on :8080 (for Browser UI & Web Bluetooth BLE boards)
+python3 web_cloud_gateway.py --port 8080 --cert cert.pem --key key.pem --video-lore configs/mode_03_semantic_maze_gm.json
 
-# Terminal 2 (Option B): Deprivation White Ball 4-Way EEG Control Test with Minimal RTF Bar
-python3 neuro_run.py --mode ball --show-window --stochastic 0.0 --wm-radius 0.30 --context-latents 1 --steps 4 --cfg 2.6 --hud minimal
+# Terminal 3 (Option A): High-Radius Brain-Controlled Maze/Autobattler (wm-radius=0.84, step-latents=3, steps=8)
+python3 neuro_run.py --mode maze --context-latents 1 --step-latents 3 --steps 8 --cfg 3.2 --stochastic 0.0 --entity-source "e0=eeg:FCz" --wm-radius 0.84 --hud full
+
+# Terminal 3 (Option B): Deprivation White Ball 4-Way EEG Control Test with Minimal RTF Bar
+python3 neuro_run.py --mode ball --show-window --stochastic 0.0 --wm-radius 0.35 --context-latents 1 --step-latents 2 --steps 6 --cfg 3.0 --hud minimal
 ```
 
 ---
@@ -194,4 +197,3 @@ python3 neuro_run.py --mode ball --show-window --stochastic 0.0 --wm-radius 0.30
 16. <a id="ref-16"></a>**Hawkins, J., Ahmad, S., & Cui, Y. (2017).** *A Theory of How Columns in the Neocortex Enable Learning the Structure of the World.* Frontiers in Neural Circuits, 11:81. [https://doi.org/10.3389/fncir.2017.00081](https://doi.org/10.3389/fncir.2017.00081)
 17. <a id="ref-17"></a>**HaCohen, Y., Chiprut, N., Brazowski, B., Shalem, D., Moshe, D., Richardson, E., Levin, E., Shiran, G., Zabari, N., Gordon, O., Panet, P., Weissbuch, S., Kulikov, V., Bitterman, Y., Melumian, Z., & Bibi, O. (2024).** *LTX-Video: Realtime Video Latent Diffusion.* arXiv:2501.00103. [https://doi.org/10.48550/arXiv.2501.00103](https://doi.org/10.48550/arXiv.2501.00103)
 18. <a id="ref-18"></a>**Yang, C., Wan, H., Peng, Y., Cheng, X., Yu, Z., Zhang, J., Yu, J., Yu, X., Zheng, X., Zhou, D., & Wu, C. (2025).** *Reasoning via Video: The First Evaluation of Video Models’ Reasoning Abilities through Maze-Solving Tasks (VR-Bench).* arXiv:2511.15065. [https://doi.org/10.48550/arXiv.2511.15065](https://doi.org/10.48550/arXiv.2511.15065)
-
