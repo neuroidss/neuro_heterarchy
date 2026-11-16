@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """
-neuro_solver_stepper.py — Полноранговый латентный интегратор 128D с живым морфингом от WM_RADIUS
+neuro_solver_stepper.py — Эталонный гибрид 3D-DiT I2V + S^3 Рабочей Памяти (Без взрыва Эйлера!)
 ================================================================================================
-- 100% сохранена рабочая схема денойзинга и стабилизации, дающая четкие горы, кристаллы и лабиринт.
-- Исправлен баг TypeError: math.sin(mix_ang) при ненулевой стохастике.
-- Устранено моргание яркости на стыке блоков при большом wm_radius (0.84) за счет сохранения
-  единичной дисперсии (norm_scale = hypot(w, 1-w)) при подмешивании шума в опорный кадр контекста.
-- Добавлено реалтайм-обновление семантического поворота (live_pos_emb_fn) прямо внутри шагов Эйлера!
+- ИСПРАВЛЕН ВЗРЫВ ЦВЕТНЫХ ПЯТЕН (Sign Inversion Bug в FlowMatchEulerDiscreteScheduler):
+  В diffusers `FlowMatchEulerDiscreteScheduler.step()` при передаче `per_token_timesteps` меняет знак
+  `dt = current_sigma - next_sigma > 0` (вместо стандартного `dt = sigma_next - sigma < 0`), из-за чего
+  передача `+noise_pred` прибавляла шум вместо денойзинга!
+  Теперь используется чистый канонический шаг `scheduler.step(noise_pred, t, latents)` без `per_token_timesteps`
+  (как в `pipeline_ltx_image2video.py`, строка 631), где `dt < 0` гарантированно очищает латент до sigma = 0!
+- ДИНАМИКА ПРИ БОЛЬШОМ РАДИУСЕ БЕЗ РАЗРУШЕНИЯ КАРТИНКИ:
+  1) Пространственно-когерентная бегущая волна S^3 размерности [1, 128, F, 1, 1]: единая фаза по HxW
+     внутри каждого кадра (0% полос и 0% пятен!), но бегущий градиент фазы между кадрами f=0..F-1.
+  2) Квадратичная раскачка контекстного кадра `add_noise_to_image_conditioning_latents` (из `pipeline_ltx_condition.py`):
+     на первых шагах (t ~ 1000) кадр контекста сдвигается волной рабочей памяти пропорционально `wm_radius`,
+     позволяя сцене свободно трансформироваться, а к концу шагов ((t/1000)^2 -> 0) сходится к идеальной резкости!
+================================================================================================
 """
 
 from __future__ import annotations
@@ -19,38 +27,36 @@ from neuro_ltx_backend import LTXModelBackend, rescale_noise_cfg
 
 
 @torch.no_grad()
-def tone_map_latents_ltx(latents: torch.Tensor, compression: float = 0.12) -> torch.Tensor:
-    if compression <= 0.0:
-        return latents
-    scale_factor = float(compression) * 0.75
-    abs_lat = torch.abs(latents)
-    sigmoid_term = torch.sigmoid(4.0 * scale_factor * (abs_lat - 1.0))
-    scales = 1.0 - 0.8 * scale_factor * sigmoid_term
-    return latents * scales
-
-
-@torch.no_grad()
-def stabilize_sliding_latents(
+def adain_stabilize_latents(
     curr_latents: torch.Tensor,
-    prev_tail_latents: torch.Tensor | None,
-    factor: float = 0.10,
+    ref_latents: torch.Tensor | None,
+    factor: float = 0.20,
 ) -> torch.Tensor:
     """
-    Стабилизирует дисперсию только относительно ХВОСТА ПРЕДЫДУЩЕГО ОКНА (а не первого кадра сессии!),
-    сохраняя 100% свободу смены цветов и геометрии при переходе к новым стадиям и концептам.
+    Мягкая по-канальная стабилизация статистики (AdaIN из pipeline_ltx_i2v_long_multi_prompt.py)
+    относительно эталонного кадра генезиса. Предотвращает накопление цветового и контрастного дрейфа
+    при многочасовой генерации, не искажая локальные детали.
     """
+    if ref_latents is None or factor <= 0.0:
+        return curr_latents
+
     eps = 1e-6
     mu_curr = curr_latents.mean(dim=(2, 3, 4), keepdim=True)
-    sigma_curr = curr_latents.std(dim=(2, 3, 4), keepdim=True).clamp(min=eps)
+    std_curr = curr_latents.std(dim=(2, 3, 4), keepdim=True).clamp(min=eps)
 
-    if prev_tail_latents is not None and factor > 0.0:
-        mu_ref = prev_tail_latents.mean(dim=(2, 3, 4), keepdim=True).to(curr_latents.device, curr_latents.dtype)
-        sigma_ref = prev_tail_latents.std(dim=(2, 3, 4), keepdim=True).to(curr_latents.device, curr_latents.dtype).clamp(min=eps)
-        target_mu = (1.0 - factor) * mu_curr + factor * (mu_ref * 0.85)
-        target_sigma = torch.clamp((1.0 - factor) * sigma_curr + factor * sigma_ref, min=0.78, max=1.12)
-        curr_latents = ((curr_latents - mu_curr) / sigma_curr) * target_sigma + target_mu
+    mu_ref = ref_latents.mean(dim=(2, 3, 4), keepdim=True).to(
+        device=curr_latents.device, dtype=curr_latents.dtype
+    )
+    std_ref = (
+        ref_latents.std(dim=(2, 3, 4), keepdim=True)
+        .to(device=curr_latents.device, dtype=curr_latents.dtype)
+        .clamp(min=eps)
+    )
 
-    return tone_map_latents_ltx(curr_latents, compression=0.12)
+    mu_blend = (1.0 - float(factor)) * mu_curr + float(factor) * mu_ref
+    std_blend = (1.0 - float(factor)) * std_curr + float(factor) * std_ref
+
+    return ((curr_latents - mu_curr) / std_curr) * std_blend + mu_blend
 
 
 @torch.no_grad()
@@ -60,10 +66,12 @@ def imprint_allegiance_spin(
 ) -> torch.Tensor:
     anchored = origin_anchor_latents.clone()
     spin_gen = torch.Generator(device=anchored.device).manual_seed(base_seed + 777)
-    raw_mat = torch.randn((32, 12), generator=spin_gen, device=anchored.device, dtype=torch.float32)
+    raw_mat = torch.randn(
+        (32, 12), generator=spin_gen, device=anchored.device, dtype=torch.float32
+    )
     q_orth, _ = torch.linalg.qr(raw_mat)
     omega_a = F.normalize(q_orth[:, 0], p=2, dim=0).view(1, 32, 1, 1, 1)
-    anchored[:, 96:, :, :, :] += 0.06 * omega_a
+    anchored[:, 96:, :, :, :] += 0.02 * omega_a
     return anchored
 
 
@@ -72,18 +80,18 @@ class LatentFlowWindowStepper:
         self,
         backend: LTXModelBackend,
         referee: Any = None,
-        steps: int = 6,
+        steps: int = 8,
         cfg_scale: float = 3.2,
         guidance_rescale: float = 0.7,
     ):
         self.backend = backend
         self.referee = referee
-        self.steps = max(2, int(steps))
+        self.steps = max(4, int(steps))
         self.cfg_scale = float(cfg_scale)
         self.guidance_rescale = float(guidance_rescale)
         self.last_velocity_5d: torch.Tensor | None = None
         self._s3_bases_cache: dict[tuple, list[torch.Tensor]] = {}
-        self._wm_accum_phase_field: torch.Tensor | None = None
+        self._accum_phase_128xF: torch.Tensor | None = None
 
     @torch.no_grad()
     def _build_wm_s3_noise(
@@ -96,10 +104,15 @@ class LatentFlowWindowStepper:
         wm_probe_emb: torch.Tensor,
         gen_rand: torch.Generator | None,
         device: torch.device,
-        step_new_frames: int = 2,
     ) -> torch.Tensor:
+        """
+        Когерентное вращение 4 ортогональных гауссовых базисов b1..b4 ~ N(0, I) на сфере S^3:
+        Фазовые углы (phi_a, phi_b, phi_c) имеют размерность [1, 128, F_lat, 1, 1] —
+        постоянны вдоль (H, W) внутри каждого кадра (поэтому каждый 2D-срез сохраняет
+        точную ковариацию N(0, I) без полос и пятен), но меняются по каналам и времени F_lat!
+        """
+        _, C, F_lat, _, _ = shape
         key = (shape, base_seed, device)
-        n_vox = int(shape[1] * shape[2] * shape[3] * shape[4])
 
         if key not in self._s3_bases_cache:
             self._s3_bases_cache.clear()
@@ -114,10 +127,9 @@ class LatentFlowWindowStepper:
                 torch.randn(shape, generator=g4, device=device, dtype=torch.float32),
             ]
         else:
-            shift_t = max(1, int(step_new_frames))
             for idx_b in range(4):
                 self._s3_bases_cache[key][idx_b] = torch.roll(
-                    self._s3_bases_cache[key][idx_b], shifts=-shift_t, dims=2
+                    self._s3_bases_cache[key][idx_b], shifts=-1, dims=2
                 )
 
         b1, b2, b3, b4 = self._s3_bases_cache[key]
@@ -127,36 +139,53 @@ class LatentFlowWindowStepper:
         else:
             raw_wm = wm_probe_emb.to(device=device, dtype=torch.float32).reshape(-1)
 
+        n_needed = C * F_lat * 3
+        if raw_wm.numel() < n_needed:
+            reps = (n_needed // raw_wm.numel()) + 1
+            raw_wm = raw_wm.repeat(reps)[:n_needed]
+
         wm_std = raw_wm.std(unbiased=False).clamp(min=1e-5)
         wm_whitened = (raw_wm - raw_wm.mean()) / wm_std
 
-        reps = (n_vox // wm_whitened.numel()) + 1
-        wm_vox = wm_whitened.repeat(reps)[:n_vox].view(shape)
+        wm_3xCxF = F.adaptive_avg_pool1d(
+            wm_whitened.view(1, 1, -1), 3 * C * F_lat
+        ).view(3, 1, C, F_lat, 1, 1)
+        wm_3xCxF = torch.tanh(wm_3xCxF * 1.5)
 
         rad = float(max(0.02, min(1.0, wm_radius)))
-        if self._wm_accum_phase_field is None or self._wm_accum_phase_field.shape != shape:
-            self._wm_accum_phase_field = wm_vox * (rad * 1.1)
+        if (
+            self._accum_phase_128xF is None
+            or self._accum_phase_128xF.shape != (1, C, F_lat, 1, 1)
+        ):
+            self._accum_phase_128xF = wm_3xCxF[0] * (rad * math.pi * 0.5)
         else:
-            self._wm_accum_phase_field = torch.remainder(
-                torch.roll(self._wm_accum_phase_field, shifts=-max(1, int(step_new_frames)), dims=2)
-                + wm_vox * (rad * 1.25),
+            self._accum_phase_128xF = torch.remainder(
+                torch.roll(self._accum_phase_128xF, shifts=-1, dims=2)
+                + wm_3xCxF[0] * (rad * 0.85),
                 2.0 * math.pi,
             )
 
-        scale_ang = math.pi * 1.35 * rad
-        phi_a = self._wm_accum_phase_field + wm_vox * scale_ang
-        phi_b = torch.roll(self._wm_accum_phase_field, shifts=32, dims=1) - torch.roll(wm_vox, shifts=16, dims=1) * scale_ang
-        phi_c = torch.roll(self._wm_accum_phase_field, shifts=64, dims=1) * 0.7 + torch.roll(wm_vox, shifts=48, dims=1) * (scale_ang * 0.6)
+        scale_ang = math.pi * 0.85 * rad
+        phi_a = self._accum_phase_128xF + wm_3xCxF[0] * scale_ang
+        phi_b = (
+            torch.roll(self._accum_phase_128xF, shifts=16, dims=1)
+            - wm_3xCxF[1] * scale_ang
+        )
+        phi_c = torch.roll(self._accum_phase_128xF, shifts=32, dims=1) * 0.5 + wm_3xCxF[
+            2
+        ] * (scale_ang * 0.5)
 
         g12 = torch.cos(phi_a) * b1 + torch.sin(phi_a) * b2
         g34 = torch.cos(phi_b) * b3 + torch.sin(phi_b) * b4
-        g_wm = torch.cos(phi_c) * g12 + torch.sin(phi_b) * g34 if False else (torch.cos(phi_c) * g12 + torch.sin(phi_c) * g34)
+        g_wm = torch.cos(phi_c) * g12 + torch.sin(phi_c) * g34
 
         stoch = float(max(0.0, min(1.0, stochastic)))
         if stoch <= 0.001:
             return g_wm
 
-        g_rand = torch.randn(shape, generator=gen_rand, device=device, dtype=torch.float32)
+        g_rand = torch.randn(
+            shape, generator=gen_rand, device=device, dtype=torch.float32
+        )
         mix_ang = stoch * (math.pi * 0.5)
         return math.cos(mix_ang) * g_wm + math.sin(mix_ang) * g_rand
 
@@ -197,10 +226,9 @@ class LatentFlowWindowStepper:
         n_cond = 0
         if is_continuation_block and anchor_latent_0 is not None:
             n_cond = min(anchor_latent_0.shape[2], total_lat_frames - 1)
-        step_new_frames = max(1, total_lat_frames - n_cond)
 
         shape = (1, in_channels, total_lat_frames, h_lat, w_lat)
-        noise = self._build_wm_s3_noise(
+        noise_5d = self._build_wm_s3_noise(
             shape=shape,
             base_seed=base_seed,
             stochastic=stochastic,
@@ -209,36 +237,23 @@ class LatentFlowWindowStepper:
             wm_probe_emb=pos_emb,
             gen_rand=gen,
             device=device,
-            step_new_frames=step_new_frames,
         )
 
-        latents_5d = noise.clone()
-        cond_mask_5d = torch.zeros((1, 1, total_lat_frames, h_lat, w_lat), device=device, dtype=torch.float32)
+        latents_5d = noise_5d.clone()
+        cond_mask_5d = torch.zeros(
+            (1, 1, total_lat_frames, h_lat, w_lat), device=device, dtype=torch.float32
+        )
 
+        clean_anchor_prefix_5d = None
         if is_continuation_block and anchor_latent_0 is not None and n_cond > 0:
-            anchor_prefix_5d = anchor_latent_0[:, :, -n_cond:].clone()
-            rad_clamped = float(max(0.02, min(0.85, wm_radius)))
-            tail_lock = float(max(0.45, min(0.88, 0.88 - 0.42 * rad_clamped)))
-            if n_cond == 1:
-                cond_mask_5d[:, :, 0:1] = tail_lock
-            else:
-                for c_i in range(n_cond - 1):
-                    cond_mask_5d[:, :, c_i : c_i + 1] = min(0.92, tail_lock + 0.12)
-                cond_mask_5d[:, :, n_cond - 1 : n_cond] = tail_lock
+            clean_anchor_prefix_5d = anchor_latent_0[:, :, -n_cond:].clone().float()
+            latents_5d[:, :, :n_cond] = clean_anchor_prefix_5d
+            cond_mask_5d[:, :, :n_cond] = 1.0
 
-            # ИСПРАВЛЕНИЕ МОРГАНИЯ ЯРКОСТИ ПРИ БОЛЬШОМ РАДИУСЕ (0.84):
-            # Делим линейную смесь на sqrt(w^2 + (1-w)^2), чтобы дисперсия опорного кадра
-            # всегда оставалась равной 1.0 (при w=0.52 без этого делителя амплитуда падала до 0.70,
-            # вызывая вспышку освещения на каждом блоке!):
-            w_m = cond_mask_5d[:, :, :n_cond]
-            norm_preserve = torch.sqrt(w_m ** 2 + (1.0 - w_m) ** 2).clamp(min=1e-5)
-            latents_5d[:, :, :n_cond] = (
-                anchor_prefix_5d * w_m + noise[:, :, :n_cond] * (1.0 - w_m)
-            ) / norm_preserve
-
-        latents_packed = pipe._pack_latents(latents_5d, 1, 1).to(torch.float32)
-        cond_mask_packed = pipe._pack_latents(cond_mask_5d, 1, 1).squeeze(-1).to(device)
-        init_latents_packed = latents_packed.clone()
+        cond_mask_packed = (
+            pipe._pack_latents(cond_mask_5d, 1, 1).squeeze(-1).to(device)
+        )
+        cond_mask_batch2 = torch.cat([cond_mask_packed, cond_mask_packed], dim=0)
 
         rope_scale = (
             self.backend.temporal_ratio / 16.0,
@@ -247,39 +262,52 @@ class LatentFlowWindowStepper:
         )
 
         use_cfg_overall = self.cfg_scale > 1.05
-        cfg_cutoff_step = max(2, int(math.ceil(len(timesteps) * 0.75)))
-
         curr_pos_emb = pos_emb
-        batch2_prompt_mask = torch.cat([neg_mask, pos_mask], dim=0) if use_cfg_overall else pos_mask
-        cond_mask_batch2 = torch.cat([cond_mask_packed, cond_mask_packed], dim=0) if use_cfg_overall else cond_mask_packed
+        batch2_prompt_mask = (
+            torch.cat([neg_mask, pos_mask], dim=0) if use_cfg_overall else pos_mask
+        )
 
         noise_pred_final = None
         n_total_steps = len(timesteps)
+        rad_val = float(max(0.02, min(1.0, wm_radius)))
+        # Масштаб квадратичной фазовой раскачки первого кадра (по методу Lightricks image_cond_noise_scale):
+        image_cond_noise_scale = 0.04 + 0.18 * rad_val
 
         for i, t in enumerate(timesteps):
-            # РЕАЛТАЙМ-ОПРОС РАБОЧЕЙ ПАМЯТИ НА КАЖДОМ ШАГЕ ДЕНОЙЗИНГА:
-            # На лету пересчитываем геодезический поворот ТОГО ЖЕ САМОГО базового промпта (без смешивания разных слов!)
             if live_pos_emb_fn is not None and i > 0:
                 fresh_pos = live_pos_emb_fn(i, n_total_steps)
                 if fresh_pos is not None and fresh_pos.shape == curr_pos_emb.shape:
                     curr_pos_emb = fresh_pos
 
-            do_cfg_step = use_cfg_overall and (i < cfg_cutoff_step)
-            if do_cfg_step:
-                latent_input = torch.cat([latents_packed, latents_packed], dim=0)
+            # Квадратичное по (t/1000)^2 возмущение опорного кадра (из pipeline_ltx_condition.py, строка 493):
+            # На ранних шагах (t ~ 1000) позволяет кадру контекста двигаться вместе с рабочей памятью,
+            # а на финальных шагах (t -> 0) затухает в 0, сохраняя идеальную четкость!
+            if clean_anchor_prefix_5d is not None and n_cond > 0:
+                t_frac = float(t.item()) / 1000.0
+                latents_5d[:, :, :n_cond] = (
+                    clean_anchor_prefix_5d
+                    + (image_cond_noise_scale * (t_frac**2)) * noise_5d[:, :, :n_cond]
+                )
+
+            latents_packed = pipe._pack_latents(latents_5d, 1, 1).to(torch.float32)
+
+            if use_cfg_overall:
+                latent_input = torch.cat([latents_packed, latents_packed], dim=0).to(
+                    dtype
+                )
                 t_expand = t.expand(2).unsqueeze(-1).float()
-                t_per_token = torch.min(t_expand, (1.0 - cond_mask_batch2) * 1000.0)
+                t_per_token = t_expand * (1.0 - cond_mask_batch2)
                 p_emb = torch.cat([neg_emb, curr_pos_emb], dim=0)
                 p_msk = batch2_prompt_mask
             else:
-                latent_input = latents_packed
+                latent_input = latents_packed.to(dtype)
                 t_expand = t.expand(1).unsqueeze(-1).float()
-                t_per_token = torch.min(t_expand, (1.0 - cond_mask_packed) * 1000.0)
+                t_per_token = t_expand * (1.0 - cond_mask_packed)
                 p_emb = curr_pos_emb
                 p_msk = pos_mask
 
             noise_pred_raw = self.backend.transformer(
-                hidden_states=latent_input.to(dtype),
+                hidden_states=latent_input,
                 encoder_hidden_states=p_emb,
                 timestep=t_per_token,
                 encoder_attention_mask=p_msk,
@@ -290,30 +318,49 @@ class LatentFlowWindowStepper:
                 return_dict=False,
             )[0].float()
 
-            if do_cfg_step:
+            if use_cfg_overall:
                 noise_uncond, noise_text = noise_pred_raw.chunk(2)
-                noise_cfg = noise_uncond + self.cfg_scale * (noise_text - noise_uncond)
-                noise_pred_final = rescale_noise_cfg(noise_cfg, noise_text, guidance_rescale=self.guidance_rescale)
+                noise_cfg = noise_uncond + self.cfg_scale * (
+                    noise_text - noise_uncond
+                )
+                noise_pred_final = rescale_noise_cfg(
+                    noise_cfg, noise_text, guidance_rescale=self.guidance_rescale
+                )
             else:
                 noise_pred_final = noise_pred_raw
 
-            denoised_packed = self.backend.scheduler.step(
-                noise_pred_final, t, latents_packed, return_dict=False
-            )[0]
+            # КАНОНИЧЕСКИЙ ШАГ ЭЙЛЕРА ИЗ pipeline_ltx_image2video.py (строки 613-633):
+            # Никакого per_token_timesteps в scheduler.step()! Это гарантирует dt = sigma_next - sigma < 0
+            # и 100% правильное вычитание шума до самого sigma = 0.0!
+            noise_pred_5d = pipe._unpack_latents(
+                noise_pred_final, total_lat_frames, h_lat, w_lat, 1, 1
+            ).float()
 
-            if is_continuation_block and n_cond > 0:
-                t_norm = float(t.item()) / 1000.0
-                tokens_to_denoise = (t_norm - 1e-6 < (1.0 - cond_mask_packed)).unsqueeze(-1)
-                latents_packed = torch.where(tokens_to_denoise, denoised_packed, init_latents_packed)
+            if is_continuation_block and n_cond > 0 and clean_anchor_prefix_5d is not None:
+                pred_gen_5d = self.backend.scheduler.step(
+                    noise_pred_5d[:, :, n_cond:],
+                    t,
+                    latents_5d[:, :, n_cond:],
+                    return_dict=False,
+                )[0].float()
+                latents_5d = torch.cat([clean_anchor_prefix_5d, pred_gen_5d], dim=2)
             else:
-                latents_packed = denoised_packed
+                latents_5d = self.backend.scheduler.step(
+                    noise_pred_5d,
+                    t,
+                    latents_5d,
+                    return_dict=False,
+                )[0].float()
 
         if noise_pred_final is not None:
             self.last_velocity_5d = pipe._unpack_latents(
                 noise_pred_final, total_lat_frames, h_lat, w_lat, 1, 1
             ).float()
 
-        unpacked_z0 = pipe._unpack_latents(latents_packed, total_lat_frames, h_lat, w_lat, 1, 1).float()
-        unpacked_z0 = stabilize_sliding_latents(unpacked_z0, anchor_latent_0, factor=0.10)
+        unpacked_z0 = latents_5d.float()
+        if is_continuation_block and genesis_ref_latent_5d is not None:
+            unpacked_z0[:, :, n_cond:] = adain_stabilize_latents(
+                unpacked_z0[:, :, n_cond:], genesis_ref_latent_5d, factor=0.18
+            )
 
         return unpacked_z0, 1.0

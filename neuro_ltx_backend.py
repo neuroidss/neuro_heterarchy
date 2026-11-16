@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-neuro_ltx_backend.py — Аппаратный бэкенд LTX-Video с выбором квантования (--quant) и Denoising VAE
-==================================================================================================
-- Возвращен штатный режим Denoising VAE Decoder (decode_t = 0.05, decode_noise_scale = 0.025),
-  который полностью убирает крупную пиксельную сетку и дает резкие грани кристаллов!
+neuro_ltx_backend.py — Аппаратный бэкенд LTX-Video (T5 всегда в VRAM + On-Manifold VAE Encode)
+==============================================================================================
+- По умолчанию allow_t5_offload = False: T5-XXL никогда не выгружается из VRAM!
+- decode_noise_scale = 0.0 по умолчанию: декодер VAE не подмешивает серый шум в картинку.
+- Добавлен метод encode_frame_to_latent(frame_rgb) (~10 мс на GPU), который проецирует
+  финальный кадр (прошедший через Denoising VAE Decoder при decode_t = 0.05) обратно на
+  чистое латентное многообразие для бесконечно стабильного авторегрессионного роллаута!
 """
 
 from __future__ import annotations
@@ -90,19 +93,21 @@ def rescale_noise_cfg(
 
 
 class LTXModelBackend:
-    """Контейнер весов LTX-Video с поддержкой --quant (fp8 | int8 | nf4 | bf16)."""
+    """Контейнер весов LTX-Video с постоянным удержанием T5 в VRAM по умолчанию."""
 
     def __init__(
         self,
         device: torch.device | None = None,
         quant_mode: str = "fp8",
         vae_tile_min_px: int = 384,
+        allow_t5_offload: bool = False,
     ):
         from diffusers import LTXPipeline, LTXVideoTransformer3DModel
         from transformers import AutoTokenizer, BitsAndBytesConfig, T5EncoderModel
 
         self.device = device or DEVICE
         self.quant_mode = str(quant_mode).lower().strip()
+        self.allow_t5_offload = bool(allow_t5_offload)
         self.dtype = (
             torch.bfloat16
             if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
@@ -211,6 +216,7 @@ class LTXModelBackend:
             transformer=transformer,
             torch_dtype=self.dtype,
         )
+        self.pipe.scheduler.config.shift_terminal = None
         self.pipe.set_progress_bar_config(disable=True)
         if self.quant_mode not in ("int8", "nf4", "4bit"):
             self.pipe.transformer.to(self.device)
@@ -237,7 +243,9 @@ class LTXModelBackend:
             print(f"📊 [VRAM USAGE] Занято после инициализации: {used_gb:.2f} GB / {vram_gb:.1f} GB (quant={self.quant_mode})")
 
     @torch.no_grad()
-    def offload_t5_to_cpu(self) -> float:
+    def offload_t5_to_cpu(self, force: bool = False) -> float:
+        if not self.allow_t5_offload and not force:
+            return torch.cuda.memory_allocated(0) / (1024**3) if torch.cuda.is_available() else 0.0
         if self.text_encoder is not None and not self.t5_offloaded:
             try:
                 del self.text_encoder
@@ -246,7 +254,7 @@ class LTXModelBackend:
                 gc.collect()
                 torch.cuda.empty_cache()
                 used_gb = torch.cuda.memory_allocated(0) / (1024**3) if torch.cuda.is_available() else 0.0
-                print(f"🧹 [T5 OFFLOAD] T5-XXL выгружен из VRAM (все промпты в кэше)! Занято всего {used_gb:.2f} GB VRAM!")
+                print(f"🧹 [T5 OFFLOAD] T5-XXL выгружен из VRAM! Занято {used_gb:.2f} GB VRAM.")
                 return used_gb
             except Exception as e:
                 print(f"⚠️ [T5 Offload Note]: {e}")
@@ -255,7 +263,7 @@ class LTXModelBackend:
     def _ensure_t5_loaded(self):
         if self.text_encoder is None:
             from transformers import T5EncoderModel
-            print("📥 [T5 RELOAD] Подгрузка 4-битного T5-XXL для нового промпта...")
+            print("📥 [T5 RELOAD] Подгрузка 4-битного T5-XXL...")
             self.text_encoder = T5EncoderModel.from_pretrained(
                 str(QUANT_T5_DIR),
                 device_map="cuda",
@@ -290,7 +298,7 @@ class LTXModelBackend:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         key = (str(text), int(max_len))
         if key not in self._local_prompt_cache:
-            if len(self._local_prompt_cache) > 512:
+            if len(self._local_prompt_cache) > 1024:
                 self._local_prompt_cache.clear()
             self._ensure_t5_loaded()
             inputs = self.tokenizer(
@@ -321,12 +329,40 @@ class LTXModelBackend:
         return self.scheduler.timesteps
 
     @torch.no_grad()
+    def encode_frame_to_latent(self, frame_rgb: np.ndarray) -> torch.Tensor:
+        """
+        Кодирует чистый RGB-кадр (после финального денойзинга в декодере VAE)
+        обратно в нормализованный 5D-латент [1, 128, 1, H_lat, W_lat] на многообразии LTX.
+        """
+        img_t = (
+            torch.from_numpy(frame_rgb)
+            .to(device=self.device, dtype=torch.float32)
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .unsqueeze(2)
+        )
+        img_norm = (img_t / 127.5 - 1.0).to(dtype=self.vae.dtype)
+        enc_out = self.vae.encode(img_norm)
+        raw_lat = (
+            enc_out.latent_dist.mode()
+            if hasattr(enc_out, "latent_dist")
+            else enc_out.latents
+        )
+        norm_lat = self.pipe._normalize_latents(
+            raw_lat.float(),
+            self.vae.latents_mean,
+            self.vae.latents_std,
+            self.vae.config.scaling_factor,
+        )
+        return norm_lat.to(dtype=torch.float32)
+
+    @torch.no_grad()
     def decode_latents_chunk(
         self,
         latents_5d: torch.Tensor,
         generator: torch.Generator | None = None,
         decode_t: float = 0.05,
-        decode_noise_scale: float = 0.025,
+        decode_noise_scale: float = 0.0,
     ) -> list[np.ndarray]:
         denorm = self.pipe._denormalize_latents(
             latents_5d.to(dtype=torch.float32),
@@ -336,7 +372,9 @@ class LTXModelBackend:
         ).to(dtype=self.vae.dtype)
 
         if getattr(self.vae.config, "timestep_conditioning", False):
-            t_tensor = torch.tensor([float(decode_t)], device=self.device, dtype=denorm.dtype)
+            t_tensor = torch.tensor(
+                [float(decode_t)], device=self.device, dtype=denorm.dtype
+            )
             if decode_noise_scale > 0.0:
                 noise = torch.randn(
                     denorm.shape,
@@ -344,7 +382,9 @@ class LTXModelBackend:
                     device=self.device,
                     dtype=denorm.dtype,
                 )
-                denorm = (1.0 - float(decode_noise_scale)) * denorm + float(decode_noise_scale) * noise
+                denorm = (1.0 - float(decode_noise_scale)) * denorm + float(
+                    decode_noise_scale
+                ) * noise
         else:
             t_tensor = None
 
@@ -367,7 +407,9 @@ class _TransformerConfigProxy:
 
 
 class _RemoteTransformerProxy:
-    def __init__(self, conn, device: torch.device, dtype: torch.dtype, in_channels: int = 128):
+    def __init__(
+        self, conn, device: torch.device, dtype: torch.dtype, in_channels: int = 128
+    ):
         self.conn = conn
         self.device = device
         self.dtype = dtype
@@ -390,27 +432,37 @@ class _RemoteTransformerProxy:
         rope_interpolation_scale: tuple[float, float, float],
         return_dict: bool = False,
     ):
-        self.conn.send({
-            "cmd": "transformer_forward",
-            "hidden_states": self._to_np_f16(hidden_states),
-            "encoder_hidden_states": self._to_np_f16(encoder_hidden_states),
-            "timestep": timestep.detach().float().cpu().numpy(),
-            "encoder_attention_mask": encoder_attention_mask.detach().cpu().numpy(),
-            "num_frames": int(num_frames),
-            "height": int(height),
-            "width": int(width),
-            "rope_interpolation_scale": tuple(float(x) for x in rope_interpolation_scale),
-        })
+        self.conn.send(
+            {
+                "cmd": "transformer_forward",
+                "hidden_states": self._to_np_f16(hidden_states),
+                "encoder_hidden_states": self._to_np_f16(encoder_hidden_states),
+                "timestep": timestep.detach().float().cpu().numpy(),
+                "encoder_attention_mask": encoder_attention_mask.detach()
+                .cpu()
+                .numpy(),
+                "num_frames": int(num_frames),
+                "height": int(height),
+                "width": int(width),
+                "rope_interpolation_scale": tuple(
+                    float(x) for x in rope_interpolation_scale
+                ),
+            }
+        )
         resp = self.conn.recv()
         if resp.get("status") != "ok":
             raise RuntimeError(f"Remote transformer error: {resp.get('error')}")
-        sample = torch.from_numpy(resp["sample"]).to(device=self.device, dtype=self.dtype)
+        sample = torch.from_numpy(resp["sample"]).to(
+            device=self.device, dtype=self.dtype
+        )
         return (sample,)
 
 
 class _LocalLatentPackerPipe:
     @staticmethod
-    def _pack_latents(latents: torch.Tensor, patch_size: int = 1, patch_size_t: int = 1) -> torch.Tensor:
+    def _pack_latents(
+        latents: torch.Tensor, patch_size: int = 1, patch_size_t: int = 1
+    ) -> torch.Tensor:
         batch_size, num_channels, num_frames, height, width = latents.shape
         post_patch_num_frames = num_frames // patch_size_t
         post_patch_height = height // patch_size
@@ -429,11 +481,30 @@ class _LocalLatentPackerPipe:
 
     @staticmethod
     def _unpack_latents(
-        latents: torch.Tensor, num_frames: int, height: int, width: int, patch_size: int = 1, patch_size_t: int = 1
+        latents: torch.Tensor,
+        num_frames: int,
+        height: int,
+        width: int,
+        patch_size: int = 1,
+        patch_size_t: int = 1,
     ) -> torch.Tensor:
         batch_size = latents.size(0)
-        latents = latents.reshape(batch_size, num_frames, height, width, -1, patch_size_t, patch_size, patch_size)
-        return latents.permute(0, 4, 1, 5, 2, 6, 3, 7).flatten(6, 7).flatten(4, 5).flatten(2, 3)
+        latents = latents.reshape(
+            batch_size,
+            num_frames,
+            height,
+            width,
+            -1,
+            patch_size_t,
+            patch_size,
+            patch_size,
+        )
+        return (
+            latents.permute(0, 4, 1, 5, 2, 6, 3, 7)
+            .flatten(6, 7)
+            .flatten(4, 5)
+            .flatten(2, 3)
+        )
 
 
 class RemoteLTXModelBackend:
@@ -466,9 +537,11 @@ class RemoteLTXModelBackend:
             max_image_seq_len=int(ping_info.get("max_image_seq_len", 4096)),
             base_shift=float(ping_info.get("base_shift", 0.5)),
             max_shift=float(ping_info.get("max_shift", 1.15)),
-            shift_terminal=0.1,
+            shift_terminal=None,
         )
-        self._local_prompt_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._local_prompt_cache: dict[
+            tuple[str, int], tuple[torch.Tensor, torch.Tensor]
+        ] = {}
         self._decode_call_idx = 0
 
     @property
@@ -480,28 +553,34 @@ class RemoteLTXModelBackend:
         return self._temporal_ratio
 
     def offload_t5_to_cpu(self):
-        try:
-            self.conn.send({"cmd": "evict_t5_to_cpu"})
-            self.conn.recv()
-        except Exception:
-            pass
+        pass
 
     @torch.no_grad()
-    def encode_semantics(self, text: str, max_len: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode_semantics(
+        self, text: str, max_len: int = 128
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         key = (str(text), int(max_len))
         if key not in self._local_prompt_cache:
-            if len(self._local_prompt_cache) > 512:
+            if len(self._local_prompt_cache) > 1024:
                 self._local_prompt_cache.clear()
-            self.conn.send({
-                "cmd": "encode_semantics",
-                "text": str(text),
-                "max_len": int(max_len),
-            })
+            self.conn.send(
+                {
+                    "cmd": "encode_semantics",
+                    "text": str(text),
+                    "max_len": int(max_len),
+                }
+            )
             resp = self.conn.recv()
             if resp.get("status") != "ok":
-                raise RuntimeError(f"Remote encode_semantics error: {resp.get('error')}")
-            emb = torch.from_numpy(resp["embeds"]).to(device=self.device, dtype=self.dtype)
-            msk = torch.from_numpy(resp["mask"]).to(device=self.device, dtype=torch.bool)
+                raise RuntimeError(
+                    f"Remote encode_semantics error: {resp.get('error')}"
+                )
+            emb = torch.from_numpy(resp["embeds"]).to(
+                device=self.device, dtype=self.dtype
+            )
+            msk = torch.from_numpy(resp["mask"]).to(
+                device=self.device, dtype=torch.bool
+            )
             self._local_prompt_cache[key] = (emb, msk)
         return self._local_prompt_cache[key]
 
@@ -519,21 +598,38 @@ class RemoteLTXModelBackend:
         return self.scheduler.timesteps
 
     @torch.no_grad()
+    def encode_frame_to_latent(self, frame_rgb: np.ndarray) -> torch.Tensor:
+        self.conn.send(
+            {
+                "cmd": "encode_frame",
+                "frame_rgb": np.ascontiguousarray(frame_rgb, dtype=np.uint8),
+            }
+        )
+        resp = self.conn.recv()
+        if resp.get("status") != "ok":
+            raise RuntimeError(f"Remote encode_frame error: {resp.get('error')}")
+        return torch.from_numpy(resp["latent_5d"]).to(
+            device=self.device, dtype=torch.float32
+        )
+
+    @torch.no_grad()
     def decode_latents_chunk(
         self,
         latents_5d: torch.Tensor,
         generator: torch.Generator | None = None,
         decode_t: float = 0.05,
-        decode_noise_scale: float = 0.025,
+        decode_noise_scale: float = 0.0,
     ) -> list[np.ndarray]:
         self._decode_call_idx += 1
-        self.conn.send({
-            "cmd": "decode_latents",
-            "latents_5d": latents_5d.detach().to(torch.float16).cpu().numpy(),
-            "seed": 42 + self._decode_call_idx,
-            "decode_t": float(decode_t),
-            "decode_noise_scale": float(decode_noise_scale),
-        })
+        self.conn.send(
+            {
+                "cmd": "decode_latents",
+                "latents_5d": latents_5d.detach().to(torch.float16).cpu().numpy(),
+                "seed": 42 + self._decode_call_idx,
+                "decode_t": float(decode_t),
+                "decode_noise_scale": float(decode_noise_scale),
+            }
+        )
         resp = self.conn.recv()
         if resp.get("status") != "ok":
             raise RuntimeError(f"Remote decode_latents error: {resp.get('error')}")

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-neuro_battle_server.py — Бессмертный сервер весов LTX-Video с защитой от OOM и флагом --quant
-=============================================================================================
+neuro_battle_server.py — Бессмертный сервер весов LTX-Video (T5 всегда в памяти + On-Manifold VAE Encode)
 """
 
 from __future__ import annotations
@@ -22,16 +21,31 @@ from neuro_ltx_backend import LTXModelBackend
 
 class DumbWeightsServer:
 
-    def __init__(self, quant_mode: str = "fp8", vae_tile_min_px: int = 384):
+    def __init__(
+        self,
+        quant_mode: str = "fp8",
+        vae_tile_min_px: int = 384,
+        allow_t5_offload: bool = False,
+    ):
         print("=" * 80)
-        print(f"🚀 [DUMB-WEIGHTS-SERVER] Loading LTX-Video weights into VRAM (quant={quant_mode})...")
+        print(
+            f"🚀 [DUMB-WEIGHTS-SERVER] Загрузка LTX-Video в VRAM "
+            f"(quant={quant_mode}, allow_t5_offload={allow_t5_offload})..."
+        )
         t0 = time.perf_counter()
-        self.backend = LTXModelBackend(quant_mode=quant_mode, vae_tile_min_px=vae_tile_min_px)
+        self.allow_t5_offload = bool(allow_t5_offload)
+        self.backend = LTXModelBackend(
+            quant_mode=quant_mode,
+            vae_tile_min_px=vae_tile_min_px,
+            allow_t5_offload=self.allow_t5_offload,
+        )
         self.device = self.backend.device
         self.dtype = self.backend.dtype
         self.prompt_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         dt = time.perf_counter() - t0
-        print(f"✅ [DUMB-WEIGHTS-SERVER] Ready in {dt:.1f}s! Never needs restart on logic changes.")
+        print(
+            f"✅ [DUMB-WEIGHTS-SERVER] Готов за {dt:.1f}с! T5-XXL постоянно резидентен в VRAM."
+        )
         print("=" * 80)
 
     def _to_device_tensor(self, x, dtype=None) -> torch.Tensor:
@@ -60,7 +74,9 @@ class DumbWeightsServer:
             "temporal_ratio": int(self.backend.temporal_ratio),
             "in_channels": int(self.backend.transformer.config.in_channels),
             "patch_size": int(getattr(self.backend.transformer.config, "patch_size", 1)),
-            "patch_size_t": int(getattr(self.backend.transformer.config, "patch_size_t", 1)),
+            "patch_size_t": int(
+                getattr(self.backend.transformer.config, "patch_size_t", 1)
+            ),
             "base_image_seq_len": int(sched_cfg.get("base_image_seq_len", 256)),
             "max_image_seq_len": int(sched_cfg.get("max_image_seq_len", 4096)),
             "base_shift": float(sched_cfg.get("base_shift", 0.5)),
@@ -73,7 +89,7 @@ class DumbWeightsServer:
         max_len = int(msg.get("max_len", 128))
         key = (text, max_len)
         if key not in self.prompt_cache:
-            if len(self.prompt_cache) > 512:
+            if len(self.prompt_cache) > 1024:
                 self.prompt_cache.clear()
             emb, msk = self.backend.encode_semantics(text, max_len=max_len)
             self.prompt_cache[key] = (emb.detach().float().cpu(), msk.detach().cpu())
@@ -87,9 +103,13 @@ class DumbWeightsServer:
     @torch.no_grad()
     def handle_transformer_forward(self, msg: dict) -> dict:
         hidden_states = self._to_device_tensor(msg["hidden_states"], dtype=self.dtype)
-        encoder_hidden_states = self._to_device_tensor(msg["encoder_hidden_states"], dtype=self.dtype)
+        encoder_hidden_states = self._to_device_tensor(
+            msg["encoder_hidden_states"], dtype=self.dtype
+        )
         timestep = self._to_device_tensor(msg["timestep"], dtype=torch.float32)
-        encoder_attention_mask = self._to_device_tensor(msg["encoder_attention_mask"], dtype=torch.bool)
+        encoder_attention_mask = self._to_device_tensor(
+            msg["encoder_attention_mask"], dtype=torch.bool
+        )
 
         num_frames = int(msg["num_frames"])
         height = int(msg["height"])
@@ -109,8 +129,9 @@ class DumbWeightsServer:
                 return_dict=False,
             )[0]
         except torch.cuda.OutOfMemoryError:
-            print("⚠️ [VRAM GUARD] OOM в трансформере! Экстренная выгрузка T5 и очистка кэша CUDA...")
-            self.backend.offload_t5_to_cpu()
+            print("⚠️ [VRAM GUARD] OOM в трансформере! Очистка кэша CUDA...")
+            if self.allow_t5_offload:
+                self.backend.offload_t5_to_cpu(force=True)
             gc.collect()
             torch.cuda.empty_cache()
             out = self.backend.transformer(
@@ -131,11 +152,20 @@ class DumbWeightsServer:
         }
 
     @torch.no_grad()
+    def handle_encode_frame(self, msg: dict) -> dict:
+        frame_rgb = msg["frame_rgb"]
+        lat_5d = self.backend.encode_frame_to_latent(frame_rgb)
+        return {
+            "status": "ok",
+            "latent_5d": lat_5d.detach().to(torch.float16).cpu().numpy(),
+        }
+
+    @torch.no_grad()
     def handle_decode_latents(self, msg: dict) -> dict:
         latents_5d = self._to_device_tensor(msg["latents_5d"], dtype=torch.float32)
         seed = int(msg.get("seed", 42))
         decode_t = float(msg.get("decode_t", 0.05))
-        decode_noise_scale = float(msg.get("decode_noise_scale", 0.025))
+        decode_noise_scale = float(msg.get("decode_noise_scale", 0.0))
         gen = torch.Generator(device=self.device).manual_seed(seed)
         try:
             frames = self.backend.decode_latents_chunk(
@@ -145,8 +175,9 @@ class DumbWeightsServer:
                 decode_noise_scale=decode_noise_scale,
             )
         except torch.cuda.OutOfMemoryError:
-            print("⚠️ [VRAM GUARD] OOM в 3D-VAE! Включаю агрессивный тайлинг 256x256 и выгружаю T5...")
-            self.backend.offload_t5_to_cpu()
+            print("⚠️ [VRAM GUARD] OOM в 3D-VAE! Включаю тайлинг 256x256...")
+            if self.allow_t5_offload:
+                self.backend.offload_t5_to_cpu(force=True)
             if hasattr(self.backend.vae, "enable_tiling"):
                 self.backend.vae.enable_tiling(
                     tile_sample_min_height=256,
@@ -171,25 +202,40 @@ class DumbWeightsServer:
 
 def main():
     parser = argparse.ArgumentParser(description="Dumb Immortal LTX-Video Weights Server")
-    parser.add_argument("--port", type=int, default=6008, help="IPC port for Weights Server")
+    parser.add_argument(
+        "--port", type=int, default=6008, help="IPC port for Weights Server"
+    )
     parser.add_argument(
         "--quant",
         type=str,
         default="fp8",
         choices=["fp8", "int8", "nf4", "bf16", "auto"],
-        help="Режим упаковки 3D-DiT в VRAM: fp8 (по умолчанию, ~1.9GB) | int8 (~2.0GB) | nf4 (~1.1GB) | bf16 (~3.8GB)",
+        help="Режим упаковки 3D-DiT в VRAM: fp8 (по умолчанию) | int8 | nf4 | bf16",
     )
     parser.add_argument(
         "--vae-tile-min",
         type=int,
         default=384,
-        help="Порог включения тайлинга 3D-VAE в пикселях (256 = минимальный расход VRAM, 512 = максимальная скорость)",
+        help="Порог включения тайлинга 3D-VAE в пикселях",
+    )
+    parser.add_argument(
+        "--allow-t5-offload",
+        action="store_true",
+        default=False,
+        help="Разрешить выгрузку T5-энкодера из VRAM (по умолчанию ЗАПРЕЩЕНО)",
     )
     args = parser.parse_args()
 
-    server = DumbWeightsServer(quant_mode=args.quant, vae_tile_min_px=args.vae_tile_min)
+    server = DumbWeightsServer(
+        quant_mode=args.quant,
+        vae_tile_min_px=args.vae_tile_min,
+        allow_t5_offload=args.allow_t5_offload,
+    )
     listener = Listener(("localhost", args.port), authkey=b"battle_ltx")
-    print(f"🟢 [DUMB-WEIGHTS-SERVER] Listening on localhost:{args.port} (quant={args.quant})...")
+    print(
+        f"🟢 [DUMB-WEIGHTS-SERVER] Слушаю localhost:{args.port} "
+        f"(quant={args.quant}, T5_resident={not args.allow_t5_offload})..."
+    )
 
     decode_count = 0
     while True:
@@ -198,34 +244,39 @@ def main():
             while True:
                 try:
                     msg = conn.recv()
-                except (EOFError, ConnectionResetError):
+                except (EOFError, ConnectionResetError, BrokenPipeError):
                     break
 
                 if not isinstance(msg, dict):
                     continue
 
                 cmd = msg.get("cmd")
-                if cmd == "ping":
-                    conn.send(server.handle_ping())
-                elif cmd == "encode_semantics":
-                    conn.send(server.handle_encode_semantics(msg))
-                elif cmd == "evict_t5_to_cpu":
-                    used_gb = server.backend.offload_t5_to_cpu()
-                    conn.send({"status": "ok", "vram_gb": used_gb})
-                elif cmd == "transformer_forward":
-                    conn.send(server.handle_transformer_forward(msg))
-                elif cmd == "decode_latents":
-                    conn.send(server.handle_decode_latents(msg))
-                    decode_count += 1
-                    if decode_count % 8 == 0:
+                try:
+                    if cmd == "ping":
+                        conn.send(server.handle_ping())
+                    elif cmd == "encode_semantics":
+                        conn.send(server.handle_encode_semantics(msg))
+                    elif cmd == "evict_t5_to_cpu":
+                        used_gb = server.backend.offload_t5_to_cpu(force=False)
+                        conn.send({"status": "ok", "vram_gb": used_gb})
+                    elif cmd == "transformer_forward":
+                        conn.send(server.handle_transformer_forward(msg))
+                    elif cmd == "encode_frame":
+                        conn.send(server.handle_encode_frame(msg))
+                    elif cmd == "decode_latents":
+                        conn.send(server.handle_decode_latents(msg))
+                        decode_count += 1
+                        if decode_count % 8 == 0:
+                            torch.cuda.empty_cache()
+                    elif cmd == "clear_cache":
+                        server.prompt_cache.clear()
+                        gc.collect()
                         torch.cuda.empty_cache()
-                elif cmd == "clear_cache":
-                    server.prompt_cache.clear()
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    conn.send({"status": "ok"})
-                else:
-                    conn.send({"status": "error", "error": f"Unknown cmd: {cmd}"})
+                        conn.send({"status": "ok"})
+                    else:
+                        conn.send({"status": "error", "error": f"Unknown cmd: {cmd}"})
+                except (EOFError, ConnectionResetError, BrokenPipeError):
+                    break
 
         except KeyboardInterrupt:
             print("\n🛑 [DUMB-WEIGHTS-SERVER] Stopped.")
