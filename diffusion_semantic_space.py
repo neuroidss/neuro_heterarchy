@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: DEDICATED CLIP SEMANTIC SPACE FOR DIFFUSION (NO MONOLITHS)
+NEUROCANVAS: DEDICATED CLIP SEMANTIC SPACE FOR DIFFUSION (FREE DRIFT WHEN EMPTY)
+===================================================================================
+- Исправлено удаление всех концептов: когда список концептов очищается в браузере,
+  last_active_embed сбрасывается на нейтральный empty_embed (""), позволяя рабочей
+  памяти ЭЭГ свободно гулять по всему пространству CLIP без залипания на старом слове!
 ===================================================================================
 """
 
@@ -9,7 +13,6 @@ from __future__ import annotations
 import os
 import json
 import threading
-from typing import Optional
 import torch
 import torch.nn.functional as F
 from transformers import CLIPTokenizer, CLIPTextModel
@@ -85,10 +88,11 @@ class UniversalSemanticSpace:
         with self.lock:
             n_words = len(self.words)
             if n_words == 0:
-                raw = self.last_active_embed.mean(dim=0, keepdim=True)
+                self.last_active_embed = self.empty_embed.clone()
+                raw = self.empty_embed.mean(dim=0, keepdim=True)
                 self.norm_vocab = F.normalize(raw, p=2, dim=-1)
                 for r in CORE_REGIONS:
-                    self.region_banks[r] = self.last_active_embed.unsqueeze(0)
+                    self.region_banks[r] = self.empty_embed.unsqueeze(0)
                 self.affordance_cache.clear()
                 return
 
@@ -107,24 +111,27 @@ class UniversalSemanticSpace:
                 if r_words:
                     self.region_banks[r] = torch.stack([self.get_77_embedding_gpu(w) for w in r_words], dim=0)
                 else:
-                    self.region_banks[r] = self.last_active_embed.unsqueeze(0)
+                    self.region_banks[r] = self.empty_embed.unsqueeze(0)
 
             self.affordance_cache.clear()
 
     def update_concepts_on_the_fly(self, new_words: list[str]):
         cleaned = [w.strip() for w in new_words if w.strip()]
         with self.lock:
-            if not cleaned and self.words:
-                self.last_active_embed = self.get_77_embedding_gpu(self.words[0]).clone()
+            # Если все концепты удалены — сбрасываем якорь на чистый empty_embed (""),
+            # чтобы старый концепт (например, фракталы) немедленно исчез!
+            if not cleaned:
+                self.last_active_embed = self.empty_embed.clone()
             self.words = list(cleaned)
             for r in CORE_REGIONS:
                 self.sections[r] = list(cleaned)
             self._rebuild_vocab_matrix_locked()
+        print(f"🎨 [2D DIFFUSION LORE ОБНОВЛЕН] Активных концептов: {len(self.words)} -> {self.words if self.words else '[СВОБОДНЫЙ ЛАТЕНТНЫЙ ДРЕЙФ]'}", flush=True)
 
     def get_77_embedding_gpu(self, word: str) -> torch.Tensor:
         with self.lock:
             if not word or not word.strip():
-                return self.last_active_embed
+                return self.empty_embed
             w_clean = word.strip().lower()
             if w_clean in self.gpu_embed_cache:
                 return self.gpu_embed_cache[w_clean]
