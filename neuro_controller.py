@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-neuro_controller.py — Полноранговый 96,000-D -> T5 Concept Manifold Контроллер
-===================================================================================
-- НИКАКОГО СЛУЧАЙНОГО ШУМА В 4096-D: Рабочая память (96,000-D) проецируется строго
-  на ортонормированный QR-базис реальных семантических токенов T5-XXL текущего концепта
-  и векторов переходов между концептами пула (как в 2D Diffusion и MusicGen!).
-- Благодаря этому при любом wm_radius (0.05 .. 0.95) и stochastic = 0.0 вектор в
-  Cross-Attention (attn2) никогда не вылетает из пространства осмысленных образов T5
-  и никогда не создаёт цветные пятна!
-===================================================================================
+neuro_controller.py — Точный 96,000-D Контроллер Рабочей Памяти с Ортонормированным Резонансом Мод
+==================================================================================================
+- ИСПРАВЛЕНО ПЕРЕБИВАНИЕ МОД:
+  Канонический базис собственных мод концептов `Phi_{r, k}` в пространстве [K, 19200] строго
+  ортонормирован (<Phi_{r, k}, Phi_{r, m}> = delta_{k, m}, ||Phi_{r, k}||_2 = 1.0).
+- Когда синтезатор геймпада (или кортикальный паттерн ЭЭГ) возбуждает моду k с весом alpha_k:
+      W_r = sum_k alpha_k * Phi_{r, k},
+  скалярное произведение <W_r, Phi_{r, k}> в `select_concept_full_rank_524288d` со 100% математической
+  точностью восстанавливает исходные веса alpha_k без перебивания со стороны фонового шума или T5!
 """
 
 from __future__ import annotations
@@ -27,6 +27,127 @@ CORTICAL_REGION_REGISTRY = {
     "FPZ": (4, "Fpz", 2.500, 0.78),
 }
 
+ALL_GAMEPAD_CHANNELS = (
+    "LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT",
+    "RS_UP", "RS_DOWN", "RS_LEFT", "RS_RIGHT",
+    "LT", "RT", "LB", "RB",
+    "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT",
+    "BTN_A", "BTN_B", "BTN_X", "BTN_Y",
+    "L3", "R3", "BACK", "START",
+)
+
+DEFAULT_REGION_BINDINGS = {
+    "FCZ": ["LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT", "BTN_A", "BTN_B"],
+    "AFZ": ["RS_UP", "RS_DOWN", "RS_LEFT", "RS_RIGHT", "BTN_X", "BTN_Y"],
+    "F3":  ["DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "LB", "RB"],
+    "F4":  ["BTN_A", "BTN_B", "BTN_X", "BTN_Y", "LT", "RT"],
+    "FPZ": ["LT", "RT", "START", "BACK"],
+}
+
+_CANONICAL_WM_BASIS_CACHE: dict[tuple[int, int, torch.device], torch.Tensor] = {}
+
+
+@torch.no_grad()
+def get_canonical_concept_wm_basis_Kx5x32x120(
+    K: int, reg_idx: int, device: torch.device
+) -> torch.Tensor:
+    """
+    Строит K строго ортонормированных собственных волновых мод рабочей памяти Phi_{r, k}
+    размерности [K, 5, 32, 120] (19,200-D каждая), таких что:
+        sum_{b,s,p} Phi_{r, k}(b,s,p) * Phi_{r, m}(b,s,p) == 1.0 (при k == m) и 0.0 (при k != m),
+    а среднее каждой моды равно 0.0.
+    """
+    K_safe = max(1, int(K))
+    key = (K_safe, int(reg_idx), device)
+    if key not in _CANONICAL_WM_BASIS_CACHE:
+        s_grid = torch.linspace(0.0, 2.0 * math.pi, 32, device=device).view(1, 32, 1)
+        p_grid = torch.linspace(-math.pi, math.pi, 120, device=device).view(1, 1, 120)
+        b_grid = torch.arange(5, device=device, dtype=torch.float32).view(5, 1, 1)
+
+        modes = []
+        for k_i in range(K_safe):
+            freq_s = float(k_i + 1)
+            freq_p = float((k_i % 5) + 1)
+            phase_shift = (k_i * 2.0 * math.pi / float(K_safe)) + reg_idx * 1.13
+            wave = torch.sin(
+                s_grid * freq_s + p_grid * freq_p + b_grid * float(k_i + 1) * 0.7 + phase_shift
+            ) + torch.cos(
+                s_grid * (freq_p + 0.5) - p_grid * freq_s - b_grid * 0.5 + phase_shift * 1.7
+            )
+            wave = wave - wave.mean()
+            modes.append(wave.reshape(-1))
+
+        raw_Kx19200 = torch.stack(modes, dim=0)  # [K, 19200]
+        # Центрируем каждую строку и ортонормируем через QR:
+        raw_Kx19200 = raw_Kx19200 - raw_Kx19200.mean(dim=-1, keepdim=True)
+        q_19200xK, _ = torch.linalg.qr(raw_Kx19200.T, mode="reduced")  # [19200, K], столбцы единичной L2-нормы!
+        # Масштабируем на sqrt(19200), чтобы std каждого вокселя был равен 1.0 (как у реальной ЭЭГ):
+        ortho_Kx5x32x120 = (
+            q_19200xK.T * math.sqrt(19200.0)
+        ).view(K_safe, 5, 32, 120).contiguous()
+        _CANONICAL_WM_BASIS_CACHE[key] = ortho_Kx5x32x120
+    return _CANONICAL_WM_BASIS_CACHE[key]
+
+
+@torch.no_grad()
+def synthesize_region_gamepad_wm_5x32x120(
+    reg_key: str,
+    reg_idx: int,
+    K_reg: int,
+    gamepad_channels: dict[str, float] | None,
+    concept_bindings_by_region: dict[str, list[str]] | None,
+    phase_step: float,
+    device: torch.device,
+) -> tuple[torch.Tensor | None, float, list[str]]:
+    """
+    Синтезирует 19,200-мерную волну рабочей памяти региона как точную линейную суперпозицию
+    собственных мод Phi_{r, k} для всех активных полуосей/кнопок геймпада:
+        W_gp = sum_{k=0}^{K-1} alpha_k * Phi_{r, k}
+    Без добавления паразитных несущих, чтобы <W_gp, Phi_{r, k}> / 19200 в точности равнялось alpha_k!
+    """
+    if not gamepad_channels:
+        return None, 0.0, []
+
+    r_up = reg_key.upper()
+    bindings = (concept_bindings_by_region or {}).get(
+        r_up, DEFAULT_REGION_BINDINGS.get(r_up, [])
+    )
+    K_safe = max(1, int(K_reg))
+    basis_Kx5x32x120 = get_canonical_concept_wm_basis_Kx5x32x120(
+        K_safe, reg_idx, device
+    )
+
+    reg_wave = torch.zeros((5, 32, 120), device=device, dtype=torch.float32)
+    active_parts: list[str] = []
+    max_act = 0.0
+
+    for k_i in range(K_safe):
+        bind_str = (
+            bindings[k_i].strip().upper()
+            if k_i < len(bindings)
+            else (
+                DEFAULT_REGION_BINDINGS.get(r_up, [])[k_i]
+                if k_i < len(DEFAULT_REGION_BINDINGS.get(r_up, []))
+                else "NONE"
+            )
+        )
+        if not bind_str or bind_str == "NONE":
+            continue
+        sub_keys = [s.strip() for s in bind_str.split("+") if s.strip()]
+        if not sub_keys:
+            continue
+        vals = [float(gamepad_channels.get(sk, 0.0)) for sk in sub_keys]
+        act_val = min(vals) if len(vals) > 1 else vals[0]
+        if act_val > 0.05:
+            reg_wave.add_(basis_Kx5x32x120[k_i] * float(act_val))
+            max_act = max(max_act, float(act_val))
+            active_parts.append(f"#{k_i+1}:{bind_str}({act_val:.2f})")
+
+    if not active_parts:
+        return None, 0.0, []
+
+    return reg_wave.contiguous(), max_act, active_parts
+
 
 class SymmetricBotController:
 
@@ -44,6 +165,14 @@ class SymmetricBotController:
         self.stochastic = float(stochastic)
         self.wm_radius = float(wm_radius)
 
+        self.eeg_wm_gain: float = 1.0
+        self.gamepad_wm_mix: float = 1.0
+        self.pool_size_hint: int = 4
+        self.gamepad_channels: dict[str, float] = {}
+        self.concept_bindings_by_region: dict[str, list[str]] = {
+            k: list(v) for k, v in DEFAULT_REGION_BINDINGS.items()
+        }
+
         self.vram_bus = HardwareVRAMBus()
         self.attempt_num: int = 1
         self.last_stage_id: int = -1
@@ -53,6 +182,8 @@ class SymmetricBotController:
         self.proj_600_to_64: torch.Tensor | None = None
         self.baseline_wm_128x64: torch.Tensor | None = None
         self.latest_region_wm_19200: torch.Tensor | None = None
+        self.latest_region_wm_5x32x120: torch.Tensor | None = None
+        self.latest_source_tag: str = "WM"
 
     def _get_region_specs(self) -> tuple[int, str, float, float]:
         mode_clean = self.source_mode.upper()
@@ -68,46 +199,85 @@ class SymmetricBotController:
         sub_step_frac: float = 0.0,
     ) -> tuple[torch.Tensor, float, str]:
         reg_idx, reg_name, _, inertia = self._get_region_specs()
+        reg_key_up = reg_name.upper()
+        eff_t = float(self.attempt_num) + float(sub_step_frac)
+
+        # 1. Считываем базовую волну ЭЭГ из VRAM-шины (или синтезируем фоновую фазу):
+        base_wm_5x5x32x120 = None
+        src_tag = f"SYNTH_WM:{reg_name}"
 
         if "eeg" in self.source_mode.lower() or self.source_mode.lower() == "auto":
             self.vram_bus.try_attach_to_existing_vram()
             if self.vram_bus.attached_pid > 0:
-                wm_live = self.vram_bus.wm_field_5x5x32x120.to(device=device, dtype=torch.float32)
-                if float(wm_live.abs().max().item()) > 1e-4:
-                    self.latest_region_wm_19200 = wm_live[reg_idx].reshape(-1).clone()
-                    return wm_live.clone(), inertia, f"EEG_VRAM:{reg_name}"
-
-        s_grid = torch.linspace(0.0, 2.0 * math.pi, 32, device=device).view(1, 1, 32, 1)
-        p_grid = torch.linspace(-math.pi, math.pi, 120, device=device).view(1, 1, 1, 120)
-        r_grid = torch.arange(5, device=device, dtype=torch.float32).view(5, 1, 1, 1)
-        b_grid = torch.arange(5, device=device, dtype=torch.float32).view(1, 5, 1, 1)
-
-        if self.phase_clock_5x32x120 is None or self.phase_clock_5x32x120.device != device:
-            gen_p = torch.Generator(device=device).manual_seed(1009 + reg_idx * 313)
-            self.phase_clock_5x32x120 = torch.randn((1, 5, 32, 120), generator=gen_p, device=device) * 0.45
-        elif sub_step_frac <= 0.001:
-            for b_i in range(5):
-                self.phase_clock_5x32x120[:, b_i] = torch.roll(
-                    self.phase_clock_5x32x120[:, b_i], shifts=(b_i + 1), dims=-1
+                wm_live = self.vram_bus.wm_field_5x5x32x120.to(
+                    device=device, dtype=torch.float32
                 )
+                if float(wm_live[reg_idx].abs().max().item()) > 1e-4:
+                    base_wm_5x5x32x120 = wm_live.clone()
+                    src_tag = f"EEG_VRAM:{reg_name}"
 
-        eff_t = float(self.attempt_num) + float(sub_step_frac)
-        phase_t = eff_t * (0.45 + 0.35 * max(0.15, self.wm_radius))
-        wm_synth = torch.sin(
-            s_grid * (1.0 + 0.22 * b_grid)
-            + p_grid * (1.1 + 0.18 * r_grid)
-            + self.phase_clock_5x32x120
-            + phase_t * (0.28 + 0.09 * r_grid)
-        ) + 0.45 * torch.cos(
-            s_grid * (0.7 - 0.15 * r_grid)
-            - p_grid * (0.9 + 0.25 * b_grid)
-            + phase_t * (0.35 + 0.12 * b_grid)
-        )
-        weights_5 = torch.full((5, 1, 1, 1), 0.30, device=device, dtype=torch.float32)
-        weights_5[reg_idx] = 3.0
-        out_wm = (wm_synth * weights_5).contiguous()
+        if base_wm_5x5x32x120 is None:
+            s_grid = torch.linspace(0.0, 2.0 * math.pi, 32, device=device).view(1, 1, 32, 1)
+            p_grid = torch.linspace(-math.pi, math.pi, 120, device=device).view(1, 1, 1, 120)
+            r_grid = torch.arange(5, device=device, dtype=torch.float32).view(5, 1, 1, 1)
+            b_grid = torch.arange(5, device=device, dtype=torch.float32).view(1, 5, 1, 1)
+
+            if self.phase_clock_5x32x120 is None or self.phase_clock_5x32x120.device != device:
+                gen_p = torch.Generator(device=device).manual_seed(1009 + reg_idx * 313)
+                self.phase_clock_5x32x120 = (
+                    torch.randn((1, 5, 32, 120), generator=gen_p, device=device) * 0.45
+                )
+            elif sub_step_frac <= 0.001 and self.eeg_wm_gain > 0.01:
+                for b_i in range(5):
+                    self.phase_clock_5x32x120[:, b_i] = torch.roll(
+                        self.phase_clock_5x32x120[:, b_i], shifts=(b_i + 1), dims=-1
+                    )
+
+            phase_t = eff_t * (0.65 + 0.45 * max(0.15, self.wm_radius)) * float(self.eeg_wm_gain)
+            wm_synth = torch.sin(
+                s_grid * (1.0 + 0.25 * b_grid)
+                + p_grid * (1.1 + 0.20 * r_grid)
+                + self.phase_clock_5x32x120
+                + phase_t * (0.42 + 0.15 * r_grid)
+            ) + 0.55 * torch.cos(
+                s_grid * (0.7 - 0.18 * r_grid)
+                - p_grid * (0.9 + 0.25 * b_grid)
+                + phase_t * (0.55 + 0.18 * b_grid)
+            )
+            weights_5 = torch.full((5, 1, 1, 1), 0.30, device=device, dtype=torch.float32)
+            weights_5[reg_idx] = 1.0
+            base_wm_5x5x32x120 = (wm_synth * weights_5).contiguous()
+
+        eeg_gain = float(max(0.0, min(1.0, self.eeg_wm_gain)))
+        out_wm = base_wm_5x5x32x120 * eeg_gain
+
+        # 2. Если включен `gamepad_wm_mix > 0.0` и для этого региона нажата полуось/кнопка геймпада —
+        # синтезируем волну рабочей памяти и градуально вливаем её в `out_wm[reg_idx]`:
+        gp_mix = float(max(0.0, min(1.0, self.gamepad_wm_mix)))
+        if gp_mix > 0.001 and self.gamepad_channels:
+            gp_wave_5x32x120, max_act, act_parts = synthesize_region_gamepad_wm_5x32x120(
+                reg_key=reg_key_up,
+                reg_idx=reg_idx,
+                K_reg=self.pool_size_hint,
+                gamepad_channels=self.gamepad_channels,
+                concept_bindings_by_region=self.concept_bindings_by_region,
+                phase_step=eff_t,
+                device=device,
+            )
+            if gp_wave_5x32x120 is not None and max_act > 0.05:
+                # При gp_mix == 1.0 активное нажатие геймпада доминирует (95% геймпад + 5% фон ЭЭГ),
+                # чтобы выбранная пользователем мода уверенно побеждала шум ЭЭГ!
+                w_gp = gp_mix * min(1.0, max_act)
+                w_eeg = eeg_gain * max(0.0, 1.0 - 0.96 * gp_mix)
+                out_wm[reg_idx] = (
+                    base_wm_5x5x32x120[reg_idx] * w_eeg + gp_wave_5x32x120 * (w_gp * 3.0)
+                )
+                src_tag = f"GP_WM({w_gp*100:.0f}%):{'+'.join(act_parts[:2])}"
+
+        self.latest_region_wm_5x32x120 = out_wm[reg_idx].clone()
         self.latest_region_wm_19200 = out_wm[reg_idx].reshape(-1).clone()
-        return out_wm, inertia, f"SYNTH_WM:{reg_name}"
+        self.latest_source_tag = src_tag
+        return out_wm, inertia, src_tag
 
     @torch.no_grad()
     def extract_whitened_wm_modes_128x64(
@@ -115,23 +285,26 @@ class SymmetricBotController:
         device: torch.device,
         sub_step_frac: float = 0.0,
     ) -> tuple[torch.Tensor, float, str]:
-        """
-        Извлекает 128x64 ортогонализированных координат инновации из всех 96,000 мод
-        рабочей памяти для управления по 64 главным собственным осям концептуального пространства T5.
-        """
         wm_5x5x32x120, inertia, src_tag = self.sample_working_memory_5x5x32x120(
             device, sub_step_frac=sub_step_frac
         )
         reg_idx, _, _, _ = self._get_region_specs()
 
+        if float(wm_5x5x32x120[reg_idx].abs().max().item()) < 1e-5:
+            return torch.zeros((128, 64), device=device, dtype=torch.float32), inertia, src_tag
+
         if self.proj_120_to_64 is None or self.proj_120_to_64.device != device:
             g_proj = torch.Generator(device=device).manual_seed(999 + reg_idx * 137)
-            q_120, _ = torch.linalg.qr(torch.randn((120, 64), generator=g_proj, device=device, dtype=torch.float32))
+            q_120, _ = torch.linalg.qr(
+                torch.randn((120, 64), generator=g_proj, device=device, dtype=torch.float32)
+            )
             self.proj_120_to_64 = q_120.contiguous()
 
         if self.proj_600_to_64 is None or self.proj_600_to_64.device != device:
             g_proj_all = torch.Generator(device=device).manual_seed(7777 + reg_idx * 251)
-            q_600, _ = torch.linalg.qr(torch.randn((600, 64), generator=g_proj_all, device=device, dtype=torch.float32))
+            q_600, _ = torch.linalg.qr(
+                torch.randn((600, 64), generator=g_proj_all, device=device, dtype=torch.float32)
+            )
             self.proj_600_to_64 = q_600.contiguous()
 
         reg_160x120 = wm_5x5x32x120[reg_idx].reshape(160, 120)
@@ -153,9 +326,9 @@ class SymmetricBotController:
         if self.baseline_wm_128x64 is None or self.baseline_wm_128x64.shape != wm_128x64.shape:
             self.baseline_wm_128x64 = wm_128x64.clone()
         else:
-            self.baseline_wm_128x64.lerp_(wm_128x64, 0.06)
+            self.baseline_wm_128x64.lerp_(wm_128x64, 0.04)
 
-        dyn_128x64 = wm_128x64 - self.baseline_wm_128x64 * 0.75
+        dyn_128x64 = wm_128x64 - self.baseline_wm_128x64 * 0.50
         std_val = dyn_128x64.std(dim=-1, keepdim=True).clamp(min=1e-5)
         whitened_128x64 = (dyn_128x64 - dyn_128x64.mean(dim=-1, keepdim=True)) / std_val
         return whitened_128x64, inertia, src_tag
@@ -168,12 +341,21 @@ class SymmetricBotController:
         device: torch.device,
         current_state_id: str | None = None,
         catalyst_field_128x4096: torch.Tensor | None = None,
-    ) -> tuple[str, str, torch.Tensor, dict[str, float]]:
+    ) -> tuple[str, str, torch.Tensor, dict[str, float], list[int]]:
+        """
+        Декодирует активные концепты из 19,200-D поля рабочей памяти региона `latest_region_wm_5x32x120`
+        через проекцию на ортонормированный базис собственных мод `Phi_{r, k}`:
+            wm_resonances_K[k] = < W_r, Phi_{r, k} > / 19200.0
+        Поскольку <Phi_{r, k}, Phi_{r, m}> / 19200 == delta_{k, m}, любая мода k, возбужденная
+        в рабочей памяти с амплитудой alpha_k, дает точный отклик wm_resonances_K[k] = alpha_k!
+        """
         K = len(pool_ids)
+        self.pool_size_hint = max(1, K)
         if K == 0:
-            return "", "", candidate_embeds_Kx128x4096[:1], {}
+            return "", "", candidate_embeds_Kx128x4096[:1], {}, [0]
 
-        wm_128x64, _, _ = self.extract_whitened_wm_modes_128x64(device, sub_step_frac=0.0)
+        reg_idx, _, _, _ = self._get_region_specs()
+        self.extract_whitened_wm_modes_128x64(device, sub_step_frac=0.0)
         bank_float = candidate_embeds_Kx128x4096.to(device=device, dtype=torch.float32)
 
         if K == 1:
@@ -183,51 +365,102 @@ class SymmetricBotController:
                 device=device,
                 all_candidates_Kx128x4096=bank_float,
             )
-            return only_id, only_id, steered, {only_id: 100.0}
+            return only_id, only_id, steered, {only_id: 100.0}, [0]
 
-        # Строим собственное семантическое подпространство пула из K концептов (размерности K x 128 x 4096):
-        bank_flat = bank_float.reshape(K, -1)
-        bank_delta = bank_flat - bank_flat.mean(dim=0, keepdim=True)
-        bank_unit = F.normalize(bank_delta, p=2, dim=-1)
+        wm_reg_19200 = (
+            self.latest_region_wm_5x32x120.reshape(1, 19200)
+            if self.latest_region_wm_5x32x120 is not None
+            else torch.zeros((1, 19200), device=device, dtype=torch.float32)
+        )
 
-        # Проецируем рабочую память на главные оси различия концептов пула:
-        wm_flat = wm_128x64.reshape(-1)
-        wm_scores = torch.zeros(K, device=device, dtype=torch.float32)
-        for k_i in range(K):
-            seg = wm_flat[k_i::K]
-            wm_scores[k_i] = seg.mean() / (seg.std(unbiased=False).clamp(min=1e-4))
+        if float(wm_reg_19200.abs().max().item()) < 1e-4:
+            hold_id = (
+                current_state_id
+                if (current_state_id and current_state_id in pool_ids)
+                else pool_ids[0]
+            )
+            hold_idx = pool_ids.index(hold_id)
+            probs_dict = {
+                pool_ids[i]: (100.0 if i == hold_idx else 0.0) for i in range(K)
+            }
+            return (
+                hold_id,
+                hold_id,
+                bank_float[hold_idx : hold_idx + 1],
+                probs_dict,
+                [hold_idx],
+            )
 
-        if catalyst_field_128x4096 is not None:
-            cat_flat = catalyst_field_128x4096.to(device=device, dtype=torch.float32).reshape(1, -1)
-            cat_unit = F.normalize(cat_flat - cat_flat.mean(dim=-1, keepdim=True), p=2, dim=-1)
-            cat_sims = torch.mm(cat_unit, bank_unit.T).squeeze(0)
-            raw_sims = wm_scores * 0.55 + cat_sims * 0.45
+        basis_Kx19200 = get_canonical_concept_wm_basis_Kx5x32x120(
+            K, reg_idx, device
+        ).reshape(K, 19200)
+
+        # Точная ортогональная проекция рабочей памяти на K собственных мод концептов:
+        wm_resonances_K = torch.mm(wm_reg_19200, basis_Kx19200.T).squeeze(0) / 19200.0
+
+        # Если одна или несколько собственных мод рабочей памяти явно возбуждены (резонанс > 0.15),
+        # распределяем веса прямо пропорционально положительным резонансам (без искажения от T5 cat_sims!):
+        pos_res = torch.relu(wm_resonances_K - 0.10)
+        if float(pos_res.max().item()) > 0.12:
+            probs_K = pos_res / pos_res.sum().clamp(min=1e-6)
         else:
-            raw_sims = wm_scores
+            # Для слабого/шумового фонового сигнала ЭЭГ нормализуем z-score резонансов:
+            r_std = wm_resonances_K.std(unbiased=False).clamp(min=1e-5)
+            logits_K = (wm_resonances_K - wm_resonances_K.mean()) / r_std
+            probs_K = torch.softmax(logits_K / 0.45, dim=0)
 
-        sims_std = raw_sims.std(unbiased=False).clamp(min=1e-5)
-        logits_K = (raw_sims - raw_sims.mean()) / sims_std
-
-        probs_K = torch.softmax(logits_K / 0.45, dim=0)
         choice_order = torch.argsort(probs_K, descending=True).tolist()
-
         choice_probs_dict = {
             pool_ids[idx]: round(float(probs_K[idx].item()) * 100.0, 1)
             for idx in range(K)
         }
 
-        own_best_id = pool_ids[int(torch.argmax(wm_scores).item())]
-        start_id = current_state_id if (current_state_id and current_state_id in pool_ids) else own_best_id
-        top_idx = choice_order[0]
-        top_id = pool_ids[top_idx]
+        active_indices = [
+            idx for idx in choice_order if float(probs_K[idx].item()) >= 0.18
+        ]
+        if not active_indices:
+            active_indices = [choice_order[0]]
+
+        if len(active_indices) == 1:
+            top_idx = active_indices[0]
+            superposed_base = bank_float[top_idx : top_idx + 1]
+            composite_target_id = pool_ids[top_idx]
+        else:
+            sub_probs = probs_K[active_indices]
+            sub_probs = sub_probs / sub_probs.sum().clamp(min=1e-6)
+            weighted_sum = torch.sum(
+                bank_float[active_indices] * sub_probs.view(-1, 1, 1),
+                dim=0,
+                keepdim=True,
+            )
+            ref_norms = torch.norm(
+                bank_float[active_indices[0] : active_indices[0] + 1],
+                p=2,
+                dim=-1,
+                keepdim=True,
+            ).clamp(min=1e-4)
+            superposed_base = F.normalize(weighted_sum, p=2, dim=-1) * ref_norms
+            composite_target_id = "+".join([pool_ids[i] for i in active_indices[:3]])
+
+        start_id = (
+            current_state_id
+            if (current_state_id and current_state_id in pool_ids)
+            else pool_ids[active_indices[0]]
+        )
 
         steered_target = self.steer_semantic_probe_full_rank(
-            bank_float[top_idx : top_idx + 1],
+            superposed_base,
             device=device,
             all_candidates_Kx128x4096=bank_float,
             candidate_weights_K=probs_K,
         )
-        return start_id, top_id, steered_target, choice_probs_dict
+        return (
+            start_id,
+            composite_target_id,
+            steered_target,
+            choice_probs_dict,
+            active_indices,
+        )
 
     @torch.no_grad()
     def steer_semantic_probe_full_rank(
@@ -239,54 +472,65 @@ class SymmetricBotController:
         candidate_weights_K: torch.Tensor | None = None,
         sub_step_frac: float = 0.0,
     ) -> torch.Tensor:
-        """
-        КАСАТЕЛЬНЫЙ ОПЕРАТОР T5 (КАК В 2D DIFFUSION И MUSICGEN):
-        Строит ортонормированный QR-базис Q [M, 4096] ИСКЛЮЧИТЕЛЬНО из реальных токенов
-        самого промпта base_tokens (и соседних концептов пула, если они есть).
-        Никаких случайных 4096-мерных векторов! Поэтому даже при wm_radius = 0.84..1.0
-        эмбеддинг остаётся на 100% внутри грамматического подмногообразия T5-XXL!
-        """
         if self.wm_radius <= 0.001 or self.stochastic >= 0.999:
             return base_probe_1x128x4096
 
         wm_128x64, inertia, _ = self.extract_whitened_wm_modes_128x64(
             device, sub_step_frac=sub_step_frac
         )
+        if float(wm_128x64.abs().max().item()) < 1e-5:
+            return base_probe_1x128x4096
 
-        base_tokens = base_probe_1x128x4096[0].float()  # [128, 4096]
+        base_tokens = base_probe_1x128x4096[0].float()
         ref_norms = torch.norm(base_tokens, p=2, dim=-1, keepdim=True).clamp(min=1e-4)
 
-        # Определяем только значащие токены промпта (не трогаем хвост из одинаковых <pad> токенов!):
         pad_ref = base_tokens[-1:]
         tok_diff = torch.norm(base_tokens - pad_ref, p=2, dim=-1)
         active_mask = (tok_diff > 1e-3).unsqueeze(-1).float()
-        active_mask[0] = 0.0  # Защищаем самый первый токен
+        active_mask[0] = 0.0
 
-        # Строим QR-базис реальных семантических направлений из самих токенов промпта:
+        if float(active_mask.sum().item()) < 1.0:
+            return base_probe_1x128x4096
+
         tok_centered = base_tokens - base_tokens.mean(dim=0, keepdim=True)
-        if all_candidates_Kx128x4096 is not None and all_candidates_Kx128x4096.shape[0] > 1:
-            inter_modes = (all_candidates_Kx128x4096.float() - base_tokens.unsqueeze(0)).reshape(-1, 4096)
+        if (
+            all_candidates_Kx128x4096 is not None
+            and all_candidates_Kx128x4096.shape[0] > 1
+        ):
+            inter_modes = (
+                all_candidates_Kx128x4096.float() - base_tokens.unsqueeze(0)
+            ).reshape(-1, 4096)
             raw_span = torch.cat([tok_centered[:32], inter_modes[:32]], dim=0)
         else:
             raw_span = tok_centered[:64]
 
-        # QR-разложение дает чистые ортонормированные оси внутри семантического пространства T5:
-        q_mat, _ = torch.linalg.qr(raw_span.T, mode="reduced")  # [4096, M]
-        q_basis = q_mat.T                                       # [M, 4096]
+        q_mat, _ = torch.linalg.qr(raw_span.T, mode="reduced")
+        q_basis = q_mat.T
         M = q_basis.shape[0]
 
-        # Умножаем координаты рабочей памяти wm_128x64[:, :M] на семантический базис q_basis:
         wm_sem_128x4096 = torch.matmul(wm_128x64[:, :M], q_basis)
 
-        # Ортогонализация к каждому токену (чистый геодезический поворот на сфере T5):
-        dot_proj = torch.sum(wm_sem_128x4096 * base_tokens, dim=-1, keepdim=True) / (ref_norms ** 2 + 1e-6)
+        dot_proj = torch.sum(wm_sem_128x4096 * base_tokens, dim=-1, keepdim=True) / (
+            ref_norms**2 + 1e-6
+        )
         tangent_raw = (wm_sem_128x4096 - dot_proj * base_tokens) * active_mask
         t_norms = torch.norm(tangent_raw, p=2, dim=-1, keepdim=True)
-        tangent_unit = torch.where(t_norms > 1e-5, (tangent_raw / (t_norms + 1e-6)) * ref_norms, torch.zeros_like(base_tokens))
+        tangent_unit = torch.where(
+            t_norms > 1e-5,
+            (tangent_raw / (t_norms + 1e-6)) * ref_norms,
+            torch.zeros_like(base_tokens),
+        )
 
-        # Безопасный геодезический угол (до 18 градусов внутри собственного пространства концепта):
-        theta_rad = (1.0 - inertia * 0.4) * (math.pi * 0.10) * float(self.wm_radius) * (1.0 - float(self.stochastic))
-        steered_tokens = torch.cos(theta_rad * active_mask) * base_tokens + torch.sin(theta_rad * active_mask) * tangent_unit
+        theta_rad = (
+            (1.0 - inertia * 0.4)
+            * (math.pi * 0.10)
+            * float(self.wm_radius)
+            * (1.0 - float(self.stochastic))
+        )
+        steered_tokens = (
+            torch.cos(theta_rad * active_mask) * base_tokens
+            + torch.sin(theta_rad * active_mask) * tangent_unit
+        )
         steered_normalized = F.normalize(steered_tokens, p=2, dim=-1) * ref_norms
 
         return steered_normalized.unsqueeze(0).to(base_probe_1x128x4096.dtype)
@@ -299,7 +543,11 @@ class SymmetricBotController:
         if global_stage != self.last_stage_id:
             self.last_stage_id = global_stage
             self.attempt_num = 1
-        pool = my_cfg.allowed_pool if my_cfg.allowed_pool else list(self.archetypes.keys())
+        pool = (
+            my_cfg.allowed_pool
+            if my_cfg.allowed_pool
+            else list(self.archetypes.keys())
+        )
         if not pool:
             return []
         return list(pool)

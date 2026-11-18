@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: REAL-TIME MUSICGEN RUNNER (BOUNDED WM RADIUS & SMOOTH STREAM)
+NEUROCANVAS: REAL-TIME MUSICGEN RUNNER (GEODESIC T5 CONE & SMOOTH STREAM)
 ===================================================================================
-- Параметр --wm-radius ∈ [0.0, 1.0] (по умолчанию 0.15) задает радиус конуса
-  вокруг музыкального концепта base_64 в нестохастическом режиме, исключая
-  разрушение ритма и вылет из жанра.
+- Проекция рабочей памяти на T5 выполнена как чистый ортогональный поворот по сфере
+  (cos(theta)*base + sin(theta)*tangent_unit), что исключает взаимное гашение
+  вектора base_64 и уход в вырожденную область T5.
 ===================================================================================
 """
 
 from __future__ import annotations
 from typing import Optional, List, Tuple
+import math
 import os
 import sys
 import time
@@ -65,7 +66,6 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
                                        unassigned_stochastic: float = 1.0,
                                        wm_radius: float = 0.25,
                                        need_ui_telemetry: bool = False):
-    # Читаем мета-вектор одним срезом (1 транзакция вместо 15 отдельных .item()):
     meta_cpu = bus.meta_64[:28].cpu().tolist()
     n_sec = max(2, int(meta_cpu[1]))
     fcz_pers_t = bus.meta_64[6]
@@ -97,7 +97,6 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
     if not any(x > 0.5 for x in (m_afz, m_fcz, m_f3, m_f4, m_fpz)):
         m_fcz = 1.0
 
-    # Батчевая свертка всех 5 регионов на GPU одним тензорным вызовом (без цикла for!):
     full_5x160x120 = wm_field[[4, 0, 2, 3, 1]].reshape(5, 160, 120)
     dyn_5x160x120 = full_5x160x120 - full_5x160x120.mean(dim=1, keepdim=True) * 0.85
     w_5 = torch.tensor(
@@ -168,9 +167,18 @@ def project_amodal_bus_to_musicgen_gpu(bus: HardwareVRAMBus, semantic: Universal
             final_64 = base_64
         else:
             coords = torch.matmul(raw_wave_64, v_aff.T)
-            musical_mod = F.normalize(torch.matmul(coords, v_aff) + 1e-6, p=2, dim=-1) * clean_norms
-            mod_weight_64x1 = (eff_radius * 0.45 * dyn_str_t) * reg_wm_scale_64
-            final_64 = base_64 * (1.0 - mod_weight_64x1) + musical_mod * mod_weight_64x1
+            proj_vec = torch.matmul(coords, v_aff)
+            # Ортогонализуем к base_64: чистый касательный поворот на сфере T5 без гашения якоря!
+            dot_b = torch.sum(proj_vec * base_64, dim=-1, keepdim=True) / (torch.sum(base_64 ** 2, dim=-1, keepdim=True) + 1e-6)
+            tangent = proj_vec - dot_b * base_64
+            t_norm = torch.norm(tangent, p=2, dim=-1, keepdim=True)
+            tangent_unit = torch.where(
+                t_norm > 1e-5,
+                (tangent / (t_norm + 1e-6)) * clean_norms,
+                torch.zeros_like(base_64)
+            )
+            theta_64x1 = (eff_radius * 0.35 * math.pi * dyn_str_t) * reg_wm_scale_64
+            final_64 = torch.cos(theta_64x1) * base_64 + torch.sin(theta_64x1) * tangent_unit
             final_64 = F.normalize(final_64, p=2, dim=-1) * clean_norms
 
     temp = float(base_temp)
@@ -684,7 +692,6 @@ def main():
                 smoothed_t5.mul_(1.0 - ema_alpha).add_(target_out, alpha=ema_alpha)
                 smoothed_t5 = F.normalize(smoothed_t5, p=2, dim=-1) * target_norms
 
-            # Записываем T5 прямо в общую память GPU (VRAM-шина), избегая .cpu().numpy()!
             bus.live_music_64x768.copy_(smoothed_t5)
             has_ipc = (bus.is_owner or bus.attached_pid > 0)
             worker.update_conditioning(

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v11.0 (3D-DiT + 2D DIFFUSION + MUSICGEN)
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v11.2 (GRADUAL WM MIXER & 24-CH GAMEPAD)
 ===================================================================================
-- Полная поддержка нового 3D-DiT движка (neuro_run.py) наравне с 2D Diffusion и MusicGen:
-  * Живое регулирование радиуса рабочей памяти (wm_radius), стохастики (stochastic),
-    режима HUD (off/minimal/full), числа шагов (steps), CFG (cfg_scale), контекста (context_latents)
-    и длины шага (step_latents).
-  * Универсальный редактор лора: читает и .json манифесты (configs/), и .txt лоры (lore/),
-    позволяя добавлять/удалять концепты по регионам [FCZ, AFZ, F3, F4, FPZ, NEGATIVE] на лету!
+- Поддерживает градуальное смешивание Рабочей Памяти ЭЭГ (`eeg_wm_gain`) и
+  Синтезатора Рабочей Памяти от Геймпада/ИИ-Агента (`gamepad_wm_mix`).
+- Хранит и синхронизирует порегионные привязки концептов к 24 полуосям/кнопкам
+  геймпада (`concept_bindings`), живые вероятности выбора (`region_choice_probs`)
+  и список совместно активных концептов (`active_concept_indices`).
 ===================================================================================
 """
 
@@ -146,10 +145,6 @@ def normalize_lore_relpath(p: str | None) -> str:
 
 
 def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
-    """
-    Универсальный парсер лора: понимает и .json манифесты (configs/mode_*.json),
-    и порегионные .txt файлы (lore/*.txt), раскладывая их по секциям [FPZ, AFZ, F3, F4, FCZ, NEGATIVE].
-    """
     sections = {"FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []}
     rel_p = normalize_lore_relpath(lore_path)
     if not rel_p:
@@ -216,7 +211,7 @@ def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
 
 
 def discover_available_lore_files() -> list[str]:
-    found = []
+    found = [""]
     for folder in ("configs", ".", "lore"):
         d_path = os.path.join(BASE_DIR, folder) if folder != "." else BASE_DIR
         if os.path.isdir(d_path):
@@ -238,6 +233,15 @@ video_state = {
     "sections": {
         "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
     },
+    "concept_bindings": {
+        "FCZ": ["LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT", "BTN_A", "BTN_B"],
+        "AFZ": ["RS_UP", "RS_DOWN", "RS_LEFT", "RS_RIGHT", "BTN_X", "BTN_Y"],
+        "F3":  ["DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "LB", "RB"],
+        "F4":  ["BTN_A", "BTN_B", "BTN_X", "BTN_Y", "LT", "RT"],
+        "FPZ": ["LT", "RT", "START", "BACK"],
+    },
+    "eeg_wm_gain": 1.0,
+    "gamepad_wm_mix": 1.0,
     "monty_mode": "off",
     "stochastic": 0.0,
     "unassigned_stochastic": 0.0,
@@ -275,7 +279,9 @@ video_state = {
     "fpz_meta_charge": 0.0,
     "afz_stage_progress": 0.0,
     "active_region_mask": {"Fpz": True, "AFz": True, "F3": True, "F4": True, "FCz": True},
-    "active_concept_idx": {"Fpz": 0, "AFz": 0, "F3": 0, "F4": 0, "FCz": 0}
+    "active_concept_idx": {"Fpz": 0, "AFz": 0, "F3": 0, "F4": 0, "FCz": 0},
+    "active_concept_indices": {"Fpz": [0], "AFz": [0], "F3": [0], "F4": [0], "FCz": [0]},
+    "region_choice_probs": {"Fpz": [], "AFz": [], "F3": [], "F4": [], "FCz": []}
 }
 video_state_lock = threading.Lock()
 
@@ -630,8 +636,13 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                 if "region_gains" in data and isinstance(data["region_gains"], dict):
                     for k, v in data["region_gains"].items():
                         video_state["region_gains"][k] = float(np.clip(float(v), 0.0, 1.0))
+                if "concept_bindings" in data and isinstance(data["concept_bindings"], dict):
+                    for rk, blist in data["concept_bindings"].items():
+                        if isinstance(blist, list):
+                            video_state["concept_bindings"][rk.upper()] = [str(x).upper() for x in blist]
                 for k in (
                     "preset", "monty_mode", "stochastic", "unassigned_stochastic", "wm_radius",
+                    "eeg_wm_gain", "gamepad_wm_mix",
                     "hud_mode", "context_latents", "step_latents",
                     "auto_active_boost", "active_user_gain", "inactive_base_gain",
                     "cross_region_bleed", "cascade_rate", "psi_threshold",
@@ -647,6 +658,9 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     "unassigned_stochastic": float(video_state["unassigned_stochastic"]),
                     "wm_radius": float(video_state["wm_radius"]),
                     "geodesic_lock": float(video_state["wm_radius"]),
+                    "eeg_wm_gain": float(video_state.get("eeg_wm_gain", 1.0)),
+                    "gamepad_wm_mix": float(video_state.get("gamepad_wm_mix", 1.0)),
+                    "concept_bindings": dict(video_state.get("concept_bindings", {})),
                     "hud_mode": str(video_state.get("hud_mode", "minimal")),
                     "context_latents": int(video_state.get("context_latents", 1)),
                     "step_latents": int(video_state.get("step_latents", 2)),
@@ -666,6 +680,30 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             send_video_ipc({"cmd": "update_video_config", "config": cfg_copy})
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "video": cfg_copy})
+
+        elif clean_path == '/api/video/gamepad':
+            with video_state_lock:
+                if "eeg_wm_gain" in data:
+                    video_state["eeg_wm_gain"] = float(np.clip(float(data["eeg_wm_gain"]), 0.0, 1.0))
+                if "gamepad_wm_mix" in data:
+                    video_state["gamepad_wm_mix"] = float(np.clip(float(data["gamepad_wm_mix"]), 0.0, 1.0))
+                if "concept_bindings" in data and isinstance(data["concept_bindings"], dict):
+                    for rk, blist in data["concept_bindings"].items():
+                        if isinstance(blist, list):
+                            video_state["concept_bindings"][rk.upper()] = [str(x).upper() for x in blist]
+                eeg_g = float(video_state["eeg_wm_gain"])
+                gp_m = float(video_state["gamepad_wm_mix"])
+                binds_copy = dict(video_state["concept_bindings"])
+
+            gp_msg = {
+                "cmd": "set_gamepad_input",
+                "channels": data.get("channels", {}),
+                "eeg_wm_gain": eeg_g,
+                "gamepad_wm_mix": gp_m,
+                "concept_bindings": binds_copy,
+            }
+            send_video_ipc(gp_msg)
+            self._send_json(200, {"status": "ok"})
 
         elif clean_path == '/api/video/switch_lore':
             lore_file = str(data.get("lore_file", "")).strip()
@@ -711,6 +749,8 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
                     cur_list.append(concept)
                 elif action == "remove" and concept in cur_list:
                     cur_list.remove(concept)
+                elif action == "clear":
+                    video_state["sections"][region_key] = []
                 elif action == "set" and isinstance(data.get("concepts"), list):
                     video_state["sections"][region_key] = [
                         str(x).strip() for x in data["concepts"] if str(x).strip()
@@ -1052,7 +1092,11 @@ def ipc_video_control_listener():
                             runner_secs = msg.get("sections")
                             if isinstance(runner_secs, dict) and any(len(v) > 0 for v in runner_secs.values()):
                                 video_state["sections"] = runner_secs
-                            for k in ("stochastic", "wm_radius", "hud_mode", "context_latents", "step_latents", "steps", "cfg_scale"):
+                            for k in (
+                                "stochastic", "wm_radius", "hud_mode", "context_latents",
+                                "step_latents", "steps", "cfg_scale", "eeg_wm_gain",
+                                "gamepad_wm_mix", "concept_bindings"
+                            ):
                                 if k in msg:
                                     video_state[k] = msg[k]
                             video_state["available_lores"] = discover_available_lore_files()
@@ -1072,8 +1116,10 @@ def ipc_video_control_listener():
                             video_state["afz_stage_progress"] = msg.get("afz_stage_progress", 0.0)
                             for k in (
                                 "monty_mode", "stochastic", "unassigned_stochastic", "wm_radius",
+                                "eeg_wm_gain", "gamepad_wm_mix",
                                 "hud_mode", "context_latents", "step_latents", "steps", "cfg_scale",
-                                "active_region_mask", "region_gains", "active_concept_idx"
+                                "active_region_mask", "region_gains", "active_concept_idx",
+                                "active_concept_indices", "region_choice_probs", "concept_bindings"
                             ):
                                 if k in msg:
                                     video_state[k] = msg[k]

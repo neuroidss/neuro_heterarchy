@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-neuro_ltx_backend.py — Аппаратный бэкенд LTX-Video (T5 всегда в VRAM + On-Manifold VAE Encode)
-==============================================================================================
-- По умолчанию allow_t5_offload = False: T5-XXL никогда не выгружается из VRAM!
-- decode_noise_scale = 0.0 по умолчанию: декодер VAE не подмешивает серый шум в картинку.
-- Добавлен метод encode_frame_to_latent(frame_rgb) (~10 мс на GPU), который проецирует
-  финальный кадр (прошедший через Denoising VAE Decoder при decode_t = 0.05) обратно на
-  чистое латентное многообразие для бесконечно стабильного авторегрессионного роллаута!
+neuro_ltx_backend.py — Аппаратный бэкенд LTX-Video (Multi-Frame Causal VAE Encode + Last-Frame Fix)
+====================================================================================================
+- Добавлен encode_frames_to_latent(frames_rgb): корректно кодирует 1 + k*8 кадров в каузальный
+  5D-латент [1, 128, 1+k, H_lat, W_lat], сохраняя вектор скорости движения для context_latents >= 2.
+- В decode_latents_chunk добавлен официальный last_frame_fix (дублирование последнего латента перед
+  некаузальным 3D-декодером и обрезка tsf кадров), убирающий артефакты стыка.
+- Для малого числа шагов (steps <= 12) используется сгущение сигм к 0 (меньше призраков на последнем шаге).
+====================================================================================================
 """
 
 from __future__ import annotations
@@ -70,6 +71,24 @@ def calculate_shift(
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
     return float(image_seq_len * m + b)
+
+
+def linear_quadratic_sigmas(num_steps: int, threshold_noise: float = 0.025) -> list[float]:
+    """Сигмы из pipeline_ltx_condition.py: точнее сходится к sigma -> 0 при малом числе шагов."""
+    if num_steps < 2:
+        return [1.0]
+    linear_steps = num_steps // 2
+    linear_sigma_schedule = [i * threshold_noise / max(1, linear_steps) for i in range(linear_steps)]
+    threshold_noise_step_diff = linear_steps - threshold_noise * num_steps
+    quadratic_steps = num_steps - linear_steps
+    quadratic_coef = threshold_noise_step_diff / (max(1, linear_steps) * (quadratic_steps ** 2))
+    linear_coef = threshold_noise / max(1, linear_steps) - 2 * threshold_noise_step_diff / (quadratic_steps ** 2)
+    const = quadratic_coef * (linear_steps ** 2)
+    quadratic_sigma_schedule = [
+        quadratic_coef * (i ** 2) + linear_coef * i + const for i in range(linear_steps, num_steps)
+    ]
+    sigma_schedule = linear_sigma_schedule + quadratic_sigma_schedule
+    return [float(max(1e-3, min(1.0, 1.0 - x))) for x in sigma_schedule]
 
 
 def rescale_noise_cfg(
@@ -317,7 +336,10 @@ class LTXModelBackend:
 
     @torch.no_grad()
     def set_scheduler_timesteps(self, steps: int, video_seq_len: int):
-        sigmas = np.linspace(1.0, 1.0 / steps, steps).tolist()
+        if steps <= 12:
+            sigmas = linear_quadratic_sigmas(steps, threshold_noise=0.04)
+        else:
+            sigmas = np.linspace(1.0, 1.0 / steps, steps).tolist()
         mu = calculate_shift(
             video_seq_len,
             self.scheduler.config.get("base_image_seq_len", 256),
@@ -329,20 +351,30 @@ class LTXModelBackend:
         return self.scheduler.timesteps
 
     @torch.no_grad()
-    def encode_frame_to_latent(self, frame_rgb: np.ndarray) -> torch.Tensor:
+    def encode_frames_to_latent(self, frames_rgb: list[np.ndarray] | np.ndarray) -> torch.Tensor:
         """
-        Кодирует чистый RGB-кадр (после финального денойзинга в декодере VAE)
-        обратно в нормализованный 5D-латент [1, 128, 1, H_lat, W_lat] на многообразии LTX.
+        Кодирует последовательность из (1 + k * temporal_ratio) RGB-кадров [T, H, W, 3]
+        в каузальный 5D-латент [1, 128, 1 + k, H_lat, W_lat] с сохранением скорости движения.
         """
-        img_t = (
-            torch.from_numpy(frame_rgb)
+        if isinstance(frames_rgb, list):
+            arr = np.stack(frames_rgb, axis=0)
+        elif frames_rgb.ndim == 3:
+            arr = frames_rgb[None, ...]
+        else:
+            arr = frames_rgb
+
+        tsf = int(self.temporal_ratio)
+        valid_n = ((arr.shape[0] - 1) // tsf) * tsf + 1
+        arr = arr[-valid_n:]
+
+        vid_t = (
+            torch.from_numpy(np.ascontiguousarray(arr, dtype=np.uint8))
             .to(device=self.device, dtype=torch.float32)
-            .permute(2, 0, 1)
+            .permute(3, 0, 1, 2)
             .unsqueeze(0)
-            .unsqueeze(2)
         )
-        img_norm = (img_t / 127.5 - 1.0).to(dtype=self.vae.dtype)
-        enc_out = self.vae.encode(img_norm)
+        vid_norm = (vid_t / 127.5 - 1.0).to(dtype=self.vae.dtype)
+        enc_out = self.vae.encode(vid_norm)
         raw_lat = (
             enc_out.latent_dist.mode()
             if hasattr(enc_out, "latent_dist")
@@ -357,12 +389,17 @@ class LTXModelBackend:
         return norm_lat.to(dtype=torch.float32)
 
     @torch.no_grad()
+    def encode_frame_to_latent(self, frame_rgb: np.ndarray) -> torch.Tensor:
+        return self.encode_frames_to_latent([frame_rgb])
+
+    @torch.no_grad()
     def decode_latents_chunk(
         self,
         latents_5d: torch.Tensor,
         generator: torch.Generator | None = None,
         decode_t: float = 0.05,
         decode_noise_scale: float = 0.0,
+        last_frame_fix: bool = True,
     ) -> list[np.ndarray]:
         denorm = self.pipe._denormalize_latents(
             latents_5d.to(dtype=torch.float32),
@@ -370,6 +407,10 @@ class LTXModelBackend:
             self.vae.latents_std,
             self.vae.config.scaling_factor,
         ).to(dtype=self.vae.dtype)
+
+        tsf = int(self.temporal_ratio)
+        if last_frame_fix:
+            denorm = torch.cat([denorm, denorm[:, :, -1:].contiguous()], dim=2)
 
         if getattr(self.vae.config, "timestep_conditioning", False):
             t_tensor = torch.tensor(
@@ -389,6 +430,9 @@ class LTXModelBackend:
             t_tensor = None
 
         decoded = self.vae.decode(denorm, t_tensor, return_dict=False)[0]
+        if last_frame_fix and decoded.shape[2] > tsf:
+            decoded = decoded[:, :, :-tsf, :, :]
+
         post = self.pipe.video_processor.postprocess_video(
             decoded, output_type="pt"
         )
@@ -586,7 +630,10 @@ class RemoteLTXModelBackend:
 
     @torch.no_grad()
     def set_scheduler_timesteps(self, steps: int, video_seq_len: int):
-        sigmas = np.linspace(1.0, 1.0 / steps, steps).tolist()
+        if steps <= 12:
+            sigmas = linear_quadratic_sigmas(steps, threshold_noise=0.04)
+        else:
+            sigmas = np.linspace(1.0, 1.0 / steps, steps).tolist()
         mu = calculate_shift(
             video_seq_len,
             self.scheduler.config.get("base_image_seq_len", 256),
@@ -596,6 +643,31 @@ class RemoteLTXModelBackend:
         )
         self.scheduler.set_timesteps(sigmas=sigmas, device=self.device, mu=mu)
         return self.scheduler.timesteps
+
+    @torch.no_grad()
+    def encode_frames_to_latent(self, frames_rgb: list[np.ndarray] | np.ndarray) -> torch.Tensor:
+        if isinstance(frames_rgb, list):
+            arr = np.stack(frames_rgb, axis=0)
+        elif frames_rgb.ndim == 3:
+            arr = frames_rgb[None, ...]
+        else:
+            arr = frames_rgb
+        if arr.shape[0] == 1:
+            return self.encode_frame_to_latent(arr[0])
+
+        self.conn.send(
+            {
+                "cmd": "encode_frames",
+                "frames_rgb": np.ascontiguousarray(arr, dtype=np.uint8),
+            }
+        )
+        resp = self.conn.recv()
+        if resp.get("status") != "ok":
+            # Фоллбек на 1 кадр, если сервер старой версии
+            return self.encode_frame_to_latent(arr[-1])
+        return torch.from_numpy(resp["latent_5d"]).to(
+            device=self.device, dtype=torch.float32
+        )
 
     @torch.no_grad()
     def encode_frame_to_latent(self, frame_rgb: np.ndarray) -> torch.Tensor:
@@ -619,6 +691,7 @@ class RemoteLTXModelBackend:
         generator: torch.Generator | None = None,
         decode_t: float = 0.05,
         decode_noise_scale: float = 0.0,
+        last_frame_fix: bool = True,
     ) -> list[np.ndarray]:
         self._decode_call_idx += 1
         self.conn.send(
@@ -628,6 +701,7 @@ class RemoteLTXModelBackend:
                 "seed": 42 + self._decode_call_idx,
                 "decode_t": float(decode_t),
                 "decode_noise_scale": float(decode_noise_scale),
+                "last_frame_fix": bool(last_frame_fix),
             }
         )
         resp = self.conn.recv()

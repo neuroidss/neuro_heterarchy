@@ -117,7 +117,6 @@ def fast_mha_forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.
                 state['cross_v'] = v
         use_causal = False
     else:
-        # Чистый FP16 Tensor-Core путь на GPU (без конвертации в float32):
         projected = F.linear(query, self.in_proj_weight, self.in_proj_bias)
         packed = projected.view(B, T_q, 3, H, D).permute(2, 0, 3, 1, 4)
         q = packed[0].contiguous()

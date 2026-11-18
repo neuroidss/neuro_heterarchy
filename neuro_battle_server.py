@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-neuro_battle_server.py — Бессмертный сервер весов LTX-Video (T5 всегда в памяти + On-Manifold VAE Encode)
+neuro_battle_server.py — Бессмертный сервер весов LTX-Video (Multi-Frame Causal Encode + Last-Frame Fix)
 """
 
 from __future__ import annotations
@@ -161,11 +161,21 @@ class DumbWeightsServer:
         }
 
     @torch.no_grad()
+    def handle_encode_frames(self, msg: dict) -> dict:
+        frames_rgb = msg["frames_rgb"]
+        lat_5d = self.backend.encode_frames_to_latent(frames_rgb)
+        return {
+            "status": "ok",
+            "latent_5d": lat_5d.detach().to(torch.float16).cpu().numpy(),
+        }
+
+    @torch.no_grad()
     def handle_decode_latents(self, msg: dict) -> dict:
         latents_5d = self._to_device_tensor(msg["latents_5d"], dtype=torch.float32)
         seed = int(msg.get("seed", 42))
         decode_t = float(msg.get("decode_t", 0.05))
         decode_noise_scale = float(msg.get("decode_noise_scale", 0.0))
+        last_frame_fix = bool(msg.get("last_frame_fix", True))
         gen = torch.Generator(device=self.device).manual_seed(seed)
         try:
             frames = self.backend.decode_latents_chunk(
@@ -173,6 +183,7 @@ class DumbWeightsServer:
                 generator=gen,
                 decode_t=decode_t,
                 decode_noise_scale=decode_noise_scale,
+                last_frame_fix=last_frame_fix,
             )
         except torch.cuda.OutOfMemoryError:
             print("⚠️ [VRAM GUARD] OOM в 3D-VAE! Включаю тайлинг 256x256...")
@@ -192,6 +203,7 @@ class DumbWeightsServer:
                 generator=gen,
                 decode_t=decode_t,
                 decode_noise_scale=decode_noise_scale,
+                last_frame_fix=last_frame_fix,
             )
 
         return {
@@ -263,6 +275,8 @@ def main():
                         conn.send(server.handle_transformer_forward(msg))
                     elif cmd == "encode_frame":
                         conn.send(server.handle_encode_frame(msg))
+                    elif cmd == "encode_frames":
+                        conn.send(server.handle_encode_frames(msg))
                     elif cmd == "decode_latents":
                         conn.send(server.handle_decode_latents(msg))
                         decode_count += 1

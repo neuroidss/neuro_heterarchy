@@ -1,6 +1,6 @@
-# 🌌 EXOCORTEX 3D-DiT: HYBRID DIFFUSION-TRANSFORMER CONCEPT MANIFOLD ENGINE, ON-MANIFOLD VAE PROJECTION & 96,000-D AUTOBATTLER HETERARCHY
+# 🌌 EXOCORTEX 3D-DiT: CONTINUOUS REAL-TIME NEUROFEEDBACK WORLD ENGINE, HYBRID S³ + T5 CONCEPT MANIFOLD & GRADUAL WORKING MEMORY SYNTHESIS
 
-> **100% Coordinate-Free 3D-DiT World Simulator (`LTX-Video`), Unified Diffusion-Transformer Concept Space Control (Synthesizing 2D Diffusion $S^3$ Phase Rotation + Transformer Clean Memory Conditioning), On-Manifold Shared VAE Denoising Projection (*HaCohen et al., 2024*), Resident T5-XXL Concept Manifold Navigation (Zero Offload Stall), Intransitive Autocatalytic RPG Party-Building (Zero "Imba" Topology), Feigenbaum Edge-of-Chaos Dynamics ($\delta = 4.6692016$), and Unified Web Studio Integration (`:8080`)**
+> **100% Continuous Real-Time 3D-DiT Neurofeedback Simulator (`LTX-Video`), Zero Turn-Based Blocking (All Cortical Regions Active on Every Denoising Sub-Step), On-Manifold Shared VAE Denoising Projection (*HaCohen et al., 2024*), Orthonormal 19,200-D Working Memory Eigenmode Resonance, Gradual Multi-Agent Working Memory Mixer (`FreeEEG16` × 24-Channel Gamepad/Agent Synthesizer × `TBP.Monty`), and Intransitive Autocatalytic Dynamics ($\delta = 4.6692016$)**
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-EE4C2C.svg?style=flat&logo=pytorch)](https://pytorch.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-FP8_%7C_INT8_%7C_NF4_%7C_BF16_Fast_Stream-76B900.svg?style=flat&logo=nvidia)](https://developer.nvidia.com/cuda-zone)
@@ -18,162 +18,132 @@
 ---
 
 ## 📑 Table of Contents
-1. [The Unified Theory: How to Combine 2D Diffusion & Music Transformer Control in a 3D-DiT Video Transformer](#1-the-unified-theory-how-to-combine-2d-diffusion--music-transformer-control-in-a-3d-dit-video-transformer)
-2. [Five Causes of Video Degradation & Their Exact Mathematical Solutions](#2-five-causes-of-video-degradation--their-exact-mathematical-solutions)
-3. [Core Paradigm: Intransitive Mutable Catalysts & Zero-Imba RPG Party-Building](#3-core-paradigm-intransitive-mutable-catalysts--zero-imba-rpg-party-building)
-4. [Resident T5-XXL Policy (Zero Offload Stall) & Free Latent Drift When Concepts Are Cleared](#4-resident-t5-xxl-policy-zero-offload-stall--free-latent-drift-when-concepts-are-cleared)
-5. [Zero-Overhead 128D Feigenbaum Oracle ($\delta = 4.6692016$) & Dynamic Branch Competition](#5-zero-overhead-128d-feigenbaum-oracle-delta--46692016--dynamic-branch-competition)
-6. [Architecture & Module Map (Immortal Dumb Weights Server + Client Logic)](#6-architecture--module-map-immortal-dumb-weights-server--client-logic)
+1. [Core Design Law: Continuous Real-Time Neurofeedback (Zero Turn-Based Windows, Zero User Blocking)](#1-core-design-law-continuous-real-time-neurofeedback-zero-turn-based-windows-zero-user-blocking)
+2. [Unified Working Memory Field (`[5 × 5 × 32 × 120]` = 96,000-D): How EEG, Gamepad, Monty & AI Agents Coexist](#2-unified-working-memory-field-5--5--32--120--96000-d-how-eeg-gamepad-monty--ai-agents-coexist)
+3. [Mathematical Fixes for 100% Visual Stability & Instant Concept Responsiveness](#3-mathematical-fixes-for-100-visual-stability--instant-concept-responsiveness)
+4. [24-Channel Gamepad/Keyboard Working Memory Synthesizer & Co-Catalytic Superposition (Diagonals & Multi-Region)](#4-24-channel-gamepadkeyboard-working-memory-synthesizer--co-catalytic-superposition-diagonals--multi-region)
+5. [Intransitive Mutable Catalysts & Free Latent Drift When Concept Pools Are Empty](#5-intransitive-mutable-catalysts--free-latent-drift-when-concept-pools-are-empty)
+6. [Architecture & Module Map](#6-architecture--module-map)
 7. [Quick Start & CLI Reference](#7-quick-start--cli-reference)
 8. [Comprehensive Scientific Bibliography & DOIs](#8-comprehensive-scientific-bibliography--dois)
 
 ---
 
-## 1. The Unified Theory: How to Combine 2D Diffusion & Music Transformer Control in a 3D-DiT Video Transformer
+## 1. Core Design Law: Continuous Real-Time Neurofeedback (Zero Turn-Based Windows, Zero User Blocking)
 
-Why do **2D Diffusion (`render_logic.py`)** and the **MusicGen Transformer (`music_render_logic.py`)** preserve crisp conceptual spaces at any `--wm-radius` and at `--stochastic 0.0`, whereas naive autoregressive rollouts of a **3D Diffusion Transformer (`LTX-Video`)** either:
-* explode into high-contrast rainbow blotches/stripes, or
-* freeze into a static image that gradually washes out into flat grey fog?
+**Exocortex 3D-DiT** is a **real-time neurofeedback world simulator**, not a turn-based strategy game. Three strict architectural invariants govern user and agent control:
 
-Because a **3D Diffusion Transformer (`LTXVideoTransformer3DModel`)** is a hybrid of **two distinct mathematical operators** inside every `LTXVideoTransformerBlock` (`transformer_ltx.py`):
-1. **A Spatio-Temporal Self-Attention Transformer (`attn1` with 3D RoPE)** that propagates structure from past context frames (`0..n_cond`) into future frames (`n_cond..F`).
-2. **A Flow-Matching Diffusion Denoiser + Cross-Attention Navigator (`attn2` over T5-XXL `[1, 128, 4096]`)** that sculpts 3D Gaussian noise $\boldsymbol{\epsilon} \sim \mathcal{N}(0, \mathbf{I})$ along semantic velocity fields $\mathbf{v}_\theta(\mathbf{z}_t, t, \mathbf{E}_{\text{T5}})$.
-
-To make a 3D-DiT Video Transformer hold conceptual spaces with the same rock-solid stability and responsiveness as 2D Diffusion and MusicGen, **three mathematical laws must be satisfied simultaneously**:
-
-```
- ═════════════════════════════════════════════════════════════════════════════
-   UNIFIED 3D-DiT CONTROL: 2D DIFFUSION S³ + TRANSFORMER MEMORY + VAE MANIFOLD
- ═════════════════════════════════════════════════════════════════════════════
-
-  [96,000-D CORTICAL WORKING MEMORY: 5 Regions × 5 Bands × 32 Slots × 120 Dipoles]
-                         │
-        ┌────────────────┴────────────────┐
-        ▼ (1. Concept Manifold: attn2)    ▼ (2. Latent S³ Wave: attn1 + Euler)
-  ┌───────────────────────────────────┐ ┌────────────────────────────────────┐
-  │ INTRINSIC T5 QR-TANGENT SUBSPACE  │ │ COHERENT S³ BASIS ROTATION         │
-  │ • Basis Q = QR(Active Concept     │ │ • 4 Isotropic 3D Bases b₁..b₄~N(0,I)│
-  │   Tokens ∪ Inter-Concept Chords)  │ │ • Channel-Temporal Phase [1,128,F,1,1]│
-  │ • Zero Random 4096-D Projection!  │ │   (Uniform across H×W -> 0% Stripes│
-  │ • 100% Grammatical T5 Semantics   │ │   & 0% Blotches, Full 3D Motion!)  │
-  └─────────────────┬─────────────────┘ └─────────────────┬──────────────────┘
-                    │                                     │
-                    └──────────────────┬──────────────────┘
-                                       ▼
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │ 3. HYBRID TRANSFORMER-DIFFUSION WINDOW STEPPER (LTXVideoTransformer3D)   │
-  │ • Context Frame 0: Clean On-Manifold Anchor (t_cond = 0) + Quadratic     │
-  │   Timestep Vibration σ_cond(wm_radius)·(t/1000)²·ε_S³ for Fluid Motion   │
-  │ • Future Frames 1..F: Denoised via Standard Euler Step (dt = σ_next - σ < 0)│
-  │   with shift_terminal = None (Reaches Exact σ = 0.0 -> Zero Residual Fog)│
-  └────────────────────────────────────┬─────────────────────────────────────┘
-                                       ▼
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │ 4. SHARED DIFFUSION OBJECTIVE & ON-MANIFOLD VAE PROJECTION               │
-  │ • LTX Denoising VAE Decoder executes final denoising step at decode_t=0.05│
-  │   with decode_noise_scale = 0.0 (Zero Grey Fog Injection!)               │
-  │ • Clean last frame is re-encoded via VAE.encode (~12 ms) + AdaIN         │
-  │   variance lock to Genesis Frame -> 100% On-Manifold Rollout Forever!    │
-  └──────────────────────────────────────────────────────────────────────────┘
- ═════════════════════════════════════════════════════════════════════════════
-```
-
-### Law 1 — Intrinsic Concept Subspace Navigation in `attn2` (Why Random 4096-D Projections Create Blotches)
-In T5-XXL (`D = 4096`), valid natural language tokens and visual concepts occupy a low-dimensional **intrinsic semantic manifold** ($\text{dim} \approx 32\text{--}64$). The remaining $\sim 4000$ dimensions are orthogonal "dead zones" never seen by the 3D-DiT during training.
-* **What caused rainbow blotches:** Multiplying the EEG working memory by a random Gaussian matrix `torch.randn(120, 4096)` and rotating T5 tokens into that random 4096-D direction pushes `encoder_hidden_states` out of the T5 language manifold into the dead zone. Cross-Attention (`attn2`) then produces ungrounded, high-contrast color blotches.
-* **How 2D Diffusion & MusicGen solve it (and how 3D-DiT must do it):**
-  The tangent basis $\mathbf{Q} \in \mathbb{R}^{M \times 4096}$ ($\mathbf{Q}\mathbf{Q}^\top = \mathbf{I}_M$) must be constructed **exclusively from the actual T5 embeddings of the active concept's non-padding tokens and the difference vectors $\Delta\mathbf{E}_k = \mathbf{E}_k - \mathbf{E}_{\text{base}}$ to sibling concepts in the pool**:
-  $$\mathbf{Q} = \text{QR}\!\left(\text{Span}\{\mathbf{e}_1 - \bar{\mathbf{e}}, \dots, \mathbf{e}_{L_{\text{valid}}} - \bar{\mathbf{e}}, \; \Delta\mathbf{E}_1, \dots, \Delta\mathbf{E}_K\}\right)$$
-  Rotating along $\mathbf{Q}$ guarantees that at **any `--wm-radius` $\in [0.0, 1.0]$**, the conditioning tensor stays **100% inside the learned T5 semantic manifold**!
-
-### Law 2 — Spatially Coherent, Temporally Travelling $S^3$ Waves in `attn1` (Why Voxel-Wise `.repeat()` Creates Vertical Stripes & Scalar Angles Freeze Motion)
-* **Why `.repeat()` created vertical stripes:** Repeating a 1D vector across `C * F * H * W` and reshaping to `[1, 128, F, H, W]` assigns different rotation angles $\phi(h, w)$ to adjacent spatial patches $(h, w)$, destroying the spatial covariance of the 3D-DiT patches and creating periodic vertical bars.
-* **Why a single scalar angle froze motion:** Collapsing $\phi$ to a single number across all frames $f \in [0..F-1]$ gives zero temporal phase gradient $\partial \phi / \partial f = 0$, causing `attn1` to copy a static image across the window.
-* **The Exact Solution (`[1, 128, F, 1, 1]` Travelling $S^3$ Wave):**
-  The phase angles $(\phi_a, \phi_b, \phi_c)$ derived from the 32 causal time-frequency slots of working memory must have shape **`[1, 128, F, 1, 1]`** — varying across the **128 latent channels** and across the **temporal frames $f \in [0..F-1]$**, while remaining **100% spatially uniform (`1 × 1`) across `H × W` within each frame**!
-  $$\mathbf{G}_{\text{WM}}(c, f, h, w) = \cos\phi_c(c,f)\Big(\cos\phi_a(c,f)\,\mathbf{b}_1 + \sin\phi_a(c,f)\,\mathbf{b}_2\Big) + \sin\phi_c(c,f)\Big(\cos\phi_b(c,f)\,\mathbf{b}_3 + \sin\phi_b(c,f)\,\mathbf{b}_4\Big)$$
-  Because $(\phi_a, \phi_b, \phi_c)$ are constant across $(h, w)$, every 2D spatial slice is a **mathematically exact isotropic Gaussian field $\mathcal{N}(0, \mathbf{I})$** (zero stripes, zero blotches!), while the temporal gradient $\phi(c, f+1) - \phi(c, f) \propto \text{wm\_radius}$ drives continuous 3D motion across frames!
-
-### Law 3 — On-Manifold Shared VAE Denoising Projection & Quadratic Timestep Conditioning (Why Autoregressive Rollouts Wash Out to Grey)
-In **LTX-Video (*HaCohen et al., 2024, Section 2.1.1 "Shared Diffusion Objective"*)**, the 3D-DiT transformer only performs latent-to-latent denoising down to $t_1$; the **final denoising step that removes high-frequency residual uncertainty and restores crisp edges is executed by the Denoising VAE Decoder (`decode_t = 0.05`)**.
-* **Why raw latent feedback washed out to grey:**
-  1. Passing `unpacked_z0[:, :, -1:]` directly from the transformer output into the next window bypasses the VAE Decoder's final denoising step, accumulating off-manifold residual error every block.
-  2. Applying `tone_map_latents` on every block multiplied latent amplitudes by $\sim 0.82$ per block ($0.82^5 = 0.37$), crushing contrast into flat grey!
-  3. Passing `decode_noise_scale = 0.025` injected white noise into black backgrounds during decoding.
-* **The Exact Solution:**
-  1. **Never use `per_token_timesteps` with positive `+noise_pred` in `FlowMatchEulerDiscreteScheduler.step()`** (in HuggingFace's `FlowMatchEulerDiscreteScheduler`, `per_token_timesteps` flips the sign of `dt = current_sigma - next_sigma > 0`, turning denoising into noise amplification!). Always step the generated frames `latents[:, :, n_cond:]` using the standard branch (`dt = sigma_next - sigma < 0`) with `shift_terminal = None` so $\sigma$ reaches exact `0.0`.
-  2. **Condition Frame `0` with Quadratic Timestep Vibration (`pipeline_ltx_condition.py`):**
-     Keep `cond_mask = 1.0` (`t = 0` for frame `0`), and during denoising steps $t \in [1000 \to 0]$, apply Lightricks' quadratic conditioning perturbation scaled by `wm_radius`:
-     $$\mathbf{z}_{\text{cond}}(t) = \mathbf{z}_0^{\text{clean}} + (0.04 + 0.18\,\text{wm\_radius}) \cdot \left(\frac{t}{1000}\right)^2 \cdot \boldsymbol{\epsilon}_{S^3}(\text{WM})$$
-     At high $t \approx 1000$ (coarse motion layout), the context frame flexes with the working memory wave so the scene never freezes; as $t \to 0$ (fine detail synthesis), $(t/1000)^2 \to 0$ locks onto the crisp reference!
-  3. **On-Manifold VAE Projection Between Windows:**
-     After `decode_latents_chunk(..., decode_t=0.05, decode_noise_scale=0.0)` produces the clean, fully denoised pixel frames, re-encode the final frame `clean_video_frames[-1]` via `VAE.encode` (~12 ms) and match its channel mean/std to the genesis reference via gentle AdaIN (`factor = 0.15`). This guarantees **100% On-Manifold latents and zero grey washout over infinite hours**.
+1. **Zero User Blocking Across Stages:**
+   No cortical region (`FCz`, `AFz`, `F3`, `F4`, `Fpz`) is ever locked into a passive `"HOLD"` state that ignores user input. Every region continuously projects its active concept(s) and working memory wave into the 3D-DiT scene on every frame. Catalytic stages modulate how regions interact and transmute one another, but **never block or mute the user's active region**.
+2. **Intra-Step Sub-150ms Real-Time Control (`_live_pos_emb_fn` on Every Euler Step):**
+   A 3D-DiT denoising window of 6 Euler steps takes ~900–1100 ms. Waiting until the next window to read working memory or user input introduces a 1-second lag and drops brief inputs. Instead:
+   * Both **concept selection (`select_concept_full_rank_524288d`)** and **geodesic T5 steering (`steer_semantic_probe_full_rank`)** are re-evaluated **inside `_live_pos_emb_fn(step_i, total_steps)` on every single Euler denoising step $i \in \{0 \dots S-1\}$** (~150 ms resolution), immediately steering the 3D-DiT velocity field $\mathbf{v}_\theta(\mathbf{z}_t, t, \mathbf{E}_{\text{T5}}(t_i))$ mid-flight!
+   * **Synaptic Calcium Trace Latch (`_latched_gamepad_channels`):** Following *Mongillo, Barak, & Tsodyks (Science 2008)* [[14]](#ref-14), transient control impulses are held in a decaying synaptic trace so no short keypress, stick flick, or gamma burst is ever missed between frames.
+3. **Canonical Pool Ordering Across All Stages:**
+   Each entity's concept pool `allowed_pool` maintains a **strictly invariant canonical index order (`#1, #2, #3, #4`)** across all stages (`stages[0..N]`), ensuring 1-to-1 consistency between Web Studio concept chips, working memory eigenmodes $\boldsymbol{\Phi}_{r, k}$, and gamepad bindings.
 
 ---
 
-## 2. Five Causes of Video Degradation & Their Exact Mathematical Solutions
+## 2. Unified Working Memory Field (`[5 × 5 × 32 × 120]` = 96,000-D): How EEG, Gamepad, Monty & AI Agents Coexist
 
-| Symptom Observed in Video | Root Cause in Code | Mathematical Fix |
+In **Exocortex 3D-DiT**, **no controller, gamepad, or AI agent is allowed to hardcode prompts or bypass Working Memory**. Every control source is an **Agent that writes waves into the shared 96,000-D Working Memory Tensor** $\mathbf{W} \in \mathbb{R}^{5 \times 5 \times 32 \times 120}$ (`5 Regions × 5 Oscillatory Bands × 32 Causal Time-Frequency Slots × 120 Dipoles`):
+
+```
+ ═════════════════════════════════════════════════════════════════════════════
+   UNIFIED 96,000-D WORKING MEMORY BUS: GRADUAL MULTI-AGENT SUPERPOSITION
+ ═════════════════════════════════════════════════════════════════════════════
+
+  [1. Biological EEG (FreeEEG16 BLE/LSL)] ──(eeg_wm_gain ∈ [0..1])──┐
+  [2. 24-Ch Gamepad / Keyboard Synthesizer] ──(gamepad_wm_mix ∈ [0..1])┼─► ┌───────────────────────────────┐
+  [3. Self-Learning Monty Columns (TBT 2.0)] ─────────────────────────┤   │ SHARED 96,000-D WM FIELD      │
+  [4. External AI Agents (Local Heuristic / Cloud VLM)] ──────────────┘   │ W_r ∈ R^{5 × 32 × 120} (VRAM) │
+                                                                          └───────────────┬───────────────┘
+                                                                                          │
+                          ┌───────────────────────────────────────────────────────────────┴───────────────┐
+                          ▼ (Orthonormal Eigenmode Resonance: <W_r, Φ_{r,k}>)                             ▼
+  ┌───────────────────────────────────────────────────────┐               ┌───────────────────────────────┐
+  │ PURE WORKING MEMORY CONCEPT DECODER & T5 NAVIGATOR    │               │ COHERENT S³ WAVE INTEGRATOR   │
+  │ • Projects W_r onto K Orthonormal Modes Φ_{r,k}       │               │ • [1, 128, F, 1, 1] Phase     │
+  │ • Co-Catalytic Superposition of Simultaneously Active │               │ • Quadratic Context Vibration │
+  │   Modes (e.g. 50% UP + 50% LEFT -> Diagonal Vector!)  │               │ • On-Manifold VAE Projection  │
+  │ • QR-Tangent Rotation strictly inside T5 Manifold     │               │   (Zero Grey Washout / Fog)   │
+  └───────────────────────────────────────────────────────┘               └───────────────────────────────┘
+ ═════════════════════════════════════════════════════════════════════════════
+```
+
+### Gradual Non-Binary Mixing (`eeg_wm_gain` × `gamepad_wm_mix`)
+Instead of a brittle binary switch that can shock the latent space on transition, the system uses two continuous sliders in the Web Studio (`:8080`):
+* **`eeg_wm_gain` $\gamma_{\text{EEG}} \in [0.00, 1.00]$ (Default `1.00`):** Scales the biological `FreeEEG16` (or background phase clock) contribution. Setting `eeg_wm_gain = 0.00` silences background drift completely so you can test **100% isolated Gamepad / AI Agent control**.
+* **`gamepad_wm_mix` $\gamma_{\text{GP}} \in [0.00, 1.00]$ (Default `1.00`):** Scales the Gamepad/Agent Working Memory Synthesizer.
+  * When `gamepad_wm_mix = 0.00`, the gamepad synthesizer is **100% disabled** (zero effect on the system).
+  * When `gamepad_wm_mix > 0.00` and the gamepad is **released** ($\|\mathbf{a}_{\text{GP}}\| = 0$), the synthesized wave is zero ($\mathbf{W}_r^{\text{GP}} = 0$), so **100% unmodified EEG Working Memory** drives the world!
+  * As soon as any stick half-axis or button is pressed with intensity $a \in (0, 1]$, the synthesized eigenmode wave $\mathbf{W}_r^{\text{GP}}$ smoothly blends into $\mathbf{W}_r$ on the sphere.
+
+---
+
+## 3. Mathematical Fixes for 100% Visual Stability & Instant Concept Responsiveness
+
+| Issue / Symptom | Root Cause | Exact Mathematical Solution Implemented |
 | :--- | :--- | :--- |
-| **1. Immediate rainbow fog at `00:00` (Video 3)** | Passing `per_token_timesteps` to `FlowMatchEulerDiscreteScheduler.step(noise_pred, ...)` without negating `-noise_pred`. In `scheduling_flow_match_euler_discrete.py` (line 472), `per_token_timesteps` defines `dt = current_sigma - next_sigma > 0` (opposite sign to line 480 `dt = sigma_next - sigma < 0`), causing Euler to **add noise** instead of subtracting it! | Step only `latents[:, :, n_cond:]` via standard `scheduler.step(noise_pred[:, :, n_cond:], t, latents[:, :, n_cond:])` (where `dt < 0` is guaranteed) and concatenate `latents[:, :, :n_cond]` (exact `pipeline_ltx_image2video.py` line 631). |
-| **2. Contrast washing out to flat grey over `00:01–00:16` (Video 2)** | 1) `shift_terminal = 0.1` left 10% un-denoised noise per block.<br>2) `tone_map_latents` compressed dynamic range by ~18% every block.<br>3) `decode_noise_scale = 0.025` injected grey noise in VAE decode.<br>4) Feeding raw transformer latents back without Denoising-VAE projection. | 1) Set `shift_terminal = None` (reaches $\sigma=0.0$).<br>2) Remove iterative `tone_map_latents` compression.<br>3) Set `decode_noise_scale = 0.0`.<br>4) Re-encode `clean_video_frames[-1]` (after Denoising-VAE `decode_t=0.05`) via `encode_frame_to_latent` + gentle AdaIN variance lock. |
-| **3. Periodic vertical rainbow stripes (`00:12–00:30` in Video 1)** | `.repeat()` of 1D working memory vector reshaped into `[1, 128, F, H, W]` assigned different phase angles $\phi(h,w)$ to adjacent spatial cells. | Shape phase angles as `[1, 128, F, 1, 1]` (varying across channels $C$ and frames $F$, but spatially uniform across $H \times W$). |
-| **4. High-contrast acid blotches on high `--wm-radius` (Video 1)** | Projecting working memory into T5 `4096-D` via random Gaussian matrix `randn(120, 4096)` pushed tokens out of the T5 language manifold. | Project working memory strictly onto the QR-orthonormalized basis $\mathbf{Q}$ spanned by the active concept's own T5 tokens and inter-concept chords. |
-| **5. Frozen static scene at high `--wm-radius` (Video 2)** | Scalar $S^3$ angles ($\partial\phi/\partial f = 0$) + rigid `cond_mask = 1.0` with zero timestep vibration froze `attn1`. | Use temporally travelling `[1, 128, F, 1, 1]` $S^3$ waves + quadratic conditioning vibration $(0.04 + 0.18\,\text{wm\_radius})(t/1000)^2\boldsymbol{\epsilon}_{S^3}$ on frame `0`. |
+| **1. Rainbow blotches at `00:00` in 3D-DiT** | Passing `per_token_timesteps` to `FlowMatchEulerDiscreteScheduler.step(noise_pred, ...)` without negating `-noise_pred` flipped `dt = current_sigma - next_sigma > 0`, adding noise instead of denoising. | Step generated frames `latents[:, :, n_cond:]` via standard `scheduler.step(noise_pred[:, :, n_cond:], t, latents[:, :, n_cond:])` (`dt = sigma_next - sigma < 0`) with `shift_terminal = None`. |
+| **2. Progressive grey washout over time** | Iterative `tone_map_latents` compression + raw transformer latent feedback bypassing the Denoising VAE Decoder (`decode_t = 0.05`). | Re-encode `clean_video_frames[-1]` (after Denoising VAE `decode_t = 0.05`, `decode_noise_scale = 0.0`) via `encode_frame_to_latent` + gentle AdaIN (`factor = 0.15`) to the genesis reference. |
+| **3. Concept selection stuck on `s0` (`#1`)** | 1) Zero-mean averaging `wm_flat[k::K].mean() ~ 0`.<br>2) `stages[1..3]` had permuted `allowed_pool` lists in JSON.<br>3) High cosine similarity of `catalyst_field` in T5 overwhelmed WM scores.<br>4) Arrow keys were bound to `RS_*` (`AFz`) while viewing `FCZ`. | 1) Orthonormal 19,200-D eigenmodes $\langle \boldsymbol{\Phi}_{r,k}, \boldsymbol{\Phi}_{r,m}\rangle = \delta_{km}$ recover exact mode weights $\alpha_k = \langle \mathbf{W}_r, \boldsymbol{\Phi}_{r,k}\rangle$.<br>2) Canonical `stages[0]` pool ordering across all stages.<br>3) Direct positive-resonance allocation $p_k \propto \max(0, s_k - \tau)$.<br>4) Keyboard `WASD` & `Arrow Keys` dynamically route to the currently selected region in the Web Studio! |
 
 ---
 
-## 3. Core Paradigm: Intransitive Mutable Catalysts & Zero-Imba RPG Party-Building
+## 4. 24-Channel Gamepad/Keyboard Working Memory Synthesizer & Co-Catalytic Superposition (Diagonals & Multi-Region)
 
-**Exocortex 3D-DiT** synthesizes **Warren McCulloch's Neural Heterarchy** (*McCulloch, 1945* [[1]](#ref-1)), **Stuart Kauffman's Reflexively Autocatalytic Sets** (*Kauffman, 1986* [[8]](#ref-8)), and **Winfree's DNA Strand Displacement Cascades** (*Soloveichik et al., 2010* [[9]](#ref-9)) into a single universal primitive: the **Mutable Working Memory Catalyst (`WM-Agent`)**.
+Every concept $k \in \{0 \dots K-1\}$ in cortical region $r \in \{\text{FCz}, \text{AFz}, \text{F3}, \text{F4}, \text{Fpz}\}$ is assigned a strictly orthonormal 19,200-D standing wave eigenmode $\boldsymbol{\Phi}_{r, k} \in \mathbb{R}^{5 \times 32 \times 120}$ via QR decomposition (`get_canonical_concept_wm_basis_Kx5x32x120`).
 
-* **Local Catalytic Invariance:** In any active reaction $e_{\text{cat}}(s_c) + e_{\text{sub}}(s_a) \longrightarrow e_{\text{cat}}(s_c) + e_{\text{sub}}(s_b)$, the **Catalyst** ($e_{\text{cat}}$) is not consumed (`INV[CAT]`) and drives the **Substrate** ($e_{\text{sub}}$) across a phase transition $s_a \to s_b$.
-* **Global Intransitive Mutability (Zero "Imba" Across the Ring):** Every catalyst that is invariant in Reaction $k$ becomes the mutable substrate in Reaction $m$ when acted upon by its upstream counter-catalyst (`e2 -> e3 -> e0 -> e1 -> e2`).
-
----
-
-## 4. Resident T5-XXL Policy (Zero Offload Stall) & Free Latent Drift When Concepts Are Cleared
-
-1. **Permanent T5-XXL Residency in VRAM (`allow_t5_offload = False` by Default):**
-   In real-time neurofeedback, concepts are added, edited, and switched on the fly by users and agents. Offloading T5-XXL to CPU/disk caused multi-minute stalls on concept changes. `neuro_battle_server.py` now keeps the 4-bit NF4 T5-XXL encoder **permanently resident in VRAM by default** (encoding any new concept in **~8 ms**), with `--allow-t5-offload` available strictly as an opt-in flag.
-2. **Immediate Free Latent Drift When All Concepts Are Removed (`diffusion_semantic_space.py`):**
-   When all concepts are deleted from the pool in the Web Studio (`cleaned == []`), `UniversalSemanticSpace` immediately resets `last_active_embed` to the neutral `empty_embed` (`""`), releasing the generator from the last deleted concept (e.g., fractals) into free full-rank working memory drift.
-
----
-
-## 5. Zero-Overhead 128D Feigenbaum Oracle ($\delta = 4.6692016$) & Dynamic Branch Competition
-
-`CoordinateFreeHistoryReferee` (`neuro_referee.py`) evaluates all catalytic reaction branches in **< 0.5 ms** directly from the terminal 128D velocity tensor `last_velocity_5d` and the 524,288-D T5 concept differentials without extra 3D-DiT forward passes:
-$$\delta = 4.669201609102990\dots, \qquad \alpha = 2.502907875095892\dots, \qquad r_\infty = 3.569945671870944\dots$$
-$$r_{\text{cat}} = r_\infty + \frac{(C_{\text{res}} - 0.35) + 1.2\,\Delta P}{\delta} \in [2.90, 3.92]$$
+* **24 Bindable Hardware Channels (`ALL_GAMEPAD_CHANNELS`):**
+  * **Left Stick Half-Axes:** `LS_UP`, `LS_DOWN`, `LS_LEFT`, `LS_RIGHT`
+  * **Right Stick Half-Axes:** `RS_UP`, `RS_DOWN`, `RS_LEFT`, `RS_RIGHT`
+  * **Analog Triggers & Bumpers:** `LT`, `RT`, `LB`, `RB`
+  * **D-Pad:** `DPAD_UP`, `DPAD_DOWN`, `DPAD_LEFT`, `DPAD_RIGHT`
+  * **Face & System Buttons:** `BTN_A`, `BTN_B`, `BTN_X`, `BTN_Y`, `L3`, `R3`, `BACK`, `START`
+* **1-Click Interactive Binding (`🎯` Button on Every Concept Chip):**
+  Click `🎯` next to any concept in the Web Studio and push any stick direction (or hold two axes simultaneously for a diagonal combo like `LS_UP+LS_LEFT`) or press any gamepad button — the browser captures the channel and binds it to that concept's working memory eigenmode $\boldsymbol{\Phi}_{r, k}$.
+* **Simultaneous Multi-Concept & Multi-Region Superposition (Co-Catalysis):**
+  When multiple channels are active simultaneously (e.g., pushing the stick diagonally `LS_UP = 0.71` + `LS_LEFT = 0.71` in `FCz` while holding `BTN_A = 1.0` in `F3`), the synthesizer excites the linear superposition of those standing waves in Working Memory:
+  $$\mathbf{W}_r^{\text{GP}} = \sum_{k=0}^{K-1} a_{r, k} \, \boldsymbol{\Phi}_{r, k}$$
+  The Working Memory decoder projects $\mathbf{W}_r$ onto $\{\boldsymbol{\Phi}_{r, k}\}$, recovers $p_{\text{UP}} = 50\%$ and $p_{\text{LEFT}} = 50\%$, highlights **both** active chips with `★` in the Web UI, and computes the geodesic spherical superposition of both T5 embeddings!
 
 ---
 
-## 6. Architecture & Module Map (Immortal Dumb Weights Server + Client Logic)
+## 5. Intransitive Mutable Catalysts & Free Latent Drift When Concept Pools Are Empty
+
+* **Concepts as Mutable Catalysts:** In each region, the selected concept(s) act as a **Catalyst** that drives state transitions in downstream regions (`e0 -> e1 -> e2 -> e3 -> e0`) while simultaneously contributing directly to the active visual scene.
+* **Free Latent Drift (`🧹 Clear Region` / Empty Pool `[]`):** Clicking `🧹 Очистить регион (Свободный дрейф)` removes all text concepts from that region, setting its T5 anchor to `""` (`empty_embed`) so the 96,000-D working memory wave steers the 3D-DiT $S^3$ phase manifold in pure aconceptual mode.
+
+---
+
+## 6. Architecture & Module Map
 
 | File | Role in the Heterarchy |
 | :--- | :--- |
-| **`neuro_battle_server.py`** | **Immortal Zero-Logic Weights Server (`localhost:6008`):** holds resident 4-bit NF4 T5-XXL (`allow_t5_offload=False` by default), 3D-DiT (`--quant fp8\|int8\|nf4\|bf16`), and 3D-VAE (`encode_frame` + `decode_latents`) in VRAM with graceful `BrokenPipeError` handling. |
-| **`neuro_ltx_backend.py`** | `LTXModelBackend` and `RemoteLTXModelBackend` with `shift_terminal=None` (zero residual sigma fog), `decode_t=0.05`, `decode_noise_scale=0.0`, and `encode_frame_to_latent` On-Manifold projection. |
-| **`neuro_controller.py`** | `SymmetricBotController`: projects 96,000-D cortical working memory onto the QR-orthonormalized semantic basis $\mathbf{Q}$ of actual T5 concept tokens (zero random 4096-D noise). |
-| **`neuro_solver_stepper.py`** | `LatentFlowWindowStepper`: hybrid I2V + $S^3$ integrator with `[1, 128, F, 1, 1]` travelling waves, quadratic timestep vibration on context frames, and standard negative-`dt` Euler stepping on generated frames. |
-| **`neuro_referee.py`** | `CoordinateFreeHistoryReferee`: < 0.5 ms 128D/524,288-D Feigenbaum $\delta = 4.669$ oracle. |
-| **`neuro_engine.py`** | `UniversalLatentAutobattlerEngine`: orchestrates $N$ agents, performs On-Manifold VAE re-encoding (`encode_frame_to_latent`) + AdaIN stabilization between blocks, and streams clean frames. |
-| **`neuro_run.py`** | Unified launcher with `SmoothRealtimeVideoPacer` (port `6002`), Web Studio bridge (port `6007`), and 60 Hz `SharedAmodalCognitiveEngine` BLE/LSL $\to$ VRAM bus thread. |
+| **`neuro_battle_server.py`** | Immortal LTX-Video Weights Server (`localhost:6008`) with resident 4-bit NF4 T5-XXL, 3D-DiT (`fp8`/`int8`/`nf4`/`bf16`), and 3D-VAE (`encode_frame` + `decode_latents`). |
+| **`neuro_ltx_backend.py`** | `LTXModelBackend` & `RemoteLTXModelBackend` with `shift_terminal=None`, `decode_t=0.05`, `decode_noise_scale=0.0`, and `encode_frame_to_latent`. |
+| **`neuro_controller.py`** | `SymmetricBotController` + `get_canonical_concept_wm_basis_Kx5x32x120` + `synthesize_region_gamepad_wm_5x32x120`: orthonormal 19,200-D WM eigenmode synthesizer and QR-tangent T5 navigator. |
+| **`neuro_solver_stepper.py`** | `LatentFlowWindowStepper`: hybrid I2V + $S^3$ integrator with `[1, 128, F, 1, 1]` travelling waves, quadratic timestep vibration on context frames, and standard negative-`dt` Euler stepping. |
+| **`neuro_engine.py`** | `UniversalLatentAutobattlerEngine`: continuous real-time multi-region orchestrator with synaptic input latch (`_latched_gamepad_channels`), canonical pool ordering, and On-Manifold VAE projection. |
+| **`neuro_run.py`** | Unified launcher with 60 Hz `SharedAmodalCognitiveEngine` BLE/LSL $\to$ VRAM bus thread, `SmoothRealtimeVideoPacer` (`:6002`), and Web Studio control bridge (`:6007`). |
+| **`web_cloud_gateway.py` & `static/app.js`** | Unified HTTPS Web Studio (`:8080`) with Gradual WM Mixer (`EEG WM Gain` × `Gamepad WM Mix`), 24-channel HTML5 Gamepad poller, and `🎯` 1-click concept binding. |
 
 ---
 
 ## 7. Quick Start & CLI Reference
 
 ```bash
-# Terminal 1: Launch Immortal Weights Server in VRAM (T5-XXL stays resident in VRAM by default)
+# Terminal 1: Launch Immortal Weights Server in VRAM (T5-XXL resident in VRAM)
 python3 neuro_battle_server.py --port 6008 --quant fp8
 
-# Terminal 2 (Optional): Launch Unified Web Studio Gateway on :8080
+# Terminal 2: Launch Unified Web Studio Gateway on :8080
 python3 web_cloud_gateway.py --port 8080 --cert cert.pem --key key.pem --video-lore configs/mode_03_semantic_maze_gm.json
 
-# Terminal 3: Launch Hybrid 3D-DiT Engine (18 steps, high wm-radius=0.84, 100% On-Manifold rollout)
-python3 neuro_run.py --mode maze --context-latents 1 --step-latents 2 --steps 18 --cfg 3.2 --stochastic 0.0 --entity-source "e0=eeg:FCz" --wm-radius 0.84 --hud full
+# Terminal 3: Launch Continuous Real-Time 3D-DiT Engine
+# Use --eeg-wm-gain 0.0 --gamepad-wm-mix 1.0 to test pure isolated Gamepad/Keyboard WM synthesis,
+# or --eeg-wm-gain 1.0 --gamepad-wm-mix 1.0 for automatic gradual mixing!
+python3 neuro_run.py --mode maze --context-latents 1 --step-latents 2 --steps 6 --cfg 3.2 --stochastic 0.0 --wm-radius 0.50 --eeg-wm-gain 0.0 --gamepad-wm-mix 1.0
 ```
 
 ---
@@ -193,4 +163,5 @@ python3 neuro_run.py --mode maze --context-latents 1 --step-latents 2 --steps 18
 11. <a id="ref-11"></a>**Dickey, C. W., et al. (2022).** *Widespread ripples synchronize human cortical activity during sleep, waking, and memory recall.* PNAS, 119(28), e2107797119. [https://doi.org/10.1073/pnas.2107797119](https://doi.org/10.1073/pnas.2107797119)
 12. <a id="ref-12"></a>**HaCohen, Y., et al. (2024).** *LTX-Video: Realtime Video Latent Diffusion.* arXiv:2501.00103. [https://doi.org/10.48550/arXiv.2501.00103](https://doi.org/10.48550/arXiv.2501.00103)
 13. <a id="ref-13"></a>**Yang, C., et al. (2025).** *Reasoning via Video: The First Evaluation of Video Models’ Reasoning Abilities through Maze-Solving Tasks (VR-Bench).* arXiv:2511.15065. [https://doi.org/10.48550/arXiv.2511.15065](https://doi.org/10.48550/arXiv.2511.15065)
+14. <a id="ref-14"></a>**Mongillo, G., Barak, O., & Tsodyks, M. (2008).** *Synaptic Theory of Working Memory.* Science, 319(5869), 1543–1546. [https://doi.org/10.1126/science.1150769](https://doi.org/10.1126/science.1150769)
 

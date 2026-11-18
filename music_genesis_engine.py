@@ -3,8 +3,9 @@
 ===================================================================================
 NEUROCANVAS: FULL-DIMENSIONAL [64 x 768] MONTY SDR HETERARCHY FOR MUSICGEN
 ===================================================================================
-- Полный ранг 64 собственных ортонормированных мод SVD (max_bases=64 вместо 16),
-  что полностью исключает потерю размерности при проекции рабочей памяти в T5!
+- Исправлен "уход в область без смыслов": в get_concept_affordances_svd отбрасываются
+  вырожденные направления с сингулярным значением S <= 1e-3 * S[0]; недостающие
+  оси дополняются реальными PCA-модами словаря T5 (global_svd_bases) через QR.
 ===================================================================================
 """
 
@@ -101,8 +102,23 @@ class UniversalMusicSemanticSpace:
             else:
                 combined_manifold = F.normalize(tokens_centered, p=2, dim=-1)
 
-            _, _, V = torch.linalg.svd(combined_manifold, full_matrices=False)
-            tangent = F.normalize(V[:max_bases].clone(), p=2, dim=-1)
+            _, S, V = torch.linalg.svd(combined_manifold, full_matrices=False)
+            if S.numel() > 0 and float(S[0].item()) > 1e-6:
+                valid_k = max(1, int(torch.sum(S > (S[0] * 1e-3)).item()))
+            else:
+                valid_k = 0
+
+            local_valid = V[:min(valid_k, max_bases)]
+            if local_valid.shape[0] < max_bases:
+                # Заполняем недостающие направления только реальными осями словаря T5,
+                # исключая мусорное нуль-пространство SVD при коротких промптах:
+                vocab_axes = F.normalize(self.global_svd_bases, p=2, dim=-1)
+                merged = torch.cat([local_valid, vocab_axes], dim=0) if local_valid.shape[0] > 0 else vocab_axes
+                q_mat, _ = torch.linalg.qr(merged.T, mode="reduced")
+                tangent = F.normalize(q_mat.T[:max_bases].clone(), p=2, dim=-1)
+            else:
+                tangent = F.normalize(local_valid[:max_bases].clone(), p=2, dim=-1)
+
             self.affordance_cache[cache_key] = tangent
             return tangent
 

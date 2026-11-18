@@ -6,7 +6,9 @@ neuro_run.py — Единый 3D-DiT Видео-Модуль для Веб-Ст�
 - Запускает фоновый 60 Гц LSL->VRAM конвейер (SharedAmodalCognitiveEngine + SelfSufficientHeterarchyRouter),
   чтобы любая подключенная в браузере BLE-плата FreeEEG16 мгновенно (каждые 16 мс!) обновляла
   96,000-D шину рабочей памяти HardwareVRAMBus прямо во время шагов денойзинга 3D-DiT!
-- Двусторонняя синхронизация с web_cloud_gateway.py (порт 6002 видео + порт 6007 управление и BLE-маппинг).
+- Полная поддержка градуального микшера Рабочей Памяти (EEG WM Gain × Gamepad/Agent WM Mix)
+  и 24-канального биндинга полуосей/кнопок геймпада на собственные моды концептов в каждом регионе.
+- Двусторонняя синхронизация с web_cloud_gateway.py (порт 6002 видео + порт 6007 управление и телеметрия).
 ===================================================================================
 """
 
@@ -97,7 +99,9 @@ def resolve_manifest_path(mode: str | None, manifest_arg: str) -> str:
 
 def manifest_to_web_sections(manifest: GameWorldManifest) -> dict[str, list[str]]:
     """Преобразует GameWorldManifest в региональные секции [FPZ, AFZ, F3, F4, FCZ, NEGATIVE] для веб-редактора."""
-    secs: dict[str, list[str]] = {"FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []}
+    secs: dict[str, list[str]] = {
+        "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
+    }
     if manifest.negative_desc:
         secs["NEGATIVE"] = [manifest.negative_desc]
     if manifest.arena_context_desc:
@@ -121,26 +125,31 @@ def manifest_to_web_sections(manifest: GameWorldManifest) -> dict[str, list[str]
     return secs
 
 
-def apply_web_sections_to_manifest(manifest: GameWorldManifest, sections: dict[str, list[str]]):
+def apply_web_sections_to_manifest(
+    manifest: GameWorldManifest, sections: dict[str, list[str]]
+):
     """
     Универсальный живой редактор лора: обновляет архетипы и пулы агентов манифеста
     напрямую из отредактированных в браузере секций [FCZ, AFZ, F3, F4, FPZ, NEGATIVE]!
+    Если все концепты региона удалены (lines == []), очищает allowed_pool до [],
+    включая свободный латентный дрейф S^3 без залипания на старых концептах!
     """
-    neg_list = [s.strip() for s in sections.get("NEGATIVE", []) if s.strip()]
-    if neg_list:
-        manifest.negative_desc = ", ".join(neg_list)
+    if "NEGATIVE" in sections:
+        neg_list = [s.strip() for s in sections.get("NEGATIVE", []) if s.strip()]
+        manifest.negative_desc = ", ".join(neg_list) if neg_list else ""
 
-    fpz_list = [s.strip() for s in sections.get("FPZ", []) if s.strip()]
-    fcz_list = [s.strip() for s in sections.get("FCZ", []) if s.strip()]
-    if fpz_list and fpz_list == fcz_list:
-        manifest.arena_context_desc = ""
-    elif fpz_list:
-        manifest.arena_context_desc = fpz_list[0].rstrip(".")
+    if "FPZ" in sections:
+        fpz_list = [s.strip() for s in sections.get("FPZ", []) if s.strip()]
+        fcz_list = [s.strip() for s in sections.get("FCZ", []) if s.strip()]
+        if not fpz_list or (fpz_list == fcz_list):
+            manifest.arena_context_desc = ""
+        else:
+            manifest.arena_context_desc = fpz_list[0].rstrip(".")
 
     for idx_s, reg_key in [(0, "FCZ"), (1, "AFZ"), (2, "F3"), (3, "F4")]:
-        lines = [s.strip() for s in sections.get(reg_key, []) if s.strip()]
-        if not lines:
+        if reg_key not in sections:
             continue
+        lines = [s.strip() for s in sections.get(reg_key, []) if s.strip()]
         new_pool_ids = []
         for l_idx, line_txt in enumerate(lines):
             aid = f"e{idx_s}_s{l_idx}"
@@ -219,7 +228,11 @@ def draw_minimal_rtf_banner(
         status_col = (255, 200, 60) if rtf >= 0.55 else (255, 110, 90)
         rtf_txt = f"RTF:{rtf:.2f}x (SLOWDOWN {play_speed:.2f}x | LAG +{diff_ms:.0f}ms / -{lag_pct}%)"
 
-    d_str = f" | dS:{telem.quest_progress_pct:.0f}% r:{telem.feigenbaum_r:.3f}" if telem else ""
+    d_str = (
+        f" | dS:{telem.quest_progress_pct:.0f}% r:{telem.feigenbaum_r:.3f}"
+        if telem
+        else ""
+    )
     line = f"{rtf_txt} | Gen:{gen_ms:.0f}ms Buf:{q_sec:.1f}s{d_str} [H:HUD]"
     cv2.putText(canvas, line[:92], (6, 15), font, 0.25, status_col, 1, cv2.LINE_AA)
     return canvas
@@ -238,6 +251,7 @@ class SmoothRealtimeVideoPacer(threading.Thread):
         manifest: GameWorldManifest | None = None,
         game_mode: str = "strict_ko",
         context_latents: int = 1,
+        runner: UniversalLatentAutobattlerEngine | None = None,
     ):
         super().__init__(daemon=True)
         self.gateway_port = gateway_port
@@ -249,8 +263,17 @@ class SmoothRealtimeVideoPacer(threading.Thread):
         self.manifest = manifest
         self.game_mode = game_mode
         self.context_latents = context_latents
+        self.runner = runner
 
-        self.frame_queue: deque[tuple[np.ndarray, LatentIdentityFrameTelemetry | None, StageSpec | None, list[list[str]], int]] = deque(maxlen=160)
+        self.frame_queue: deque[
+            tuple[
+                np.ndarray,
+                LatentIdentityFrameTelemetry | None,
+                StageSpec | None,
+                list[list[str]],
+                int,
+            ]
+        ] = deque(maxlen=160)
         self.hud_traj_history: list[LatentIdentityFrameTelemetry] = []
         self.prev_tail_clean_rgb: np.ndarray | None = None
         self.prev_quest_pct: float = 0.0
@@ -272,7 +295,10 @@ class SmoothRealtimeVideoPacer(threading.Thread):
         order = ["off", "minimal", "full"]
         idx = (order.index(self.hud_mode) + 1) % len(order) if self.hud_mode in order else 0
         self.hud_mode = order[idx]
-        print(f"🖥️ [HUD MODE] Режим отображения на экране: {self.hud_mode.upper()} (Клавиша H для смены)", flush=True)
+        print(
+            f"🖥️ [HUD MODE] Режим отображения на экране: {self.hud_mode.upper()} (Клавиша H для смены)",
+            flush=True,
+        )
 
     def push_generated_batch(
         self,
@@ -304,13 +330,23 @@ class SmoothRealtimeVideoPacer(threading.Thread):
                 )
             self.prev_tail_clean_rgb = clean_rgb_frames[-1].copy()
 
-            target_out_frames = int(np.clip(round(self.ema_gen_sec * 16.0), len(frames_work), len(frames_work) * 3))
-            self.play_speed = round(len(frames_work) / max(1.0, float(target_out_frames)), 2)
+            target_out_frames = int(
+                np.clip(
+                    round(self.ema_gen_sec * 16.0),
+                    len(frames_work),
+                    len(frames_work) * 3,
+                )
+            )
+            self.play_speed = round(
+                len(frames_work) / max(1.0, float(target_out_frames)), 2
+            )
 
             base_telem = traj[-1]
             target_q_pct = float(base_telem.quest_progress_pct)
             target_c_pct = float(base_telem.catalytic_resonance_pct)
-            start_q_pct = self.prev_quest_pct if target_q_pct >= self.prev_quest_pct else 0.0
+            start_q_pct = (
+                self.prev_quest_pct if target_q_pct >= self.prev_quest_pct else 0.0
+            )
             start_c_pct = self.prev_cat_res_pct
 
             n_src = len(frames_work)
@@ -323,17 +359,27 @@ class SmoothRealtimeVideoPacer(threading.Thread):
                 if alpha <= 0.01 or i0 == i1:
                     interp_rgb = frames_work[i0]
                 else:
-                    interp_rgb = cv2.addWeighted(frames_work[i0], 1.0 - alpha, frames_work[i1], alpha, 0.0)
+                    interp_rgb = cv2.addWeighted(
+                        frames_work[i0], 1.0 - alpha, frames_work[i1], alpha, 0.0
+                    )
 
                 smooth_t = copy(base_telem)
-                smooth_t.quest_progress_pct = round(start_q_pct + (target_q_pct - start_q_pct) * frac, 1)
-                smooth_t.catalytic_resonance_pct = round(start_c_pct + (target_c_pct - start_c_pct) * frac, 1)
+                smooth_t.quest_progress_pct = round(
+                    start_q_pct + (target_q_pct - start_q_pct) * frac, 1
+                )
+                smooth_t.catalytic_resonance_pct = round(
+                    start_c_pct + (target_c_pct - start_c_pct) * frac, 1
+                )
                 smooth_trans = list(base_telem.entity_transition_pcts)
                 if 0 <= stage.quest.active_slot_idx < len(smooth_trans):
-                    smooth_trans[stage.quest.active_slot_idx] = smooth_t.quest_progress_pct
+                    smooth_trans[stage.quest.active_slot_idx] = (
+                        smooth_t.quest_progress_pct
+                    )
                 smooth_t.entity_transition_pcts = smooth_trans
 
-                self.frame_queue.append((interp_rgb, smooth_t, stage, list(active_parties), attempt_num))
+                self.frame_queue.append(
+                    (interp_rgb, smooth_t, stage, list(active_parties), attempt_num)
+                )
 
             self.prev_quest_pct = 0.0 if target_q_pct >= 95.0 else target_q_pct
             self.prev_cat_res_pct = target_c_pct
@@ -350,7 +396,12 @@ class SmoothRealtimeVideoPacer(threading.Thread):
         attempt_num: int,
         q_sec: float,
     ) -> np.ndarray:
-        if self.hud_mode == "off" or telem is None or stage is None or self.manifest is None:
+        if (
+            self.hud_mode == "off"
+            or telem is None
+            or stage is None
+            or self.manifest is None
+        ):
             return clean_rgb
 
         if self.hud_mode == "minimal":
@@ -394,6 +445,8 @@ class SmoothRealtimeVideoPacer(threading.Thread):
     def run(self):
         pg = None
         screen = None
+        joystick = None
+        local_keys_held: dict[str, float] = {}
         win_w, win_h = max(768, self.width * 2), max(512, self.height * 2)
 
         if self.show_window:
@@ -402,8 +455,17 @@ class SmoothRealtimeVideoPacer(threading.Thread):
                     del os.environ["SDL_VIDEODRIVER"]
                 import pygame
                 pygame.init()
-                screen = pygame.display.set_mode((win_w, win_h), pygame.HWSURFACE | pygame.DOUBLEBUF)
-                pygame.display.set_caption("Exocortex 3D-DiT Smooth World ([H] Toggle HUD | Web Studio :8080 Ready)")
+                pygame.joystick.init()
+                if pygame.joystick.get_count() > 0:
+                    joystick = pygame.joystick.Joystick(0)
+                    joystick.init()
+                    print(f"🎮 [LOCAL GAMEPAD] Подключен физический геймпад: {joystick.get_name()}")
+                screen = pygame.display.set_mode(
+                    (win_w, win_h), pygame.HWSURFACE | pygame.DOUBLEBUF
+                )
+                pygame.display.set_caption(
+                    "Exocortex 3D-DiT Smooth World ([WASD/Arrows/Gamepad] WM Agent | [H] Toggle HUD)"
+                )
                 pg = pygame
             except Exception as e:
                 print(f"⚠️ [Pygame Window Warning]: {e}")
@@ -414,12 +476,65 @@ class SmoothRealtimeVideoPacer(threading.Thread):
             t_tick = time.perf_counter()
 
             if pg is not None:
+                key_to_ch = {
+                    pg.K_w: "LS_UP",
+                    pg.K_s: "LS_DOWN",
+                    pg.K_a: "LS_LEFT",
+                    pg.K_d: "LS_RIGHT",
+                    pg.K_UP: "RS_UP",
+                    pg.K_DOWN: "RS_DOWN",
+                    pg.K_LEFT: "RS_LEFT",
+                    pg.K_RIGHT: "RS_RIGHT",
+                    pg.K_1: "BTN_A",
+                    pg.K_2: "BTN_B",
+                    pg.K_3: "BTN_X",
+                    pg.K_4: "BTN_Y",
+                }
+                changed_local = False
                 for event in pg.event.get():
                     if event.type == pg.QUIT:
                         self.running = False
                         os._exit(0)
-                    elif event.type == pg.KEYDOWN and event.key == pg.K_h:
-                        self.cycle_hud_mode()
+                    elif event.type == pg.KEYDOWN:
+                        if event.key == pg.K_h:
+                            self.cycle_hud_mode()
+                        elif event.key in key_to_ch:
+                            local_keys_held[key_to_ch[event.key]] = 1.0
+                            changed_local = True
+                    elif event.type == pg.KEYUP:
+                        if event.key in key_to_ch:
+                            local_keys_held.pop(key_to_ch[event.key], None)
+                            changed_local = True
+
+                if joystick is not None and self.runner is not None:
+                    try:
+                        dz = 0.12
+                        ax0 = float(joystick.get_axis(0))
+                        ax1 = float(joystick.get_axis(1))
+                        ax2 = float(joystick.get_axis(2)) if joystick.get_numaxes() > 2 else 0.0
+                        ax3 = float(joystick.get_axis(3)) if joystick.get_numaxes() > 3 else 0.0
+                        joy_ch = dict(local_keys_held)
+                        if ax1 < -dz:
+                            joy_ch["LS_UP"] = min(1.0, (-ax1 - dz) / (1.0 - dz))
+                        if ax1 > dz:
+                            joy_ch["LS_DOWN"] = min(1.0, (ax1 - dz) / (1.0 - dz))
+                        if ax0 < -dz:
+                            joy_ch["LS_LEFT"] = min(1.0, (-ax0 - dz) / (1.0 - dz))
+                        if ax0 > dz:
+                            joy_ch["LS_RIGHT"] = min(1.0, (ax0 - dz) / (1.0 - dz))
+                        if ax3 < -dz:
+                            joy_ch["RS_UP"] = min(1.0, (-ax3 - dz) / (1.0 - dz))
+                        if ax3 > dz:
+                            joy_ch["RS_DOWN"] = min(1.0, (ax3 - dz) / (1.0 - dz))
+                        if ax2 < -dz:
+                            joy_ch["RS_LEFT"] = min(1.0, (-ax2 - dz) / (1.0 - dz))
+                        if ax2 > dz:
+                            joy_ch["RS_RIGHT"] = min(1.0, (ax2 - dz) / (1.0 - dz))
+                        self.runner.set_gamepad_channels(joy_ch)
+                    except Exception:
+                        pass
+                elif changed_local and self.runner is not None:
+                    self.runner.set_gamepad_channels(local_keys_held)
 
             with self.lock:
                 q_len = len(self.frame_queue)
@@ -434,11 +549,17 @@ class SmoothRealtimeVideoPacer(threading.Thread):
 
             clean_rgb, telem, stg, parties, att_num = last_item
             q_sec = q_len / 16.0
-            display_rgb = self._render_hud_on_clean_frame(clean_rgb, telem, stg, parties, att_num, q_sec)
+            display_rgb = self._render_hud_on_clean_frame(
+                clean_rgb, telem, stg, parties, att_num, q_sec
+            )
 
             if pg is not None and screen is not None:
                 try:
-                    surf = pg.image.frombuffer(display_rgb.tobytes(), (display_rgb.shape[1], display_rgb.shape[0]), "RGB")
+                    surf = pg.image.frombuffer(
+                        display_rgb.tobytes(),
+                        (display_rgb.shape[1], display_rgb.shape[0]),
+                        "RGB",
+                    )
                     if (display_rgb.shape[1], display_rgb.shape[0]) != (win_w, win_h):
                         surf = pg.transform.smoothscale(surf, (win_w, win_h))
                     screen.blit(surf, (0, 0))
@@ -448,39 +569,56 @@ class SmoothRealtimeVideoPacer(threading.Thread):
 
             if self.gateway_conn is None and self.gateway_port > 0:
                 try:
-                    self.gateway_conn = Client(("localhost", self.gateway_port), authkey=b"canvas")
+                    self.gateway_conn = Client(
+                        ("localhost", self.gateway_port), authkey=b"canvas"
+                    )
                 except Exception:
                     self.gateway_conn = None
 
             if self.gateway_conn is not None:
                 try:
                     bgr = cv2.cvtColor(display_rgb, cv2.COLOR_RGB2BGR)
-                    _, enc_jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    _, enc_jpg = cv2.imencode(
+                        ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 90]
+                    )
                     self.frame_seq_id += 1
-                    self.gateway_conn.send({
-                        "frame_id": self.frame_seq_id,
-                        "ts": time.time(),
-                        "gen_ms": gen_ms,
-                        "fps": round(16.0 * self.play_speed, 1),
-                        "actual_steps": act_steps,
-                        "w": self.width,
-                        "h": self.height,
-                        "use_taesd": False,
-                        "use_color": not self.monochrome,
-                        "jpg": enc_jpg.tobytes(),
-                    })
+                    self.gateway_conn.send(
+                        {
+                            "frame_id": self.frame_seq_id,
+                            "ts": time.time(),
+                            "gen_ms": gen_ms,
+                            "fps": round(16.0 * self.play_speed, 1),
+                            "actual_steps": act_steps,
+                            "w": self.width,
+                            "h": self.height,
+                            "use_taesd": False,
+                            "use_color": not self.monochrome,
+                            "jpg": enc_jpg.tobytes(),
+                        }
+                    )
                     if recorder_instance.is_recording:
-                        recorder_instance.push_frame(bgr, {"dag_log_parts": [stg.quest.driver_tag if stg else "3D_DIT"]})
+                        recorder_instance.push_frame(
+                            bgr,
+                            {
+                                "dag_log_parts": [
+                                    stg.quest.driver_tag if stg else "3D_DIT"
+                                ]
+                            },
+                        )
                 except Exception:
                     self.gateway_conn = None
 
-            target_dt = 0.055 if q_len > 16 else (0.0625 if q_len > 3 else 0.075)
+            target_dt = (
+                0.055 if q_len > 16 else (0.0625 if q_len > 3 else 0.075)
+            )
             elapsed = time.perf_counter() - t_tick
             if target_dt > elapsed:
                 time.sleep(target_dt - elapsed)
 
 
-def start_live_lsl_to_vram_bus_thread(pacer: SmoothRealtimeVideoPacer, users_arg: str = ""):
+def start_live_lsl_to_vram_bus_thread(
+    pacer: SmoothRealtimeVideoPacer, users_arg: str = ""
+):
     """
     Запускает 60 Гц фоновый конвейер SharedAmodalCognitiveEngine, который принимает LSL-потоки
     FreeEEG_<ID> от подключенных в браузере BLE-плат и непрерывно заполняет HardwareVRAMBus в GPU!
@@ -507,7 +645,9 @@ def start_live_lsl_to_vram_bus_thread(pacer: SmoothRealtimeVideoPacer, users_arg
             time.sleep(0.016)
 
     threading.Thread(target=_lsl_loop, daemon=True).start()
-    print("🧠 [LIVE BLE/LSL -> VRAM BUS] 60 Гц конвейер рабочей памяти запущен! Любая BLE-плата из браузера сразу управляет 3D-DiT.")
+    print(
+        "🧠 [LIVE BLE/LSL -> VRAM BUS] 60 Гц конвейер рабочей памяти запущен! Любая BLE-плата из браузера сразу управляет 3D-DiT."
+    )
     return router, amodal_engine
 
 
@@ -527,23 +667,36 @@ def start_web_studio_control_bridge(
         while pacer.running:
             try:
                 if ctrl_conn is None and video_ctrl_port > 0:
-                    c = Client(("localhost", video_ctrl_port), authkey=b"video_ctrl")
+                    c = Client(
+                        ("localhost", video_ctrl_port), authkey=b"video_ctrl"
+                    )
                     with ctrl_lock:
                         ctrl_conn = c
-                        ctrl_conn.send({
-                            "cmd": "sync_from_video_runner",
-                            "lore_file": initial_manifest_path,
-                            "sections": manifest_to_web_sections(runner.manifest),
-                            "monty_mode": "off",
-                            "stochastic": runner.stochastic,
-                            "wm_radius": runner.wm_radius,
-                            "hud_mode": pacer.hud_mode,
-                            "context_latents": runner.context_lat_frames,
-                            "step_latents": runner.step_lat_frames,
-                            "steps": runner.steps,
-                            "cfg_scale": runner.cfg_scale,
-                        })
-                    print(f"🌐 [WEB STUDIO BRIDGE] Подключено к web_cloud_gateway (порт {video_ctrl_port})! Управление из браузера :8080 активно.")
+                        ctrl_conn.send(
+                            {
+                                "cmd": "sync_from_video_runner",
+                                "lore_file": initial_manifest_path,
+                                "sections": manifest_to_web_sections(
+                                    runner.manifest
+                                ),
+                                "concept_bindings": dict(
+                                    runner.concept_bindings_by_region
+                                ),
+                                "eeg_wm_gain": runner.eeg_wm_gain,
+                                "gamepad_wm_mix": runner.gamepad_wm_mix,
+                                "monty_mode": "off",
+                                "stochastic": runner.stochastic,
+                                "wm_radius": runner.wm_radius,
+                                "hud_mode": pacer.hud_mode,
+                                "context_latents": runner.context_lat_frames,
+                                "step_latents": runner.step_lat_frames,
+                                "steps": runner.steps,
+                                "cfg_scale": runner.cfg_scale,
+                            }
+                        )
+                    print(
+                        f"🌐 [WEB STUDIO BRIDGE] Подключено к web_cloud_gateway (порт {video_ctrl_port})! Управление из браузера :8080 активно."
+                    )
 
                 has_msg = False
                 msg = None
@@ -559,35 +712,88 @@ def start_web_studio_control_bridge(
                         if "monty_mode" in cfg and amodal_engine is not None:
                             amodal_engine.set_monty_mode(str(cfg["monty_mode"]))
                         if "stochastic" in cfg:
-                            runner.stochastic = float(np.clip(float(cfg["stochastic"]), 0.0, 1.0))
+                            runner.stochastic = float(
+                                np.clip(float(cfg["stochastic"]), 0.0, 1.0)
+                            )
                         if "wm_radius" in cfg:
-                            runner.wm_radius = float(np.clip(float(cfg["wm_radius"]), 0.02, 0.85))
+                            runner.wm_radius = float(
+                                np.clip(float(cfg["wm_radius"]), 0.02, 0.85)
+                            )
                         elif "geodesic_lock" in cfg:
-                            runner.wm_radius = float(np.clip(float(cfg["geodesic_lock"]), 0.02, 0.85))
+                            runner.wm_radius = float(
+                                np.clip(float(cfg["geodesic_lock"]), 0.02, 0.85)
+                            )
+                        if "eeg_wm_gain" in cfg:
+                            runner.eeg_wm_gain = float(
+                                np.clip(float(cfg["eeg_wm_gain"]), 0.0, 1.0)
+                            )
+                        if "gamepad_wm_mix" in cfg:
+                            runner.gamepad_wm_mix = float(
+                                np.clip(float(cfg["gamepad_wm_mix"]), 0.0, 1.0)
+                            )
+                        if "concept_bindings" in cfg and isinstance(
+                            cfg["concept_bindings"], dict
+                        ):
+                            runner.set_concept_bindings(cfg["concept_bindings"])
                         if "hud_mode" in cfg:
                             pacer.hud_mode = str(cfg["hud_mode"]).lower()
                         if "context_latents" in cfg:
-                            runner.context_lat_frames = max(1, min(3, int(cfg["context_latents"])))
+                            runner.context_lat_frames = max(
+                                1, min(3, int(cfg["context_latents"]))
+                            )
                             pacer.context_latents = runner.context_lat_frames
                         if "step_latents" in cfg:
-                            runner.step_lat_frames = max(1, min(3, int(cfg["step_latents"])))
+                            runner.step_lat_frames = max(
+                                1, min(3, int(cfg["step_latents"]))
+                            )
                         elif "num_frames" in cfg:
                             nf = int(cfg["num_frames"])
                             runner.step_lat_frames = max(1, (nf - 1) // 8)
                         if "steps" in cfg:
                             runner.steps = max(3, min(20, int(cfg["steps"])))
                         if "cfg_scale" in cfg:
-                            runner.cfg_scale = float(np.clip(float(cfg["cfg_scale"]), 1.2, 6.0))
+                            runner.cfg_scale = float(
+                                np.clip(float(cfg["cfg_scale"]), 1.2, 6.0)
+                            )
                         print(
                             f"🎛️ [WEB CONFIG] Из браузера: wm_radius={runner.wm_radius:.2f}, stoch={runner.stochastic:.2f}, "
+                            f"eeg_gain={runner.eeg_wm_gain:.2f}, gp_mix={runner.gamepad_wm_mix:.2f}, "
                             f"hud={pacer.hud_mode}, ctx={runner.context_lat_frames}, step={runner.step_lat_frames}, "
                             f"steps={runner.steps}, cfg={runner.cfg_scale:.1f}"
                         )
+                    elif cmd == "set_gamepad_input":
+                        if "eeg_wm_gain" in msg:
+                            runner.eeg_wm_gain = float(
+                                np.clip(float(msg["eeg_wm_gain"]), 0.0, 1.0)
+                            )
+                        if "gamepad_wm_mix" in msg:
+                            runner.gamepad_wm_mix = float(
+                                np.clip(float(msg["gamepad_wm_mix"]), 0.0, 1.0)
+                            )
+                        if "concept_bindings" in msg and isinstance(
+                            msg["concept_bindings"], dict
+                        ):
+                            runner.set_concept_bindings(msg["concept_bindings"])
+                        if "channels" in msg and isinstance(
+                            msg["channels"], dict
+                        ):
+                            runner.set_gamepad_channels(msg["channels"])
+                        else:
+                            runner.set_gamepad_input(
+                                lx=float(msg.get("lx", 0.0)),
+                                ly=float(msg.get("ly", 0.0)),
+                                rx=float(msg.get("rx", 0.0)),
+                                ry=float(msg.get("ry", 0.0)),
+                                manual_idx=int(msg.get("manual_idx", -1)),
+                                target_slot=str(msg.get("target_slot", "*")),
+                            )
                     elif cmd == "update_lore_sections":
                         secs = msg.get("sections", {})
                         if isinstance(secs, dict):
                             apply_web_sections_to_manifest(runner.manifest, secs)
-                            print("📝 [WEB LORE EDITOR] Пулы концептов 3D-DiT обновлены на лету из браузера!")
+                            print(
+                                "📝 [WEB LORE EDITOR] Пулы концептов 3D-DiT обновлены на лету из браузера!"
+                            )
                     elif cmd == "switch_lore":
                         l_file = str(msg.get("lore_file", "")).strip()
                         secs = msg.get("sections")
@@ -597,30 +803,50 @@ def start_web_studio_control_bridge(
                             runner.curr_idx = 0
                             runner.maneuver_phase = 0
                             runner.need_hard_genesis = True
-                            print(f"🌍 [WEB MANIFEST SWITCH] Загружен JSON-манифест: {l_file}")
+                            print(
+                                f"🌍 [WEB MANIFEST SWITCH] Загружен JSON-манифест: {l_file}"
+                            )
                         elif isinstance(secs, dict):
                             apply_web_sections_to_manifest(runner.manifest, secs)
                             runner.need_hard_genesis = True
-                            print(f"🌍 [WEB LORE SWITCH] Применен региональный лор: {l_file}")
+                            print(
+                                f"🌍 [WEB LORE SWITCH] Применен региональный лор: {l_file}"
+                            )
                     elif cmd == "reset_genesis":
                         runner.need_hard_genesis = True
                         runner.maneuver_phase = 0
                         if amodal_engine is not None:
                             amodal_engine.reset_seals()
-                        print("🔄 [WEB RESET] Сброс генезиса 3D-DiT по кнопке из браузера!")
+                        print(
+                            "🔄 [WEB RESET] Сброс генезиса 3D-DiT по кнопке из браузера!"
+                        )
                     elif cmd == "set_device_mapping":
                         s_name = str(msg.get("stream_name", "")).strip()
                         r_val = str(msg.get("role", "FCz")).strip()
                         u_val = str(msg.get("user", "User1")).strip()
                         if router is not None and s_name:
                             router.set_device_mapping(s_name, r_val, u_val)
-                        if r_val and r_val.upper() not in ("NONE", "OFF", "UNASSIGNED"):
-                            func_r = EXTENDED_ROLE_TO_FUNCTIONAL.get(r_val, "FCz") if HAS_AMODAL_LSL_ENGINE else r_val
+                        if r_val and r_val.upper() not in (
+                            "NONE",
+                            "OFF",
+                            "UNASSIGNED",
+                        ):
+                            func_r = (
+                                EXTENDED_ROLE_TO_FUNCTIONAL.get(r_val, "FCz")
+                                if HAS_AMODAL_LSL_ENGINE
+                                else r_val
+                            )
                             target_slot = ROLE_TO_ENTITY_SLOT.get(func_r, "e0")
-                            runner.set_entity_source(target_slot, f"eeg:{func_r}")
-                            print(f"📡 [BLE DEVICE MAPPED] Плата '{s_name}' (Субъект: {u_val}) -> Зона: {r_val} ({target_slot}=eeg:{func_r})")
+                            runner.set_entity_source(
+                                target_slot, f"eeg:{func_r}"
+                            )
+                            print(
+                                f"📡 [BLE DEVICE MAPPED] Плата '{s_name}' (Субъект: {u_val}) -> Зона: {r_val} ({target_slot}=eeg:{func_r})"
+                            )
                     elif cmd == "start_recording":
-                        recorder_instance.start_session(session_name=msg.get("session_name"))
+                        recorder_instance.start_session(
+                            session_name=msg.get("session_name")
+                        )
                     elif cmd == "stop_recording":
                         recorder_instance.stop_session()
                 else:
@@ -638,32 +864,90 @@ def start_web_studio_control_bridge(
                 try:
                     q_metrics = telem.get("quest_oracle_metrics", {})
                     c_metrics = telem.get("feigenbaum_chaos_metrics", {})
-                    ctrl_conn.send({
-                        "cmd": "video_telemetry",
-                        "fps": round(fps, 1),
-                        "gen_ms": round(gen_ms, 1),
-                        "rtf": round(pacer.ema_rtf, 2),
-                        "play_speed": pacer.play_speed,
-                        "feigenbaum_r": round(float(c_metrics.get("feigenbaum_r", 3.72)), 3),
-                        "reaction_formula": telem.get("reaction_formula", ""),
-                        "branch_scores": telem.get("reaction_branch_competition_128d", {}),
-                        "debug_tokens": f"[{telem.get('driver_tag')}] dS:{q_metrics.get('quest_progress_pct', 0):.0f}% | {telem.get('active_entities', '')}",
-                        "fpz_meta_charge": round(float(c_metrics.get("catalytic_resonance_pct", 50.0)) / 100.0, 3),
-                        "afz_stage_progress": round(float(q_metrics.get("quest_progress_pct", 0.0)) / 100.0, 3),
-                        "monty_loss": 0.015,
-                        "persistence": round(float(c_metrics.get("catalytic_resonance_pct", 80.0)) / 100.0, 2),
-                        "surprise": round(abs(float(c_metrics.get("feigenbaum_r", 3.7)) - 3.57), 2),
-                        "monty_mode": "off",
-                        "stochastic": runner.stochastic,
-                        "unassigned_stochastic": runner.stochastic,
-                        "wm_radius": runner.wm_radius,
-                        "hud_mode": pacer.hud_mode,
-                        "context_latents": runner.context_lat_frames,
-                        "step_latents": runner.step_lat_frames,
-                        "steps": runner.steps,
-                        "cfg_scale": runner.cfg_scale,
-                        "active_region_mask": {"Fpz": True, "AFz": True, "F3": True, "F4": True, "FCz": True},
-                    })
+                    ctrl_conn.send(
+                        {
+                            "cmd": "video_telemetry",
+                            "fps": round(fps, 1),
+                            "gen_ms": round(gen_ms, 1),
+                            "rtf": round(pacer.ema_rtf, 2),
+                            "play_speed": pacer.play_speed,
+                            "feigenbaum_r": round(
+                                float(c_metrics.get("feigenbaum_r", 3.72)), 3
+                            ),
+                            "reaction_formula": telem.get(
+                                "reaction_formula", ""
+                            ),
+                            "branch_scores": telem.get(
+                                "reaction_branch_competition_128d", {}
+                            ),
+                            "debug_tokens": f"[{telem.get('driver_tag')}] dS:{q_metrics.get('quest_progress_pct', 0):.0f}% | {telem.get('active_entities', '')}",
+                            "fpz_meta_charge": round(
+                                float(
+                                    c_metrics.get(
+                                        "catalytic_resonance_pct", 50.0
+                                    )
+                                )
+                                / 100.0,
+                                3,
+                            ),
+                            "afz_stage_progress": round(
+                                float(q_metrics.get("quest_progress_pct", 0.0))
+                                / 100.0,
+                                3,
+                            ),
+                            "monty_loss": 0.015,
+                            "persistence": round(
+                                float(
+                                    c_metrics.get(
+                                        "catalytic_resonance_pct", 80.0
+                                    )
+                                )
+                                / 100.0,
+                                2,
+                            ),
+                            "surprise": round(
+                                abs(
+                                    float(c_metrics.get("feigenbaum_r", 3.7))
+                                    - 3.57
+                                ),
+                                2,
+                            ),
+                            "monty_mode": "off",
+                            "stochastic": runner.stochastic,
+                            "unassigned_stochastic": runner.stochastic,
+                            "wm_radius": runner.wm_radius,
+                            "eeg_wm_gain": runner.eeg_wm_gain,
+                            "gamepad_wm_mix": runner.gamepad_wm_mix,
+                            "hud_mode": pacer.hud_mode,
+                            "context_latents": runner.context_lat_frames,
+                            "step_latents": runner.step_lat_frames,
+                            "steps": runner.steps,
+                            "cfg_scale": runner.cfg_scale,
+                            "active_region_mask": {
+                                "Fpz": True,
+                                "AFz": True,
+                                "F3": True,
+                                "F4": True,
+                                "FCz": True,
+                            },
+                            "active_concept_idx": telem.get(
+                                "active_concept_idx",
+                                runner.active_concept_idx_by_region,
+                            ),
+                            "active_concept_indices": telem.get(
+                                "active_concept_indices",
+                                runner.active_concept_indices_by_region,
+                            ),
+                            "region_choice_probs": telem.get(
+                                "region_choice_probs",
+                                runner.region_choice_probs,
+                            ),
+                            "concept_bindings": telem.get(
+                                "concept_bindings",
+                                runner.concept_bindings_by_region,
+                            ),
+                        }
+                    )
                 except Exception:
                     pass
 
@@ -708,6 +992,18 @@ def main():
         help="Радиус поворота мира от рабочей памяти ЭЭГ (0.10 = плавное удержание, 0.45 = бурный морфинг)",
     )
     parser.add_argument(
+        "--eeg-wm-gain",
+        type=float,
+        default=1.0,
+        help="Градуальная сила вклада ЭЭГ / Фоновой рабочей памяти (1.0 = полная, 0.0 = отключена для изолированного теста геймпада)",
+    )
+    parser.add_argument(
+        "--gamepad-wm-mix",
+        type=float,
+        default=1.0,
+        help="Градуальная сила вклада Геймпада/Агента в рабочую память при нажатии (1.0 = активен, 0.0 = полностью отключен)",
+    )
+    parser.add_argument(
         "--hud",
         type=str,
         default="off",
@@ -737,16 +1033,43 @@ def main():
     parser.add_argument("--width", type=int, default=384, help="Ширина видео")
     parser.add_argument("--height", type=int, default=256, help="Высота видео")
     parser.add_argument("--monochrome", action="store_true", default=False)
-    parser.add_argument("--show-window", action="store_true", default=False, help="Показать локальное окно Pygame")
-    parser.add_argument("--game-mode", type=str, default="strict_ko", choices=["strict_ko", "sudden_death"])
+    parser.add_argument(
+        "--show-window",
+        action="store_true",
+        default=False,
+        help="Показать локальное окно Pygame",
+    )
+    parser.add_argument(
+        "--game-mode",
+        type=str,
+        default="strict_ko",
+        choices=["strict_ko", "sudden_death"],
+    )
     parser.add_argument("--max-overtime-chunks", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--hours", type=float, default=5.0)
-    parser.add_argument("--gateway-port", type=int, default=6002, help="Порт видеопотока web_cloud_gateway.py (6002)")
-    parser.add_argument("--video-ctrl-port", type=int, default=6007, help="Порт управления web_cloud_gateway.py (6007)")
-    parser.add_argument("--battle-server-port", type=int, default=6008, help="Порт бессмертного сервера весов (6008)")
+    parser.add_argument(
+        "--gateway-port",
+        type=int,
+        default=6002,
+        help="Порт видеопотока web_cloud_gateway.py (6002)",
+    )
+    parser.add_argument(
+        "--video-ctrl-port",
+        type=int,
+        default=6007,
+        help="Порт управления web_cloud_gateway.py (6007)",
+    )
+    parser.add_argument(
+        "--battle-server-port",
+        type=int,
+        default=6008,
+        help="Порт бессмертного сервера весов (6008)",
+    )
     parser.add_argument("--local", action="store_true", default=False)
-    parser.add_argument("--save-mp4", type=str, default="three_phase_slime_autobattler.mp4")
+    parser.add_argument(
+        "--save-mp4", type=str, default="three_phase_slime_autobattler.mp4"
+    )
     parser.add_argument("--no-save", action="store_true", default=False)
     args = parser.parse_args()
 
@@ -774,6 +1097,8 @@ def main():
         stochastic=args.stochastic,
         wm_radius=args.wm_radius,
     )
+    runner.eeg_wm_gain = float(np.clip(args.eeg_wm_gain, 0.0, 1.0))
+    runner.gamepad_wm_mix = float(np.clip(args.gamepad_wm_mix, 0.0, 1.0))
 
     if args.entity_source:
         if "=" in args.entity_source:
@@ -794,6 +1119,7 @@ def main():
         manifest=manifest,
         game_mode=args.game_mode,
         context_latents=runner.context_lat_frames,
+        runner=runner,
     )
     pacer.start()
 
@@ -823,7 +1149,9 @@ def main():
 
     try:
         while (time.time() - start_time) < args.hours * 3600.0:
-            clean_frames, traj, gen_ms, fps, tag, telemetry = runner.execute_turn_step()
+            clean_frames, traj, gen_ms, fps, tag, telemetry = (
+                runner.execute_turn_step()
+            )
             cur_stage = runner.manifest.stages[runner.curr_idx]
 
             pacer.push_generated_batch(
@@ -849,7 +1177,9 @@ def main():
                 "lag_ms": round(lag_ms, 1),
             }
 
-            push_web_telem(telemetry, fps=16.0 * pacer.play_speed, gen_ms=gen_ms)
+            push_web_telem(
+                telemetry, fps=16.0 * pacer.play_speed, gen_ms=gen_ms
+            )
 
             compact_entry = build_compact_telemetry(telemetry)
             compact_line = json.dumps(compact_entry, ensure_ascii=False)
@@ -883,4 +1213,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -5,6 +5,16 @@ const BATCH_SIZE     = 15;
 const RAW_SAT_LIMIT  = 8300000;
 const AUDIO_SR       = 32000;
 
+const GAMEPAD_CHANNEL_OPTIONS = [
+    "NONE",
+    "LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT",
+    "RS_UP", "RS_DOWN", "RS_LEFT", "RS_RIGHT",
+    "LT", "RT", "LB", "RB",
+    "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT",
+    "BTN_A", "BTN_B", "BTN_X", "BTN_Y",
+    "L3", "R3", "BACK", "START"
+];
+
 function calcUvScale(gain) {
     return (1.2 / parseFloat(gain) / 8388607.0) * 1e6;
 }
@@ -30,6 +40,21 @@ let cachedVideoSections = {
     FPZ: [], AFZ: [], F3: [], F4: [], FCZ: [], NEGATIVE: []
 };
 let cachedActiveConceptIdx = { Fpz: 0, AFz: 0, F3: 0, F4: 0, FCz: 0 };
+let cachedActiveConceptIndices = { Fpz: [0], AFz: [0], F3: [0], F4: [0], FCz: [0] };
+let cachedRegionChoiceProbs = { Fpz: [], AFz: [], F3: [], F4: [], FCz: [] };
+let cachedConceptBindings = {
+    FCZ: ["LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT", "BTN_A", "BTN_B"],
+    AFZ: ["RS_UP", "RS_DOWN", "RS_LEFT", "RS_RIGHT", "BTN_X", "BTN_Y"],
+    F3:  ["DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "LB", "RB"],
+    F4:  ["BTN_A", "BTN_B", "BTN_X", "BTN_Y", "LT", "RT"],
+    FPZ: ["LT", "RT", "START", "BACK"]
+};
+
+let eegWmGainVal = 1.0;
+let gamepadWmMixVal = 1.0;
+let learningBindTarget = null; // { regKey: "FCZ", idx: 0 }
+let keyboardVirtualChannels = {};
+let lastSentGamepadJson = "";
 
 const dom = {
     diffModel: document.getElementById('diffModel'),
@@ -141,6 +166,226 @@ const dom = {
     deviceCardTemplate: document.getElementById('deviceCardTemplate'),
     conceptChipTemplate: document.getElementById('conceptChipTemplate')
 };
+
+// Динамически создаем виджет градуального микшера (EEG WM × Gamepad WM Agent) в панели 3D-DiT:
+let domEegGainSlider = null;
+let domEegGainTxt = null;
+let domGpMixSlider = null;
+let domGpMixTxt = null;
+let domGpStatusTxt = null;
+
+function mountGradualWmMixerUI() {
+    if (!dom.videoRegionSelect || document.getElementById('gradualWmMixerBox')) return;
+    const box = document.createElement('div');
+    box.id = 'gradualWmMixerBox';
+    box.style.cssText = 'background:#111c30; border:1px solid #38bdf8; border-radius:6px; padding:8px; margin-top:8px;';
+
+    box.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <span style="font-size:11px; font-weight:bold; color:#00ffc8;">🎛️ Градуальный Микшер Рабочей Памяти (EEG × Gamepad Agent)</span>
+            <span id="gpLiveBadge" style="font-size:10px; color:#fbbf24;">Геймпад: Ожидание / Клавиатура WASD</span>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:4px; margin-bottom:6px;">
+            <button type="button" class="btn btn-blue" id="btnModePureEeg" style="padding:4px; font-size:10px;">🧠 100% ЭЭГ (Без Геймпада)</button>
+            <button type="button" class="btn btn-green" id="btnModeSharedWm" style="padding:4px; font-size:10px;">⚡ АВТО-МИКС (ЭЭГ + Геймпад)</button>
+            <button type="button" class="btn btn-gray" id="btnModePureGp" style="padding:4px; font-size:10px;">🎮 ТОЛЬКО ГЕЙМПАД (ЭЭГ=0)</button>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <div>
+                <label style="margin:0;">🧠 Вклад ЭЭГ / Фона в WM: <b id="eegWmGainTxt" style="color:#00ffc8;">1.00</b></label>
+                <input type="range" id="eegWmGainSlider" min="0" max="1" step="0.05" value="1.00">
+            </div>
+            <div>
+                <label style="margin:0;">🎮 Вклад Геймпада в WM (0=ВЫКЛ): <b id="gpWmMixTxt" style="color:#fbbf24;">1.00</b></label>
+                <input type="range" id="gpWmMixSlider" min="0" max="1" step="0.05" value="1.00">
+            </div>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+            <span style="font-size:9px; color:#94a3b8;">💡 Нажмите <b>🎯</b> на концепте и отклоните стик/кнопку геймпада (или зажмите 2 оси для диагонали)</span>
+            <button type="button" class="btn btn-red" id="btnClearRegionConcepts" style="width:auto; padding:3px 8px; font-size:9px;">🧹 Очистить регион (Свободный дрейф)</button>
+        </div>
+    `;
+    dom.videoRegionSelect.parentNode.insertBefore(box, dom.videoRegionSelect);
+
+    domEegGainSlider = document.getElementById('eegWmGainSlider');
+    domEegGainTxt = document.getElementById('eegWmGainTxt');
+    domGpMixSlider = document.getElementById('gpWmMixSlider');
+    domGpMixTxt = document.getElementById('gpWmMixTxt');
+    domGpStatusTxt = document.getElementById('gpLiveBadge');
+
+    domEegGainSlider.addEventListener('input', () => {
+        eegWmGainVal = parseFloat(domEegGainSlider.value) || 0.0;
+        domEegGainTxt.textContent = eegWmGainVal.toFixed(2);
+        sendGamepadAndMixerState(true);
+    });
+    domGpMixSlider.addEventListener('input', () => {
+        gamepadWmMixVal = parseFloat(domGpMixSlider.value) || 0.0;
+        domGpMixTxt.textContent = gamepadWmMixVal.toFixed(2);
+        sendGamepadAndMixerState(true);
+    });
+
+    document.getElementById('btnModePureEeg').addEventListener('click', () => {
+        eegWmGainVal = 1.0;
+        gamepadWmMixVal = 0.0;
+        domEegGainSlider.value = 1.0;
+        domGpMixSlider.value = 0.0;
+        domEegGainTxt.textContent = "1.00";
+        domGpMixTxt.textContent = "0.00";
+        sendGamepadAndMixerState(true);
+    });
+    document.getElementById('btnModeSharedWm').addEventListener('click', () => {
+        eegWmGainVal = 1.0;
+        gamepadWmMixVal = 1.0;
+        domEegGainSlider.value = 1.0;
+        domGpMixSlider.value = 1.0;
+        domEegGainTxt.textContent = "1.00";
+        domGpMixTxt.textContent = "1.00";
+        sendGamepadAndMixerState(true);
+    });
+    document.getElementById('btnModePureGp').addEventListener('click', () => {
+        eegWmGainVal = 0.0;
+        gamepadWmMixVal = 1.0;
+        domEegGainSlider.value = 0.0;
+        domGpMixSlider.value = 1.0;
+        domEegGainTxt.textContent = "0.00";
+        domGpMixTxt.textContent = "1.00";
+        sendGamepadAndMixerState(true);
+    });
+    document.getElementById('btnClearRegionConcepts').addEventListener('click', async () => {
+        const regKey = dom.videoRegionSelect.value.toUpperCase();
+        const res = await fetch('/api/video/region_concepts', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ region: regKey, action: 'clear' })
+        });
+        const d = await res.json();
+        if (d.sections) {
+            cachedVideoSections = d.sections;
+            renderSelectedVideoRegionConcepts();
+        }
+    });
+}
+
+function pollGamepadChannels24() {
+    const ch = { ...keyboardVirtualChannels };
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gp = Array.from(pads).find(p => p && p.connected);
+    if (gp) {
+        const dz = 0.12;
+        const ax0 = gp.axes[0] || 0;
+        const ax1 = gp.axes[1] || 0;
+        const ax2 = gp.axes[2] || 0;
+        const ax3 = gp.axes[3] || 0;
+
+        if (ax1 < -dz) ch.LS_UP    = Math.max(ch.LS_UP || 0, Math.min(1, (-ax1 - dz) / (1 - dz)));
+        if (ax1 >  dz) ch.LS_DOWN  = Math.max(ch.LS_DOWN || 0, Math.min(1, (ax1 - dz) / (1 - dz)));
+        if (ax0 < -dz) ch.LS_LEFT  = Math.max(ch.LS_LEFT || 0, Math.min(1, (-ax0 - dz) / (1 - dz)));
+        if (ax0 >  dz) ch.LS_RIGHT = Math.max(ch.LS_RIGHT || 0, Math.min(1, (ax0 - dz) / (1 - dz)));
+
+        if (ax3 < -dz) ch.RS_UP    = Math.max(ch.RS_UP || 0, Math.min(1, (-ax3 - dz) / (1 - dz)));
+        if (ax3 >  dz) ch.RS_DOWN  = Math.max(ch.RS_DOWN || 0, Math.min(1, (ax3 - dz) / (1 - dz)));
+        if (ax2 < -dz) ch.RS_LEFT  = Math.max(ch.RS_LEFT || 0, Math.min(1, (-ax2 - dz) / (1 - dz)));
+        if (ax2 >  dz) ch.RS_RIGHT = Math.max(ch.RS_RIGHT || 0, Math.min(1, (ax2 - dz) / (1 - dz)));
+
+        const bVal = (i) => (gp.buttons[i] ? gp.buttons[i].value : 0);
+        if (bVal(0) > 0.1)  ch.BTN_A      = Math.max(ch.BTN_A || 0, bVal(0));
+        if (bVal(1) > 0.1)  ch.BTN_B      = Math.max(ch.BTN_B || 0, bVal(1));
+        if (bVal(2) > 0.1)  ch.BTN_X      = Math.max(ch.BTN_X || 0, bVal(2));
+        if (bVal(3) > 0.1)  ch.BTN_Y      = Math.max(ch.BTN_Y || 0, bVal(3));
+        if (bVal(4) > 0.1)  ch.LB         = Math.max(ch.LB || 0, bVal(4));
+        if (bVal(5) > 0.1)  ch.RB         = Math.max(ch.RB || 0, bVal(5));
+        if (bVal(6) > 0.08) ch.LT         = Math.max(ch.LT || 0, bVal(6));
+        if (bVal(7) > 0.08) ch.RT         = Math.max(ch.RT || 0, bVal(7));
+        if (bVal(8) > 0.1)  ch.BACK       = Math.max(ch.BACK || 0, bVal(8));
+        if (bVal(9) > 0.1)  ch.START      = Math.max(ch.START || 0, bVal(9));
+        if (bVal(10) > 0.1) ch.L3         = Math.max(ch.L3 || 0, bVal(10));
+        if (bVal(11) > 0.1) ch.R3         = Math.max(ch.R3 || 0, bVal(11));
+        if (bVal(12) > 0.1) ch.DPAD_UP    = Math.max(ch.DPAD_UP || 0, bVal(12));
+        if (bVal(13) > 0.1) ch.DPAD_DOWN  = Math.max(ch.DPAD_DOWN || 0, bVal(13));
+        if (bVal(14) > 0.1) ch.DPAD_LEFT  = Math.max(ch.DPAD_LEFT || 0, bVal(14));
+        if (bVal(15) > 0.1) ch.DPAD_RIGHT = Math.max(ch.DPAD_RIGHT || 0, bVal(15));
+    }
+
+    // Если активен режим обучения бинда ("🎯"): ловим нажатые оси/кнопки > 0.55!
+    if (learningBindTarget) {
+        const pressedKeys = Object.entries(ch)
+            .filter(([_, v]) => v > 0.55)
+            .map(([k, _]) => k);
+        if (pressedKeys.length > 0) {
+            const comboBind = pressedKeys.slice(0, 2).join("+");
+            const { regKey, idx } = learningBindTarget;
+            if (!cachedConceptBindings[regKey]) cachedConceptBindings[regKey] = [];
+            cachedConceptBindings[regKey][idx] = comboBind;
+            learningBindTarget = null;
+            renderSelectedVideoRegionConcepts();
+            sendGamepadAndMixerState(true);
+        }
+    }
+
+    if (domGpStatusTxt) {
+        const activeStr = Object.entries(ch)
+            .filter(([_, v]) => v > 0.08)
+            .map(([k, v]) => `${k}:${Math.round(v * 100)}%`)
+            .join(" + ");
+        if (learningBindTarget) {
+            domGpStatusTxt.textContent = `🎯 ЖДУ НАЖАТИЯ ОСИ/КНОПКИ ДЛЯ [${learningBindTarget.regKey}#${learningBindTarget.idx + 1}]...`;
+            domGpStatusTxt.style.color = "#f43f5e";
+        } else if (activeStr) {
+            domGpStatusTxt.textContent = `🎮 Активно: ${activeStr}`;
+            domGpStatusTxt.style.color = "#00ffc8";
+        } else {
+            domGpStatusTxt.textContent = gp ? `🎮 ${gp.id.slice(0, 18)} (Отпущен -> 100% WM)` : `⌨️ Клавиатура WASD / Стрелки (Отпущена)`;
+            domGpStatusTxt.style.color = "#fbbf24";
+        }
+    }
+
+    return ch;
+}
+
+function sendGamepadAndMixerState(force = false) {
+    const ch = pollGamepadChannels24();
+    const payload = {
+        channels: ch,
+        eeg_wm_gain: eegWmGainVal,
+        gamepad_wm_mix: gamepadWmMixVal,
+        concept_bindings: cachedConceptBindings
+    };
+    const jsonStr = JSON.stringify(payload);
+    if (!force && jsonStr === lastSentGamepadJson) return;
+    lastSentGamepadJson = jsonStr;
+
+    fetch('/api/video/gamepad', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: jsonStr
+    }).catch(() => {});
+}
+
+// Поддержка клавиш WASD / Стрелок когда фокус не в поле ввода текста:
+window.addEventListener('keydown', (e) => {
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+    const keyMap = {
+        KeyW: 'LS_UP', KeyS: 'LS_DOWN', KeyA: 'LS_LEFT', KeyD: 'LS_RIGHT',
+        ArrowUp: 'RS_UP', ArrowDown: 'RS_DOWN', ArrowLeft: 'RS_LEFT', ArrowRight: 'RS_RIGHT',
+        Digit1: 'BTN_A', Digit2: 'BTN_B', Digit3: 'BTN_X', Digit4: 'BTN_Y'
+    };
+    if (keyMap[e.code]) {
+        keyboardVirtualChannels[keyMap[e.code]] = 1.0;
+        sendGamepadAndMixerState(false);
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    const keyMap = {
+        KeyW: 'LS_UP', KeyS: 'LS_DOWN', KeyA: 'LS_LEFT', KeyD: 'LS_RIGHT',
+        ArrowUp: 'RS_UP', ArrowDown: 'RS_DOWN', ArrowLeft: 'RS_LEFT', ArrowRight: 'RS_RIGHT',
+        Digit1: 'BTN_A', Digit2: 'BTN_B', Digit3: 'BTN_X', Digit4: 'BTN_Y'
+    };
+    if (keyMap[e.code]) {
+        delete keyboardVirtualChannels[keyMap[e.code]];
+        sendGamepadAndMixerState(false);
+    }
+});
 
 function getSavedDeviceConfig(devId) {
     try {
@@ -375,16 +620,22 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
 
 function renderSelectedVideoRegionConcepts() {
     if (!dom.videoRegionSelect || !dom.videoRegionConceptList) return;
+    if (document.activeElement && document.activeElement.classList.contains('gp-bind-select')) {
+        return; // Не перерисовываем пока открыт выпадающий список бинда
+    }
     const regKey = dom.videoRegionSelect.value.toUpperCase();
     const list = cachedVideoSections[regKey] || [];
     const roleMap = { FPZ: "Fpz", AFZ: "AFz", F3: "F3", F4: "F4", FCZ: "FCz" };
-    const activeIdx = cachedActiveConceptIdx[roleMap[regKey] || "FCz"] || 0;
+    const roleName = roleMap[regKey] || "FCz";
+    const activeIndices = cachedActiveConceptIndices[roleName] || [cachedActiveConceptIdx[roleName] || 0];
+    const probsList = cachedRegionChoiceProbs[roleName] || [];
+    const regBinds = cachedConceptBindings[regKey] || [];
 
     dom.videoRegionConceptList.replaceChildren();
     if (list.length === 0) {
         const empty = document.createElement('span');
         empty.className = 'empty-concepts';
-        empty.textContent = `В регионе [${regKey}] нет концептов`;
+        empty.textContent = `В регионе [${regKey}] нет концептов -> Активен СВОБОДНЫЙ ЛАТЕНТНЫЙ ДРЕЙФ (S³)`;
         dom.videoRegionConceptList.appendChild(empty);
         return;
     }
@@ -392,12 +643,68 @@ function renderSelectedVideoRegionConcepts() {
     list.forEach((c, idx) => {
         const clone = dom.conceptChipTemplate.content.cloneNode(true);
         const chip = clone.querySelector('.concept-chip');
-        if (idx === activeIdx) {
+        const isActive = activeIndices.includes(idx);
+        if (isActive) {
             chip.classList.add('video-active');
         }
+        const pct = probsList[idx] !== undefined ? ` | ${Math.round(probsList[idx])}%` : '';
         const txt = chip.querySelector('.concept-text');
-        txt.textContent = `${idx === activeIdx ? '★ ' : ''}[${regKey}#${idx + 1}] ${c.length > 48 ? c.slice(0, 48) + '…' : c}`;
+        txt.textContent = `${isActive ? '★ ' : '○ '}[${regKey}#${idx + 1}${pct}] ${c.length > 34 ? c.slice(0, 34) + '…' : c}`;
         txt.title = c;
+        txt.style.cursor = 'pointer';
+
+        // При удержании мыши на тексте чипа — возбуждается его мода рабочей памяти!
+        const curBind = regBinds[idx] || "NONE";
+        txt.addEventListener('mousedown', () => {
+            const bKey = (curBind !== "NONE") ? curBind.split("+")[0] : `MANUAL_${regKey}_${idx}`;
+            if (curBind === "NONE") {
+                if (!cachedConceptBindings[regKey]) cachedConceptBindings[regKey] = [];
+                cachedConceptBindings[regKey][idx] = "BTN_A";
+            }
+            const effKey = (cachedConceptBindings[regKey][idx] || "BTN_A").split("+")[0];
+            keyboardVirtualChannels[effKey] = 1.0;
+            sendGamepadAndMixerState(true);
+        });
+        txt.addEventListener('mouseup', () => {
+            keyboardVirtualChannels = {};
+            sendGamepadAndMixerState(true);
+        });
+
+        // Выпадающий список полуоси/кнопки геймпада для этого концепта:
+        if (regKey !== "NEGATIVE") {
+            const sel = document.createElement('select');
+            sel.className = 'gp-bind-select';
+            sel.style.cssText = 'width:auto; padding:1px 3px; font-size:9px; margin-right:3px; background:#091326; color:#38bdf8; border:1px solid #334155;';
+            const opts = GAMEPAD_CHANNEL_OPTIONS.includes(curBind)
+                ? GAMEPAD_CHANNEL_OPTIONS
+                : [curBind, ...GAMEPAD_CHANNEL_OPTIONS];
+            opts.forEach(optVal => {
+                const o = document.createElement('option');
+                o.value = optVal;
+                o.textContent = optVal === "NONE" ? "🎮 Нет бинда" : `🎮 ${optVal}`;
+                if (optVal === curBind) o.selected = true;
+                sel.appendChild(o);
+            });
+            sel.addEventListener('change', () => {
+                if (!cachedConceptBindings[regKey]) cachedConceptBindings[regKey] = [];
+                cachedConceptBindings[regKey][idx] = sel.value;
+                sendGamepadAndMixerState(true);
+            });
+
+            const learnBtn = document.createElement('button');
+            learnBtn.type = 'button';
+            learnBtn.textContent = (learningBindTarget && learningBindTarget.regKey === regKey && learningBindTarget.idx === idx) ? '⏳' : '🎯';
+            learnBtn.title = 'Кликните и отклоните любую полуось/кнопку на геймпаде (или 2 оси для диагонали)';
+            learnBtn.style.cssText = 'color:#fbbf24; font-size:10px; margin-right:3px; padding:0 2px;';
+            learnBtn.addEventListener('click', () => {
+                learningBindTarget = { regKey, idx };
+                renderSelectedVideoRegionConcepts();
+            });
+
+            const rmBtn = chip.querySelector('.concept-remove-btn');
+            chip.insertBefore(sel, rmBtn);
+            chip.insertBefore(learnBtn, rmBtn);
+        }
 
         const rmBtn = chip.querySelector('.concept-remove-btn');
         rmBtn.addEventListener('click', () => removeVideoRegionConcept(regKey, c));
@@ -516,6 +823,9 @@ async function updateVideoTransformerConfig(sourceEl = null, presetOverride = 'c
         unassigned_stochastic: vUnassStoch,
         wm_radius: vRad,
         geodesic_lock: vRad,
+        eeg_wm_gain: eegWmGainVal,
+        gamepad_wm_mix: gamepadWmMixVal,
+        concept_bindings: cachedConceptBindings,
         hud_mode: hudMode,
         step_latents: stepLat,
         context_latents: ctxLat,
@@ -688,7 +998,27 @@ sse.addEventListener('state', (e) => {
         if (v.active_concept_idx) {
             cachedActiveConceptIdx = v.active_concept_idx;
         }
+        if (v.active_concept_indices) {
+            cachedActiveConceptIndices = v.active_concept_indices;
+        }
+        if (v.region_choice_probs) {
+            cachedRegionChoiceProbs = v.region_choice_probs;
+        }
+        if (v.concept_bindings && !learningBindTarget) {
+            cachedConceptBindings = v.concept_bindings;
+        }
         renderSelectedVideoRegionConcepts();
+
+        if (domEegGainSlider && document.activeElement !== domEegGainSlider && v.eeg_wm_gain !== undefined) {
+            eegWmGainVal = parseFloat(v.eeg_wm_gain);
+            domEegGainSlider.value = eegWmGainVal;
+            if (domEegGainTxt) domEegGainTxt.textContent = eegWmGainVal.toFixed(2);
+        }
+        if (domGpMixSlider && document.activeElement !== domGpMixSlider && v.gamepad_wm_mix !== undefined) {
+            gamepadWmMixVal = parseFloat(v.gamepad_wm_mix);
+            domGpMixSlider.value = gamepadWmMixVal;
+            if (domGpMixTxt) domGpMixTxt.textContent = gamepadWmMixVal.toFixed(2);
+        }
 
         if (dom.videoLoreSelect && Array.isArray(v.available_lores)) {
             const currentOpts = Array.from(dom.videoLoreSelect.options).map(o => o.value);
@@ -1238,6 +1568,11 @@ setInterval(() => {
     });
 }, 1000);
 
+// Опрос 24 каналов геймпада с частотой 15 Гц (отправляет запрос только при реальном изменении осей!):
+setInterval(() => {
+    sendGamepadAndMixerState(false);
+}, 65);
+
 function renderConceptList(containerEl, list, isMusic, onRemove) {
     containerEl.replaceChildren();
     if (list.length === 0) {
@@ -1380,6 +1715,8 @@ async function toggleRecording(start) {
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
+    mountGradualWmMixerUI();
+
     dom.fsToggleBtn.addEventListener('click', toggleFullScreen);
     dom.probeModeToggle.addEventListener('change', (e) => toggleProbeMode(e.target.checked));
     dom.btnConnectBle.addEventListener('click', connectNewBleDevice);
@@ -1490,6 +1827,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         renderMusicConcepts(dM.concepts || []);
         if (dVid && dVid.sections) {
             cachedVideoSections = dVid.sections;
+            if (dVid.concept_bindings) cachedConceptBindings = dVid.concept_bindings;
             renderSelectedVideoRegionConcepts();
         }
     } catch (err) {
