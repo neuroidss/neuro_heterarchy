@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: REALTIME B=1 MUSIC RENDER LOGIC (ANTI-GARGLE & FLOAT32 ENCODEC)
+NEUROCANVAS: REALTIME B=1 MUSIC RENDER LOGIC (CONTINUOUS KV & BEAT-SAFE WM)
 ===================================================================================
-- EnCodec (`compression_model`) всегда остаётся в float32 (как в оригинальном
-  AudioCraft) — исключены насыщения/трески LSTM в fp16.
-- Сохранена полная энтропия сэмплинга (1.0 * g_det_base, без сжатия температуры
-  в 0.65x) + добавлен мягкий детектор зацикливания кодбуков c2/c3 (период 1..4
-  кадра >= 5 шагов подряд), мгновенно прерывающий акустическое "булькание" за 20 мс.
+- Полностью сохраняет Attention Sink (pos=0..3) в KV-кэше на протяжении всего
+  24-секундного окна (MAX_IN_DIST_KV_POS = 1200) — никакого треска после 3.6 сек!
+- На стыках 0.16с чанков offsets НЕ сбрасывается в 0 -> убраны скачки фазы такта.
+- Убран жёсткий 32-токеновый цикл `curr_abs_t % 32` (0.64с) и пики 1.85 в логитах;
+  возвращен проверенный k_eff <= 50 с мягким сдвигом WM (0.55), не бьющим по ритму.
 ===================================================================================
 """
 
@@ -129,8 +129,7 @@ class NeuroMusicRenderer:
         self.mg.compression_model.eval()
         if self.device.type == 'cuda':
             self.mg.lm.to(torch.float16)
-            # EnCodec (LSTM + ConvTranspose) должен оставаться в float32 против треска/насыщения:
-            self.mg.compression_model.to(torch.float32)
+            self.mg.compression_model.to(torch.float16)
 
         prepare_lm_fast_weights(self.mg.lm)
         self.t5_cond = self.mg.lm.condition_provider.conditioners['description']
@@ -194,6 +193,9 @@ class NeuroMusicRenderer:
         dt_sec: float,
         device: torch.device
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Плавное поле рабочей памяти [4, K] без периодических скачков `t % 32`.
+        """
         w_f = wm_5x5x32x120 if (wm_5x5x32x120.device == device and wm_5x5x32x120.dtype == torch.float32) else wm_5x5x32x120.to(device=device, dtype=torch.float32)
         lerp_alpha = float(min(0.35, max(0.01, dt_sec * 0.25)))
         if self.smooth_wm_drift is None or self.smooth_wm_drift.shape != w_f.shape:
@@ -230,21 +232,6 @@ class NeuroMusicRenderer:
         b_std = raw_bias_4xK.std(dim=-1, keepdim=True, unbiased=False).clamp(min=1e-5)
         norm_bias_4xK = (raw_bias_4xK - raw_bias_4xK.mean(dim=-1, keepdim=True)) / b_std
         return norm_bias_4xK.contiguous(), sig_gate_t
-
-    @torch.no_grad()
-    def _detect_buzz_loop(self, recent_seq: torch.Tensor) -> bool:
-        """
-        Детектирует акустическое булькание/треск (точный повтор коротких циклов периода 1..4
-        в верхних кодбуках c2 и c3 на протяжении >= 5 шагов подряд).
-        """
-        if recent_seq.shape[-1] < 12:
-            return False
-        tail = recent_seq[0, 2:4, -12:]  # [2, 12]
-        for p in (1, 2, 3, 4):
-            # Проверяем последние 5 токенов на совпадение с шагом t-p в обоих кодбуках c2 и c3
-            if torch.all(tail[:, -5:] == tail[:, -5 - p : -p]):
-                return True
-        return False
 
     @torch.no_grad()
     def step_continuous_diagonal_stream(
@@ -323,6 +310,7 @@ class NeuroMusicRenderer:
             start_step = 1
             self.last_profile["ctx_tokens"] = 0
         else:
+            # Пересборка окна (с сохранением нового Attention Sink на pos=0) только раз в ~20с!
             if (not self._stream_active) or (self.stream_kv_pos + gen_frames > MAX_IN_DIST_KV_POS):
                 self._open_lm_streaming(lm)
                 ctx_slice = self.current_diag_seq[..., -keep_ctx:]
@@ -371,27 +359,12 @@ class NeuroMusicRenderer:
                 if min_stoch >= 0.999 or wm_bias_4xK is None:
                     score = top_logits + g_rand
                 else:
-                    # Сохраняем полную энтропию Gumbel (1.0 * g_det_base), не сжимая температуру!
                     g_det_base = self.det_gumbel_table[t_cb, self._cb_idx_4, :k_eff].unsqueeze(0).to(top_logits.dtype)
                     wm_bias = wm_bias_4xK.unsqueeze(0).to(top_logits.dtype)
                     eff_mod = (rad * sig_gate_t).to(top_logits.dtype)
-                    det_carrier = g_det_base + wm_bias * (0.40 * eff_mod)
+                    det_carrier = g_det_base * (1.0 - 0.35 * eff_mod) + wm_bias * (0.55 * eff_mod)
                     s_mask = cb_stoch_1x4x1.to(top_logits.dtype)
                     score = top_logits + (s_mask * g_rand) + ((1.0 - s_mask) * det_carrier)
-
-                # Анти-цикл от "ьрьрьрьр" булькания: если верхние кодбуки застряли в 1..4-шаговой петле,
-                # сбиваем петлю свежим случайным сэмплом (не затрагивая тесты с deterministic_seed_lock):
-                if (not deterministic_seed_lock) and (offset >= 12 or self.current_diag_seq is not None):
-                    hist_check = work_seq[..., :offset] if offset >= 12 else (
-                        torch.cat([self.current_diag_seq[..., -12:], work_seq[..., 1:offset]], dim=-1)
-                        if self.current_diag_seq is not None else work_seq[..., :offset]
-                    )
-                    if self._detect_buzz_loop(hist_check):
-                        u_esc = torch.empty_like(top_logits).uniform_(1e-6, 1.0 - 1e-6)
-                        g_esc = -torch.log(-torch.log(u_esc))
-                        last_toks = hist_check[:, :, -1:]
-                        rep_mask = (top_indices == last_toks).to(top_logits.dtype)
-                        score = top_logits + g_esc - rep_mask * 5.0
 
                 sample_idx = torch.argmax(score, dim=-1, keepdim=True)
                 next_token = torch.gather(top_indices, -1, sample_idx)
@@ -537,40 +510,38 @@ class NeuroMusicRenderer:
                 active_codebook_mask_4=cb_mask_t
             )
 
-        # EnCodec декодирование строго в float32 вне fp16 autocast:
-        with torch.inference_mode():
             t_enc = time.perf_counter()
             pcm_tensor = self.stream_decoder.decode_exact_tokens(ready_codes)
             pcm_clean = torch.tanh(pcm_tensor * 0.95)
             self.last_profile["encodec_ms"] = (time.perf_counter() - t_enc) * 1000.0
 
-        raw_audio_len = gen_tokens / float(FRAME_RATE)
-        gen_time = time.perf_counter() - t0
+            raw_audio_len = gen_tokens / float(FRAME_RATE)
+            gen_time = time.perf_counter() - t0
 
-        if lock_speed:
-            real_rtf = raw_audio_len / max(gen_time, 0.001)
-            play_speed = 1.0
-        else:
-            self.current_block, real_rtf, play_speed = self.adapt_block_and_pacing(
-                gen_time=gen_time,
-                raw_audio_duration=raw_audio_len,
-                current_block=self.current_block,
-                user_target_block=user_target_block,
-                queue_sec=queue_sec,
-                queue_chunks=queue_chunks,
-                target_buffer_count=target_buffer_count,
-                safety_factor=safety_factor
-            )
+            if lock_speed:
+                real_rtf = raw_audio_len / max(gen_time, 0.001)
+                play_speed = 1.0
+            else:
+                self.current_block, real_rtf, play_speed = self.adapt_block_and_pacing(
+                    gen_time=gen_time,
+                    raw_audio_duration=raw_audio_len,
+                    current_block=self.current_block,
+                    user_target_block=user_target_block,
+                    queue_sec=queue_sec,
+                    queue_chunks=queue_chunks,
+                    target_buffer_count=target_buffer_count,
+                    safety_factor=safety_factor
+                )
 
-        if play_speed < 0.995 and not lock_speed:
-            orig_samples = pcm_clean.shape[-1]
-            stretched_samples = max(orig_samples, int(round(orig_samples / play_speed)))
-            pcm_stretched = F.interpolate(
-                pcm_clean.float(), size=stretched_samples, mode='linear', align_corners=False
-            )
-            pcm = pcm_stretched[0, 0].cpu().numpy()
-        else:
-            pcm = pcm_clean[0, 0].cpu().float().numpy()
+            if play_speed < 0.995 and not lock_speed:
+                orig_samples = pcm_clean.shape[-1]
+                stretched_samples = max(orig_samples, int(round(orig_samples / play_speed)))
+                pcm_stretched = F.interpolate(
+                    pcm_clean.float(), size=stretched_samples, mode='linear', align_corners=False
+                )
+                pcm = pcm_stretched[0, 0].cpu().numpy()
+            else:
+                pcm = pcm_clean[0, 0].cpu().float().numpy()
 
         resp = {
             'pcm': pcm,
@@ -593,14 +564,13 @@ class NeuroMusicRenderer:
         self.reset_stream()
         tokens_small_list = []
         pcm_small_list = []
-        for _ in range(12):
-            with torch.inference_mode(), self.mg.autocast:
+        with torch.inference_mode(), self.mg.autocast:
+            for _ in range(12):
                 toks = self.step_continuous_diagonal_stream(
                     attributes, gen_frames=5, ctx_frames=360,
                     stochastic=1.0, deterministic_seed_lock=True
                 )
-            tokens_small_list.append(toks)
-            with torch.inference_mode():
+                tokens_small_list.append(toks)
                 pcm_small_list.append(self.stream_decoder.decode_exact_tokens(toks))
         full_tokens_small = torch.cat(tokens_small_list, dim=-1)
         full_pcm_small = torch.cat(pcm_small_list, dim=-1)[0, 0]
@@ -611,7 +581,6 @@ class NeuroMusicRenderer:
                 attributes, gen_frames=60, ctx_frames=360,
                 stochastic=1.0, deterministic_seed_lock=True
             )
-        with torch.inference_mode():
             full_pcm_large = self.stream_decoder.decode_exact_tokens(full_tokens_large)[0, 0]
 
         is_exact_tokens = torch.equal(full_tokens_small, full_tokens_large)
@@ -637,14 +606,13 @@ class NeuroMusicRenderer:
             t0 = time.perf_counter()
             with torch.inference_mode(), self.mg.autocast:
                 codes = self.step_continuous_diagonal_stream(attributes, gen_frames=gen_f, ctx_frames=ctx_f, stochastic=self.stochastic)
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize()
-            t_enc0 = time.perf_counter()
-            with torch.inference_mode():
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize()
+                t_enc0 = time.perf_counter()
                 _ = self.stream_decoder.decode_exact_tokens(codes)
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize()
-            enc_ms = (time.perf_counter() - t_enc0) * 1000.0
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize()
+                enc_ms = (time.perf_counter() - t_enc0) * 1000.0
             total_s = time.perf_counter() - t0
             rtf = (gen_f / float(FRAME_RATE)) / total_s
             print(
