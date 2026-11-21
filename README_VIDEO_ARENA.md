@@ -1,6 +1,6 @@
-# 🌌 EXOCORTEX 3D-DiT: CONTINUOUS REAL-TIME NEUROFEEDBACK WORLD ENGINE, PURE-TENSOR T5 MANIFOLD & RECTIFIED-FLOW 3D-DiT ORACLE
+# 🌌 EXOCORTEX 3D-DiT: CONTINUOUS REAL-TIME NEUROFEEDBACK WORLD ENGINE, MULTI-BRANCH 3D-DiT ORACLE & AUTONOMOUS WM AGENTS
 
-> **100% Continuous Real-Time 3D-DiT World Engine (`LTX-Video 0.9.8-2B-Distilled` NF4 / FP8 & `0.9.0-Base`), 1-Step Batched Rectified-Flow 3D-DiT World-Model Oracle (Full `[1, 128, 4096]` T5 Embeddings, Zero Random Projections), Pure-Tensor Conditioning (Zero Hardcoded Words, Zero Runtime String Concatenation), Shared 96,000-D Working Memory Bus (`FreeEEG16` × 24-Channel Gamepad/Agent Synthesizer × `TBP.Monty`), and Intransitive Catalytic Dynamics**
+> **100% Continuous Real-Time 3D-DiT World Engine (`LTX-Video 0.9.8-2B-Distilled` NF4 / FP8 & `0.9.0-Base`), Automatic `T5 ↔ VAE` VRAM Swap (Zero OOM on 12 GB GPUs), Multi-Branch Rectified-Flow 3D-DiT World-Model Oracle (Full `[M, 128, 4096]` T5 Embeddings), Universal Aconceptual `npc:` Agents (Zero Hardcoded Words), Pure-Tensor Conditioning, and Shared 96,000-D Working Memory Bus (`FreeEEG16` × 24-Channel Gamepad Synthesizer × `TBP.Monty`)**
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-EE4C2C.svg?style=flat&logo=pytorch)](https://pytorch.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-NF4_%7C_FP8_%7C_INT8_%7C_BF16_Fast_Stream-76B900.svg?style=flat&logo=nvidia)](https://developer.nvidia.com/cuda-zone)
@@ -18,159 +18,165 @@
 ---
 
 ## 📑 Table of Contents
-1. [Core Design Laws: Pure-Tensor Engine, Neurofeedback-First & Zero Hardcoded Words](#1-core-design-laws-pure-tensor-engine-neurofeedback-first--zero-hardcoded-words)
-2. [Unified Working Memory Bus (`[5 × 5 × 32 × 120]`): EEG, Gamepad & NPC Agents on Equal Footing](#2-unified-working-memory-bus-5--5--32--120-eeg-gamepad--npc-agents-on-equal-footing)
-3. [1-Step Batched Rectified-Flow 3D-DiT Oracle (`neuro_referee.py`)](#3-1-step-batched-rectified-flow-3d-dit-oracle-neuro_refereepy)
-4. [LTX-Video 0.9.8-2B-Distilled In-Place 4-Bit NF4 & Stability Fixes](#4-ltx-video-098-2b-distilled-in-place-4-bit-nf4--stability-fixes)
-5. [24-Channel Gamepad/Keyboard WM Synthesizer & Zero-Input Equilibrium](#5-24-channel-gamepadkeyboard-wm-synthesizer--zero-input-equilibrium)
-6. [Architecture & Module Map](#6-architecture--module-map)
-7. [Quick Start & CLI Reference](#7-quick-start--cli-reference)
-8. [Current Status & Next-Session Handoff Notes](#8-current-status--next-session-handoff-notes)
-9. [Comprehensive Scientific Bibliography & DOIs](#9-comprehensive-scientific-bibliography--dois)
+1. [Core Design Laws: Zero Hardcoded Words, Pure-Tensor Engine & Dual Mode](#1-core-design-laws-zero-hardcoded-words-pure-tensor-engine--dual-mode)
+2. [Unified Working Memory Bus (`[5 × 5 × 32 × 120]`) & Autonomous `npc:` Agents](#2-unified-working-memory-bus-5--5--32--120--autonomous-npc-agents)
+3. [Multi-Branch Rectified-Flow 3D-DiT Oracle (`neuro_referee.py`)](#3-multi-branch-rectified-flow-3d-dit-oracle-neuro_refereepy)
+4. [LTX-Video 0.9.8-2B-Distilled NF4 & `T5 ↔ VAE` Zero-OOM Architecture](#4-ltx-video-098-2b-distilled-nf4--t5--vae-zero-oom-architecture)
+5. [Canonical Module Map & Ports](#5-canonical-module-map--ports)
+6. [Quick Start & CLI Reference](#6-quick-start--cli-reference)
+7. [Current Status & Next-Session Handoff Notes](#7-current-status--next-session-handoff-notes)
+8. [Comprehensive Scientific Bibliography & DOIs](#8-comprehensive-scientific-bibliography--dois)
 
 ---
 
-## 1. Core Design Laws: Pure-Tensor Engine, Neurofeedback-First & Zero Hardcoded Words
+## 1. Core Design Laws: Zero Hardcoded Words, Pure-Tensor Engine & Dual Mode
 
-**Exocortex 3D-DiT** is a **language-agnostic, lore-agnostic continuous real-time world engine** built around four strict invariants:
+**Exocortex 3D-DiT** is a **100% aconceptual, language-agnostic, lore-agnostic continuous real-time world engine** governed by four strict invariants:
 
-1. **Zero Hardcoded Words or Prompts in Engine Code:**
-   All Python engine modules (`neuro_controller.py`, `neuro_engine.py`, `neuro_referee.py`, `neuro_solver_stepper.py`, `neuro_ltx_backend.py`) are 100% aconceptual mathematical operators. No language-specific prompts, directions, or magic state strings are ever injected into the model. All world semantics come strictly from external JSON manifests (`configs/*.json`) and are encoded once into GPU tensors at warmup.
-2. **100% Pure-Tensor Loop (Zero String Concatenation at Runtime):**
-   `neuro_engine.py` composes `pos_emb` directly in `[1, 128, 4096]` embedding space via spherical normalization/superposition of pre-encoded `steered_probe_pairs` (or `passive_pair` at zero-input equilibrium), preserving continuous diagonal and multi-region superpositions without ever re-concatenating text strings.
-3. **Neurofeedback-First Universal Agent Architecture:**
-   Every participant in the world — human EEG (`FreeEEG16`), human gamepad/keyboard emulator, or autonomous NPC — operates through the exact same Working Memory field $\mathbf{W} \in \mathbb{R}^{5 \times 5 \times 32 \times 120}$ and catalytic competition loop. No classic game commands (`if btn: move()`) bypass the Working Memory bus.
-4. **Continuous Intra-Step Steering & Zero User Blocking:**
-   No cortical region is ever locked into a passive `"HOLD"` state. Geodesic T5 steering (`_live_pos_emb_fn`) runs on every Euler denoising step, and transient impulses are latched via a synaptic trace (`_latched_gamepad_channels`).
+1. **Zero Hardcoded Words in Python Engine Code:**
+   All engine modules (`neuro_controller.py`, `neuro_engine.py`, `neuro_referee.py`, `neuro_solver_stepper.py`, `neuro_ltx_backend.py`) are pure mathematical tensor operators. No directions (`up/down`), game concepts (`enemy/duel/maze/hp`), or fallback prompts exist anywhere in Python. All semantics live exclusively in external JSON manifests (`configs/*.json`) or `.txt` lores (`lore/*.txt`).
+2. **100% Pure-Tensor Runtime Loop (Zero String Concatenation):**
+   All manifest concepts and hypotheses are encoded once into `[1, 128, 4096]` T5 tensors at warmup. During real-time generation, `neuro_engine.py` composes `pos_emb` solely via spherical superposition of **actively driven** entity tensors (falling back to `passive_pair` at zero-input equilibrium), with zero dilution from inactive/passive slots.
+3. **Dual Mode in One Unified Stack:**
+   * **Closed-Loop Catalytic World Mode (`.json` manifests with hypotheses):** Enables the Multi-Branch 3D-DiT RF Oracle, real-time `BRANCH_SWITCH` / `STAGE_DONE` transitions, and adaptive `npc:` feedback loops (movement, mazes, rituals, 1v1/NvN duels).
+   * **Fast Open-Loop Pure WM Mode (`.txt` lores or 1-stage manifests without `completed_hypothesis`):** Automatically skips the 3D-DiT Oracle forward pass (~350 ms saved per step) for pure continuous 3D-DiT neuro-visual streaming (e.g., `lore/video_lore_psy.txt`).
+4. **Custom Initial Scene Injection (`--init-image` & `/api/video/init_image`):**
+   Any starting PNG/JPG (such as a 2D orthographic maze map) can be encoded directly into `z[0]` (`local_context_latents_5d`) from CLI or the Web Studio.
 
 ---
 
-## 2. Unified Working Memory Bus (`[5 × 5 × 32 × 120]`): EEG, Gamepad & NPC Agents on Equal Footing
+## 2. Unified Working Memory Bus (`[5 × 5 × 32 × 120]`) & Autonomous `npc:` Agents
 
 ```
  ═════════════════════════════════════════════════════════════════════════════
-   UNIFIED WORKING MEMORY BUS: GRADUAL MULTI-AGENT SUPERPOSITION
+   UNIFIED WORKING MEMORY BUS: SYMMETRIC HUMAN + GAMEPAD + AUTONOMOUS NPC
  ═════════════════════════════════════════════════════════════════════════════
 
   [1. Biological EEG (FreeEEG16 BLE/LSL)] ──(eeg_wm_gain ∈ [0..1])──┐
-  [2. 24-Ch Gamepad / Keyboard Synthesizer] ──(gamepad_wm_mix ∈ [0..1])┼─► ┌───────────────────────────────┐
-  [3. Autonomous NPC / Monty Agents] ─────────────────────────────────┘   │ SHARED WM FIELD (VRAM IPC)    │
-                                                                          │ W_r ∈ R^{5 × 32 × 120}        │
-                                                                          └───────────────┬───────────────┘
-                                                                                          │
-            ┌─────────────────────────────────────────────────────────────────────────────┴──────────────────┐
-            ▼ (Orthonormal Mode Projection + Pure-Tensor Spherical Superposition)                            ▼
+  [2. 24-Ch Gamepad / Keyboard Synth] ──────(gamepad_wm_mix ∈ [0..1])┼─► ┌───────────────────────────────┐
+  [3. Autonomous NPC Agents ("npc:AFz")] ──(Oracle Reward -> WM)────┘   │ SHARED WM FIELD (VRAM IPC)    │
+                                                                        │ W_r ∈ R^{5 × 32 × 120}        │
+                                                                        └───────────────┬───────────────┘
+                                                                                        │
+            ┌───────────────────────────────────────────────────────────────────────────┴────────────────────┐
+            ▼ (Orthonormal 19,200-D Eigenmodes + Active-Slot Spherical Superposition)                        ▼
   ┌──────────────────────────────────────────────────────┐                ┌────────────────────────────────────────┐
-  │ PURE-TENSOR T5 CONDITIONING & S³ STEPPER             │                │ 1-STEP RECTIFIED-FLOW 3D-DiT ORACLE    │
-  │ • LTX-Video 0.9.8-2B-Distilled (In-Place 4-bit NF4)  │                │ • Evaluates P(z_new | z_prev, H_k)     │
-  │ • Official t² anchor jitter (image_cond_noise=0.15)  │───────────────►│ • Full [M, 128, 4096] T5 Hypotheses    │
-  │ • Causal Multi-Frame VAE Encode + last_frame_fix     │  unpacked_z0   │ • Shared ε + Motion-Weighted t-stat    │
+  │ PURE-TENSOR T5 CONDITIONING & S³ STEPPER             │                │ MULTI-BRANCH 3D-DiT RF ORACLE          │
+  │ • LTX-Video 0.9.8-2B-Distilled (In-Place 4-bit NF4)  │                │ • Scores [H_stay, H_1..H_M] on video   │
+  │ • Full 8-sigma schedule + optional mild CFG (1.0-2.0)│───────────────►│ • 2-probe CRN ε + effective DoF t-stat │
+  │ • Official t² anchor jitter (image_cond_noise=0.15)  │  unpacked_z0   │ • Drives BRANCH_SWITCH & NPC reward    │
   └──────────────────────────────────────────────────────┘                └────────────────────────────────────────┘
  ═════════════════════════════════════════════════════════════════════════════
 ```
 
-* **`eeg_wm_gain` $\in [0.00, 1.00]$:** Scales biological `FreeEEG16` (or background phase clock) contribution. Set to `0.00` for isolated Gamepad/Agent verification.
-* **`gamepad_wm_mix` $\in [0.00, 1.00]$:** Scales the 24-channel Gamepad/Keyboard Working Memory Synthesizer. When `gamepad_wm_mix = 0.00` (or stick/keys released), zero gamepad wave is injected.
+* **Symmetric Autonomous NPC / Adversary Agents (`control_binding: "npc:AFz"`):**
+  Every entity slot (`e0`, `e1`, ...) uses the exact same `SymmetricBotController` class and orthonormal 19,200-D eigenmode basis (`get_canonical_concept_wm_basis_Kx5x32x120`). Slots marked `"npc:<REGION>"` maintain a latent preference vector `npc_logits_K` over their `allowed_pool`, synthesize a 19,200-D WM wave with deterministic phase exploration, and update their policy via `observe_oracle_feedback(reward)` based on which branch actually prevailed in the generated video. Zero hardcoded "enemy" or "duel" logic exists in the engine.
+* **Per-Slot Region Isolation:**
+  `--entity-source auto` strictly preserves each slot's JSON `control_binding` (`eeg:FCz`, `eeg:AFz`, `npc:AFz`, etc.) without overwriting regions.
 
 ---
 
-## 3. 1-Step Batched Rectified-Flow 3D-DiT Oracle (`neuro_referee.py`)
+## 3. Multi-Branch Rectified-Flow 3D-DiT Oracle (`neuro_referee.py`)
 
-Instead of a static 2D image classifier (like CLIP, which cannot perceive temporal motion) or a random projection matrix, `CoordinateFreeHistoryReferee` uses **LTX-Video's own 3D-DiT** to judge the actual spatiotemporal transition $\mathbf{z}_{\text{prev}} \to \mathbf{z}_{\text{new}}$:
+Instead of a static 2D classifier or single-stage lock, `CoordinateFreeHistoryReferee` uses **LTX-Video's own 3D-DiT** to evaluate all competing world branches directly on the generated spatiotemporal transition $\mathbf{z}_{\text{prev}} \to \mathbf{z}_{\text{new}}$:
 
-1. Keeps conditioning prefix frames `:n_cond` clean ($t_c = 0$) and noises only generated frames `n_cond:` at $\sigma_{\text{probe}}$ (`0.725` for `0.9.8-distilled`, `0.55` for `0.9.0-base`) with a **single shared noise tensor** $\boldsymbol{\epsilon}$ (Common Random Numbers) across all hypotheses $H_k \in \{H_{\text{ongoing}}, H_{\text{completed}}, H_{\text{failed}}\}$:
-   $$\mathbf{z}_\sigma^{\text{new}} = (1 - \sigma)\mathbf{z}_0^{\text{new}} + \sigma\boldsymbol{\epsilon}, \qquad \mathbf{v}^* = \boldsymbol{\epsilon} - \mathbf{z}_0^{\text{new}}$$
-2. Runs **one batched forward pass** of `LTXVideoTransformer3DModel` (`B = 2` or `3`) with **full `[B, 128, 4096]` T5 embeddings** (0 extra VRAM).
-3. Computes per-token squared velocity error weighted by actual spatiotemporal motion $w_{\text{motion}} \propto \|\mathbf{z}_0^{\text{new}} - \mathbf{z}_0^{\text{prev}}\|_2$ and a scale-invariant paired $t$-statistic across tokens.
-4. Produces unbiased probabilities (`50/50` at neutral, zero hardcoded positive bias, zero mechanical progress ratchet).
-
----
-
-## 4. LTX-Video 0.9.8-2B-Distilled In-Place 4-Bit NF4 & Stability Fixes
-
-| Issue / Symptom | Root Cause | Solution Implemented |
-| :--- | :--- | :--- |
-| **1. `from_single_file` + `BitsAndBytesConfig` fails on `0.9.8-distilled`** | `diffusers` `from_single_file` fails with `_no_split_modules` and `bitsandbytes__*` missing keys when loading raw `.safetensors` into `Linear4bit`. | `quantize_model_inplace_bnb()` in `neuro_ltx_backend.py`: loads `ltxv-2b-0.9.8-distilled.safetensors` on CPU, replaces `nn.Linear` (`in/out >= 512`) layer-by-layer with `bnb.nn.Linear4bit` (NF4) / `Linear8bitLt`, and streams each layer directly to CUDA (~8.0–8.5 GB total VRAM with 4-bit T5). |
-| **2. Pitch-black screen / vertical striping at 6–7 steps on `0.9.0-base`** | Double-shifted `linear_quadratic_sigmas(6)` + `mu` shift wasted 4/6 steps above $\sigma=0.97$ and jumped $-0.66 \to 0.0$ in one step. | Default to `ltxv-2b-0.9.8-distilled.safetensors` (matched 0.9.8 Transformer + 0.9.8 VAE + exact distilled sigma schedule `use_dynamic_shifting=False`), plus fixed uniform `np.linspace(1.0, min_sigma, steps)` for `--model base`. |
-| **3. Past-frame throwback & boundary seams** | Feeding 8-frame latent into 1-frame slot `z[0]` + 3-frame `torch.roll` noise loop + non-causal decoder tail artifact. | Multi-frame causal `encode_frames_to_latent`, full-window decode from `z[0]` with `last_frame_fix=True`, monotonic S³ noise seeds, and `decode_noise_scale=0.025` for distilled VAE. |
-| **4. Object frozen on `z[0]` in 1-frame I2V** | Zero noise on conditioning prefix `z[:n_cond]` glued objects to frame 0. | Added official `image_cond_noise_scale = 0.15` quadratic jitter (`+ 0.15 * noise * t_norm**2` from `pipeline_ltx_condition.py`) inside `neuro_solver_stepper.py`. |
+1. Keeps prefix frames `:n_cond` clean ($t_c = 0$) and noises generated frames `n_cond:` at $\sigma_{\text{probe}}$ (`0.725` for `0.9.8-distilled`, `0.55` for `0.9.0-base`).
+2. Evaluates `[H_stay, H_branch_1, ..., H_branch_M]` over full `[1, 128, 4096]` T5 embeddings in VRAM-safe chunks (`max_batch=4`), averaged across `n_noise_probes=2` shared noise draws $\boldsymbol{\epsilon}$ (Common Random Numbers).
+3. Computes motion-weighted paired $t$-statistics using effective spatial-temporal degrees of freedom (`n_eff = n_tok / 16.0`), eliminating neutral-scene probability jitter.
+4. Produces live video-grounded `reaction_branch_scores` (`branches`), triggers seamless `BRANCH_SWITCH` when another branch clearly dominates in the video, and routes unbiased `±reward` to `npc:` controllers.
 
 ---
 
-## 5. 24-Channel Gamepad/Keyboard WM Synthesizer & Zero-Input Equilibrium
+## 4. LTX-Video 0.9.8-2B-Distilled NF4 & `T5 ↔ VAE` Zero-OOM Architecture
 
-* **24 Bindable Channels (`ALL_GAMEPAD_CHANNELS`):** Left/Right stick half-axes (`LS_*`, `RS_*`), triggers/bumpers (`LT`, `RT`, `LB`, `RB`), D-Pad (`DPAD_*`), and buttons (`BTN_A/B/X/Y`, `L3`, `R3`, `BACK`, `START`).
-* **Orthonormal 19,200-D Standing Wave Basis (`get_canonical_concept_wm_basis_Kx5x32x120`):** Simultaneous presses (e.g., diagonals `LS_UP + LS_LEFT`) excite linear superpositions $\mathbf{W}_r^{\text{GP}} = \sum_k a_{r,k}\boldsymbol{\Phi}_{r,k}$ and recover exact mode weights.
-* **Zero-Input Equilibrium (Aconceptual):** When $\|\mathbf{W}_r\|_\infty < 10^{-4}$ (nothing pressed and `eeg_wm_gain = 0`), `select_concept_full_rank_524288d` returns empty `active_indices = []` and the spherical mean tensor of the pool, causing `neuro_engine.py` to condition on the manifest's `passive_pair` (`static_hold_desc`) instead of latching onto the last direction.
-
----
-
-## 6. Architecture & Module Map
-
-| File | Role |
+| Component / Mechanism | Implementation (`neuro_ltx_backend.py` & `video_world_server.py`) |
 | :--- | :--- |
-| **`neuro_battle_server.py`** | Immortal LTX-Video Weights Server (`localhost:6008`) supporting `--model distilled\|base` and `--quant nf4\|fp8\|int8\|bf16`. |
-| **`neuro_ltx_backend.py`** | `LTXModelBackend`, `RemoteLTXModelBackend`, `quantize_model_inplace_bnb` (in-place 4-bit NF4 for single-file `.safetensors`), distilled/base sigma schedules, and `encode_frames_to_latent`. |
-| **`neuro_controller.py`** | `SymmetricBotController`, orthonormal 19,200-D WM eigenmode synthesizer, zero-input spherical equilibrium, and QR-tangent T5 navigator. |
-| **`neuro_solver_stepper.py`** | `LatentFlowWindowStepper`: S³ wave integrator, automatic `CFG=1.0` for distilled, `image_cond_noise_scale=0.15` anchor jitter, and negative-`dt` Euler stepping. |
-| **`neuro_referee.py`** | `CoordinateFreeHistoryReferee`: 1-step batched Rectified-Flow 3D-DiT Oracle over full `[M, 128, 4096]` T5 embeddings with motion-weighted paired $t$-stat. |
-| **`neuro_engine.py`** | `UniversalLatentAutobattlerEngine`: pure-tensor multi-agent orchestrator (zero string concatenation in the loop), synaptic input latch, and multi-frame causal VAE feedback. |
-| **`neuro_run.py`** | Unified launcher with 60 Hz `SharedAmodalCognitiveEngine` BLE/LSL $\to$ VRAM bus, `SmoothRealtimeVideoPacer` (`:6002`), and Web Studio bridge (`:6007`). |
-| **`web_cloud_gateway.py` & `static/app.js`** | Unified HTTPS Web Studio (`:8080`) with Gradual WM Mixer, 24-channel HTML5 Gamepad poller, and `🎯` 1-click concept binding. |
+| **In-Place 4-Bit NF4 Quantization** | `quantize_model_inplace_bnb()` loads `ltxv-2b-0.9.8-distilled.safetensors` on CPU and streams 284 `bnb.nn.Linear4bit` (NF4) layers onto CUDA (~1.6 GB VRAM for the 2B 3D-DiT). |
+| **Automatic `T5 ↔ VAE` VRAM Swap** | `T5-XXL 4-bit` (`torch_dtype=bfloat16`) and `0.9.8 3D-VAE` are mutually exclusive in VRAM when `--allow-t5-offload` is active (default): during text encoding, `VAE` moves to CPU (~0.1s, peak `~7.0 GB` total); before any Transformer/VAE step, `T5` is evicted and `VAE` returns to CUDA (`3.27 GB` server VRAM). Zero OOM on startup and on live browser concept switches on 12 GB RTX 3060! |
+| **3D-VAE Tiling + Causal Feedback** | `vae_tile_min_px=256` enabled automatically on `<=16 GB` GPUs; `decode_noise_scale=0.025`, `last_frame_fix=True`, multi-frame causal re-encode into `local_context_latents_5d`, and `image_cond_noise_scale=0.15` quadratic anchor jitter. |
+| **Exact Distilled Sigma Schedule** | `build_distilled_sigmas(steps)` uses all 8 official sigmas `[1.0000 ... 0.4219]` at `--steps 8` and interpolates preserving both endpoints for any other step count. Optional mild CFG (`--cfg 1.5..2.0`) supported alongside fast `--cfg 1.0`. |
 
 ---
 
-## 7. Quick Start & CLI Reference
+## 5. Canonical Module Map & Ports
+
+All legacy duplicate video files (`video_render_logic.py`, `video_heterarchy_composer.py`, `neuro_video_maze_autotest.py`, `neuro_battle_server.py`, `neuro_run.py`) have been removed and unified into the canonical naming scheme matching `neuro_heterarchy_diffusion.py` and `neuro_heterarchy_musicgen.py`:
+
+| File | Port / Authkey | Role |
+| :--- | :--- | :--- |
+| **`video_world_server.py`** | `localhost:6006` (`b"video_world"`) | Immortal LTX-Video weights RPC server (`0.9.8-distilled` NF4 + `T5 ↔ VAE` auto-swap). |
+| **`neuro_heterarchy_video.py`** | `:6002` (frames) / `:6007` (ctrl) | Unified 3D-DiT runner supporting `.json` catalytic manifests, `.txt` pure-WM lores, `--init-image`, 60 Hz BLE/LSL→VRAM bus, `SmoothRealtimeVideoPacer`, and Web Studio bridge. |
+| **`neuro_ltx_backend.py`** | — | `LTXModelBackend`, `RemoteLTXModelBackend`, in-place NF4/INT8 quantization, `T5 ↔ VAE` swap, distilled/base sigma schedules. |
+| **`neuro_engine.py`** | — | `UniversalLatentAutobattlerEngine`: pure-tensor N-agent orchestrator, active-slot spherical composition, dual Catalytic / Pure-WM (Oracle-skip) modes, `set_init_image_bytes`, and NPC feedback routing. |
+| **`neuro_controller.py`** | — | `SymmetricBotController`, orthonormal 19,200-D WM eigenmode synthesizer (EEG / 24-ch Gamepad / Autonomous `npc:` replicator policy), zero-input equilibrium. |
+| **`neuro_solver_stepper.py`** | — | `LatentFlowWindowStepper`: S³ wave integrator, optional CFG on distilled, `t²` anchor jitter, AdaIN latent stabilization. |
+| **`neuro_referee.py`** | — | `CoordinateFreeHistoryReferee`: chunked multi-branch 3D-DiT Rectified-Flow Oracle (`n_noise_probes=2`, effective DoF `t-stat`). |
+| **`neuro_world.py`** | — | N-entity manifest dataclasses & JSON loader (`GameWorldManifest`, `StageSpec`, `StageEntitySlot`, `GenerativeQuestSpec`). |
+| **`web_cloud_gateway.py` & `static/`** | `:8080` (HTTPS) | Unified Web Studio UI with FreeEEG16 Web-BLE, Gradual WM Mixer (`eeg_wm_gain` × `gamepad_wm_mix`), 24-ch Gamepad poller & `🎯` concept binding. |
+
+---
+
+## 6. Quick Start & CLI Reference
 
 ```bash
-# Terminal 1: Launch Immortal Weights Server (LTX 0.9.8-2B-Distilled in 4-bit NF4)
-python3 neuro_battle_server.py --port 6008 --model distilled --quant nf4 --allow-t5-offload
+# Terminal 1: Immortal Video World Weights Server (port 6006, 0.9.8-distilled NF4, T5<->VAE swap)
+./video_world_server.sh
+# Equivalent:
+# python3 video_world_server.py --port 6006 --model distilled --quant nf4 --vae-tile-min 256 --allow-t5-offload
 
-# Terminal 2: Launch Unified Web Studio Gateway on :8080
+# Terminal 2: Unified Web Studio Gateway (:8080)
 python3 web_cloud_gateway.py --port 8080 --cert cert.pem --key key.pem --video-lore configs/mode_05_wm_control_test_arena.json
 
-# Terminal 3: Launch Continuous Real-Time 3D-DiT Engine
-# Recommended: --steps 8 (full 8-sigma distilled schedule)
-python3 neuro_run.py --mode ball --context-latents 1 --step-latents 2 --steps 8 --cfg 1.0 --stochastic 0.0 --wm-radius 0.35 --eeg-wm-gain 0.0 --gamepad-wm-mix 1.0
+# Terminal 3A: 4-Way Movement / Catalytic Control Test (default ball mode, 8 distilled steps)
+./neuro_heterarchy_video.sh
+# Equivalent:
+# python3 neuro_heterarchy_video.py --mode ball --video-port 6006 --steps 8 --cfg 1.0 --eeg-wm-gain 0.0 --gamepad-wm-mix 1.0
+
+# Terminal 3B: 1v1 Catalytic Duel vs Autonomous Adaptive NPC (e0=Human, e1=npc:AFz)
+python3 neuro_heterarchy_video.py --mode duel --steps 8 --cfg 1.5 --eeg-wm-gain 0.0 --gamepad-wm-mix 1.0
+
+# Terminal 3C: Pure Open-Loop .txt Art Stream (automatically skips 3D-DiT Oracle)
+python3 neuro_heterarchy_video.py --lore lore/video_lore_psy.txt --steps 8 --cfg 1.0 --eeg-wm-gain 1.0
+
+# Terminal 3D: Custom Starting PNG Map (e.g. Real Maze init frame)
+python3 neuro_heterarchy_video.py --manifest configs/mode_05_wm_control_test_arena.json --init-image maze_start.png --steps 8 --cfg 1.5
 ```
 
 ---
 
-## 8. Current Status & Next-Session Handoff Notes
+## 7. Current Status & Next-Session Handoff Notes
 
-### ✅ Verified Working (as of Nov 20, 2026)
-* **`0.9.8-2B-Distilled` + In-Place NF4 (`neuro_ltx_backend.py`):** Loads cleanly into 12 GB VRAM (`RTX 3060`) alongside 4-bit T5-XXL. Produces **1+ minute of razor-sharp, artifact-free video** with **zero vertical striping and zero grey washout** (`00:00–01:09` verified).
-* **Pure-Tensor Pipeline & Zero-Input Equilibrium:** `neuro_controller.py` and `neuro_engine.py` cleanly decode `up/down/left/right: 100%` on press and return to equal-weight equilibrium (`25%` each -> `passive_pair`) on release, with zero hardcoded words in Python.
-* **1-Step Rectified-Flow 3D-DiT Oracle (`neuro_referee.py`):** Runs in ~150 ms with 0 extra VRAM on full `[128, 4096]` T5 embeddings and honestly rejects mismatched / static scenes without fake progress inflation.
+### ✅ Verified Working (as of Nov 21, 2026)
+* **Zero OOM Across Full Lifecycle:** `0.9.8-2B-Distilled` NF4 + `T5 ↔ VAE` auto-swap runs stably in `3.27 GB` server VRAM during generation (`~1.8s/step` with multi-branch Oracle) and swaps cleanly without OOM when editing concepts or switching manifests live in the browser.
+* **Clean Single-Region Control & Directional Response:** `--entity-source auto` bug fixed; pressing `LS_UP/DOWN/LEFT/RIGHT` activates exclusively `e0` (`100%`) while `e1..e4` remain neutral (`33%`), visibly steering the white sphere on the grid (`00:10–00:13` UP, `00:31–00:33` DOWN).
+* **Stabilized Multi-Branch Oracle:** `P+` stays calm around `43–58%` at rest (no `3% ↔ 95%` noise spikes) and `branches` dynamically reflect real video trajectories with live `BRANCH_SWITCH` transitions.
+* **Repo Cleanup Complete:** Legacy video stack removed; canonical `video_world_server.py` (`:6006`) + `neuro_heterarchy_video.py` unified.
 
-### ⚠️ Open Engineering Issues to Address Next Session
-1. **Weak Directional Prompt Adherence in `mode_05` at `cfg=1.0` / `steps=7`:**
-   * At `steps=7`, `build_distilled_sigmas(7)` dropped the 8th sigma (`0.4219`). Always test with **`--steps 8`**.
-   * At `cfg=1.0` (no CFG, currently forced when `is_distilled=True` in `neuro_solver_stepper.py`), `0.9.8-distilled` preserves the sharp white sphere cleanly for 70s, **but weakly obeys directional text changes** on a featureless black background (no visual landmarks for optical flow).
-   * **Next experiments to run:**
-     1. Allow optional mild CFG (`--cfg 1.5..2.5`) on `distilled` in `neuro_solver_stepper.py` (remove `not is_distilled` hard override) to test whether CFG restores strong directional steering.
-     2. Compare pure-tensor `0.78 * c_emb + 0.22 * a_emb` blending vs. pure `c_emb` (`e0` alone, without blending `e1`'s static zone description into `pos_emb`, since `e1_s0` says `"waiting for the ball"` and pulls the prompt toward stillness!).
-     3. Test `0.9.8-distilled` + new RF Oracle on richer semantic/catalytic worlds (`--mode maze` / `mode_03_semantic_maze_gm.json` and `--mode ritual` / `mode_04_forest_neuro_ritual.json`) for the Crocus Expo demo (Nov 24–26).
-2. **Real EEG vs. Gamepad Basis (`neuro_controller.py`):**
-   * Current `get_canonical_concept_wm_basis_Kx5x32x120` uses synthetic sinusoids (100% exact for gamepad emulation, noisy for raw non-invasive `FreeEEG16` EEG). Next step for live EEG: replace fixed sinusoids with online-calibrated subject subspaces / physiological Gamma-vs-Beta gating (Miller et al., 2018; Chen et al., 2024) + EMG check on 70–100 Hz.
-3. **Repo Hygiene:** Remove self-signed `key.pem` from git tracking and archive legacy duplicate video stack (`video_world_server.py` / `video_render_logic.py`) once `neuro_battle_server.py` + `neuro_engine.py` is finalized.
+### 🎯 Next Steps for Next Session
+1. **Build the Real Maze World (Obstacles + Extraction + Optional NPC Guardian):**
+   * Use `--init-image` (2D orthographic maze PNG) + a clean orthographic prompt (avoid `"rolls"` + `"grid lines"`, which triggers 3D bowling-lane perspective tilt; prefer `"flat 2D top-down orthographic white dot sliding on a flat 2D dark maze map"`).
+   * Test `--cfg 1.5` vs `1.0` on `0.9.8-distilled` for crisp wall compliance and directional control.
+2. **Test Catalytic 1v1 Duels (`configs/mode_02_catalytic_duel.json`) & Ritual (`configs/mode_04_forest_neuro_ritual.json`):**
+   * Verify human (`e0=eeg:FCz`) vs autonomous adaptive NPC (`e1=npc:AFz`) and NPC-vs-NPC (`--entity-source "e0=npc:FCz,e1=npc:AFz"`).
+3. **Live `FreeEEG16` Calibration (`neuro_controller.py`):**
+   * Replace synthetic sinusoid basis with online-calibrated subject subspaces / physiological Gamma-vs-Beta gating (Miller et al., 2018; Chen et al., 2024) + EMG artifact check on 70–100 Hz.
+4. **Minor Repo Hygiene:**
+   * Keep `key.pem` / `cert.pem` out of git and LLM context packs; keep `neuro_genesis_engine.py` until `neuro_heterarchy_musicgen.py` and `neuro_deterministic_reproducer.py` drop its import.
 
 ---
 
-## 9. Comprehensive Scientific Bibliography & DOIs
+## 8. Comprehensive Scientific Bibliography & DOIs
 
-1. <a id="ref-1"></a>**McCulloch, W. S. (1945).** *A heterarchy of values determined by the topology of nervous nets.* The Bulletin of Mathematical Biophysics, 7(2), 89–93. [https://doi.org/10.1007/BF02478259](https://doi.org/10.1007/BF02478259)
-2. <a id="ref-2"></a>**Hawkins, J., Leadholm, N., & Clay, V. (2025/2026).** *The Thousand Brains Theory 2.0: An Extension for the Long-Range Connections of the Neocortical Heterarchy.* arXiv:2507.05888. [https://doi.org/10.48550/arXiv.2507.05888](https://doi.org/10.48550/arXiv.2507.05888)
-3. <a id="ref-3"></a>**Miller, E. K., Lundqvist, M., & Bastos, A. M. (2018).** *Working Memory 2.0.* Neuron, 100(2), 463–475. [https://doi.org/10.1016/j.neuron.2018.09.023](https://doi.org/10.1016/j.neuron.2018.09.023)
-4. <a id="ref-4"></a>**Fan, Y., Wang, M., Ding, N., & Luo, H. (2024).** *Two-dimensional neural geometry underpins hierarchical organization of sequence in human working memory.* Nature Human Behaviour, 8, 2150–2163. [https://doi.org/10.1038/s41562-024-02047-8](https://doi.org/10.1038/s41562-024-02047-8)
-5. <a id="ref-5"></a>**Chen, J., Zhang, C., Hu, P., Min, B., & Wang, L. (2024).** *Flexible control of sequence working memory in the macaque frontal cortex.* Neuron, 112(20), 3502–3514. [https://doi.org/10.1016/j.neuron.2024.07.024](https://doi.org/10.1016/j.neuron.2024.07.024)
-6. <a id="ref-6"></a>**Feigenbaum, M. J. (1978).** *Quantitative universality for a class of nonlinear transformations.* Journal of Statistical Physics, 19(1), 25–52. [https://doi.org/10.1007/BF01020332](https://doi.org/10.1007/BF01020332)
-7. <a id="ref-7"></a>**May, R. M. (1976).** *Simple mathematical models with very complicated dynamics.* Nature, 261(5560), 459–467. [https://doi.org/10.1038/261459a0](https://doi.org/10.1038/261459a0)
-8. <a id="ref-8"></a>**Kauffman, S. A. (1986).** *Autocatalytic sets of proteins.* Journal of Theoretical Biology, 119(1), 1–24. [https://doi.org/10.1016/0022-5193(86)90047-9](https://doi.org/10.1016/0022-5193(86)90047-9)
-9. <a id="ref-9"></a>**Soloveichik, D., Seelig, G., & Winfree, E. (2010).** *DNA as a universal substrate for chemical kinetics.* PNAS, 107(12), 5393–5398. [https://doi.org/10.1073/pnas.0909380107](https://doi.org/10.1073/pnas.0909380107)
-10. <a id="ref-10"></a>**Bruña, R., Maestú, F., & Pereda, E. (2018).** *Phase Locking Value revisited: teaching new tricks to an old dog.* Journal of Neural Engineering, 15(5), 056011. [https://doi.org/10.1088/1741-2552/aacfe4](https://doi.org/10.1088/1741-2552/aacfe4)
-11. <a id="ref-11"></a>**Dickey, C. W., et al. (2022).** *Widespread ripples synchronize human cortical activity during sleep, waking, and memory recall.* PNAS, 119(28), e2107797119. [https://doi.org/10.1073/pnas.2107797119](https://doi.org/10.1073/pnas.2107797119)
-12. <a id="ref-12"></a>**HaCohen, Y., et al. (2024).** *LTX-Video: Realtime Video Latent Diffusion.* arXiv:2501.00103. [https://doi.org/10.48550/arXiv.2501.00103](https://doi.org/10.48550/arXiv.2501.00103)
-13. <a id="ref-13"></a>**Yang, C., et al. (2025).** *Reasoning via Video: The First Evaluation of Video Models’ Reasoning Abilities through Maze-Solving Tasks (VR-Bench).* arXiv:2511.15065. [https://doi.org/10.48550/arXiv.2511.15065](https://doi.org/10.48550/arXiv.2511.15065)
-14. <a id="ref-14"></a>**Mongillo, G., Barak, O., & Tsodyks, M. (2008).** *Synaptic Theory of Working Memory.* Science, 319(5869), 1543–1546. [https://doi.org/10.1126/science.1150769](https://doi.org/10.1126/science.1150769)
+1. **McCulloch, W. S. (1945).** *A heterarchy of values determined by the topology of nervous nets.* Bull. Math. Biophys., 7(2), 89–93. [https://doi.org/10.1007/BF02478259](https://doi.org/10.1007/BF02478259)
+2. **Hawkins, J., Leadholm, N., & Clay, V. (2025/2026).** *The Thousand Brains Theory 2.0: An Extension for the Long-Range Connections of the Neocortical Heterarchy.* arXiv:2507.05888. [https://doi.org/10.48550/arXiv.2507.05888](https://doi.org/10.48550/arXiv.2507.05888)
+3. **Miller, E. K., Lundqvist, M., & Bastos, A. M. (2018).** *Working Memory 2.0.* Neuron, 100(2), 463–475. [https://doi.org/10.1016/j.neuron.2018.09.023](https://doi.org/10.1016/j.neuron.2018.09.023)
+4. **Fan, Y., Wang, M., Ding, N., & Luo, H. (2024).** *Two-dimensional neural geometry underpins hierarchical organization of sequence in human working memory.* Nature Human Behaviour, 8, 2150–2163. [https://doi.org/10.1038/s41562-024-02047-8](https://doi.org/10.1038/s41562-024-02047-8)
+5. **Chen, J., Zhang, C., Hu, P., Min, B., & Wang, L. (2024).** *Flexible control of sequence working memory in the macaque frontal cortex.* Neuron, 112(20), 3502–3514. [https://doi.org/10.1016/j.neuron.2024.07.024](https://doi.org/10.1016/j.neuron.2024.07.024)
+6. **Feigenbaum, M. J. (1978).** *Quantitative universality for a class of nonlinear transformations.* J. Stat. Phys., 19(1), 25–52. [https://doi.org/10.1007/BF01020332](https://doi.org/10.1007/BF01020332)
+7. **Kauffman, S. A. (1986).** *Autocatalytic sets of proteins.* J. Theor. Biol., 119(1), 1–24. [https://doi.org/10.1016/0022-5193(86)90047-9](https://doi.org/10.1016/0022-5193(86)90047-9)
+8. **Bruña, R., Maestú, F., & Pereda, E. (2018).** *Phase Locking Value revisited: teaching new tricks to an old dog.* J. Neural Eng., 15(5), 056011. [https://doi.org/10.1088/1741-2552/aacfe4](https://doi.org/10.1088/1741-2552/aacfe4)
+9. **Dickey, C. W., et al. (2022).** *Widespread ripples synchronize human cortical activity during sleep, waking, and memory recall.* PNAS, 119(28), e2107797119. [https://doi.org/10.1073/pnas.2107797119](https://doi.org/10.1073/pnas.2107797119)
+10. **HaCohen, Y., et al. (2024).** *LTX-Video: Realtime Video Latent Diffusion.* arXiv:2501.00103. [https://doi.org/10.48550/arXiv.2501.00103](https://doi.org/10.48550/arXiv.2501.00103)
+11. **Yang, C., et al. (2025).** *Reasoning via Video: The First Evaluation of Video Models’ Reasoning Abilities through Maze-Solving Tasks (VR-Bench).* arXiv:2511.15065. [https://doi.org/10.48550/arXiv.2511.15065](https://doi.org/10.48550/arXiv.2511.15065)
+12. **Mongillo, G., Barak, O., & Tsodyks, M. (2008).** *Synaptic Theory of Working Memory.* Science, 319(5869), 1543–1546. [https://doi.org/10.1126/science.1150769](https://doi.org/10.1126/science.1150769)
 
