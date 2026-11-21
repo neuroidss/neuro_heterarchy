@@ -1,0 +1,104 @@
+{
+  "world_name": "Mode_02_Catalytic_1v1_Duel_With_Autonomous_NPC",
+  "arena_context_desc": "high speed physics simulation on a pure pitch black obsidian arena with two distinct glowing elemental spheres facing each other on left and right",
+  "static_hold_desc": "two large stationary glowing elemental spheres facing each other quietly across a pitch black void without any attacks",
+  "negative_desc": "text, letters, watermark, logo, human, face, white background, blurry, disappearing both spheres",
+  "archetypes": {
+    "p_pyro_melee": {
+      "element_tag": "PYRO",
+      "role_tag": "MELEE",
+      "display_name": "P:Pyro-Melee",
+      "essence_desc": "the left crimson-orange fire sphere",
+      "action_desc": "charges rightward and sweeps a blazing fire blade into the right sphere"
+    },
+    "p_hydro_ranged": {
+      "element_tag": "HYDR",
+      "role_tag": "RANGED",
+      "display_name": "P:Hydro-Ranged",
+      "essence_desc": "the left deep-blue water sphere",
+      "action_desc": "blasts a high-pressure stream of blue water bolts across the arena into the right sphere"
+    },
+    "p_electro_mage": {
+      "element_tag": "ELEC",
+      "role_tag": "MAGIC",
+      "display_name": "P:Electro-Mage",
+      "essence_desc": "the left violet-yellow electric sphere",
+      "action_desc": "channels an unbroken crackling lightning beam directly onto the right sphere"
+    },
+    "p_cryo_melee": {
+      "element_tag": "CRYO",
+      "role_tag": "MELEE",
+      "display_name": "P:Cryo-Melee",
+      "essence_desc": "the left cyan-white frost sphere",
+      "action_desc": "lunges rightward slashing a crystalline ice blade into the right sphere"
+    },
+    "npc_hydro_melee": {
+      "element_tag": "HYDR",
+      "role_tag": "MELEE",
+      "display_name": "NPC:Hydro-Melee",
+      "essence_desc": "the right deep-blue water sphere",
+      "action_desc": "dashes leftward lashing a swirling water whip directly into the left sphere"
+    },
+    "npc_geo_ranged": {
+      "element_tag": "GEO",
+      "role_tag": "RANGED",
+      "display_name": "NPC:Geo-Ranged",
+      "essence_desc": "the right golden-emerald crystal sphere",
+      "action_desc": "hurls a barrage of glowing emerald rock projectiles leftward into the left sphere"
+    },
+    "npc_pyro_mage": {
+      "element_tag": "PYRO",
+      "role_tag": "MAGIC",
+      "display_name": "NPC:Pyro-Mage",
+      "essence_desc": "the right crimson-orange fire sphere",
+      "action_desc": "ignites a roaring fire pillar directly over the left sphere"
+    },
+    "npc_cryo_ranged": {
+      "element_tag": "CRYO",
+      "role_tag": "RANGED",
+      "display_name": "NPC:Cryo-Ranged",
+      "essence_desc": "the right cyan-white frost sphere",
+      "action_desc": "fires a volley of piercing ice lances leftward into the left sphere"
+    }
+  },
+  "stages": [
+    {
+      "global_stage": 1,
+      "stage_title": "Branch_Player_Overwhelms_NPC",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["p_pyro_melee", "p_hydro_ranged", "p_electro_mage", "p_cryo_melee"]},
+        {"slot_id": "e1", "control_binding": "npc:AFz", "party_size": 1, "allowed_pool": ["npc_hydro_melee", "npc_geo_ranged", "npc_pyro_mage", "npc_cryo_ranged"]}
+      ],
+      "quest": {
+        "active_slot_idx": 1,
+        "catalyst_slot_idx": 0,
+        "driver_tag": "CAT(e0->e1)",
+        "reaction_formula": "e0[PLAYER] + e1[NPC] --> e0[INV] + e1[SHATTERED]",
+        "ongoing_hypothesis": "both elemental spheres clash evenly in the center of the black arena",
+        "completed_hypothesis": "the left sphere's elemental attack overwhelms and shatters the right sphere in bright sparks",
+        "failed_hypothesis": "the right sphere's elemental attack overwhelms and shatters the left sphere in bright sparks",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    },
+    {
+      "global_stage": 2,
+      "stage_title": "Branch_NPC_Overwhelms_Player",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["p_pyro_melee", "p_hydro_ranged", "p_electro_mage", "p_cryo_melee"]},
+        {"slot_id": "e1", "control_binding": "npc:AFz", "party_size": 1, "allowed_pool": ["npc_hydro_melee", "npc_geo_ranged", "npc_pyro_mage", "npc_cryo_ranged"]}
+      ],
+      "quest": {
+        "active_slot_idx": 0,
+        "catalyst_slot_idx": 1,
+        "driver_tag": "CAT(e1->e0)",
+        "reaction_formula": "e1[NPC] + e0[PLAYER] --> e1[INV] + e0[SHATTERED]",
+        "ongoing_hypothesis": "both elemental spheres clash evenly in the center of the black arena",
+        "completed_hypothesis": "the right sphere's elemental attack overwhelms and shatters the left sphere in bright sparks",
+        "failed_hypothesis": "the left sphere's elemental attack overwhelms and shatters the right sphere in bright sparks",
+        "completion_gain": 3.5,
+        "entropy_drain": 0.2
+      }
+    }
+  ]
+}

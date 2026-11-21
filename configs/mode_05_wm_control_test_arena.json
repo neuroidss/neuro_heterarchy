@@ -1,15 +1,15 @@
 {
   "world_name": "Mode_05_Deprivation_White_Ball_4Way_WM_Control",
-  "arena_context_desc": "stationary top-down view of a solid black frame",
-  "static_hold_desc": "stationary white ball in the center of a solid black frame",
-  "negative_desc": "walls, floor, room, blocks, bricks, grey surfaces, 3d architecture, text, watermark, blurry, ball leaving frame",
+  "arena_context_desc": "fixed overhead top-down camera view of a flat matte black floor with faint dark grey grid lines and a single small bright glowing white sphere",
+  "static_hold_desc": "fixed overhead top-down view of a single small bright glowing white sphere resting completely motionless on a flat matte black floor with faint dark grey grid lines",
+  "negative_desc": "camera pan, camera zoom, tilted angle, table, lamp, walls, room, 3d objects, text, watermark, blurry, multiple balls, ball disappearing",
   "archetypes": {
     "e0_up": {
       "element_tag": "FCz_UP",
       "role_tag": "WM_AGENT",
       "display_name": "e0:UP",
-      "essence_desc": "single white ball inside the black frame",
-      "action_desc": "moving straight up toward the top edge",
+      "essence_desc": "the single small bright white sphere",
+      "action_desc": "rolls rapidly straight upward toward the top edge of the static black grid frame",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
@@ -17,8 +17,8 @@
       "element_tag": "FCz_DOWN",
       "role_tag": "WM_AGENT",
       "display_name": "e0:DOWN",
-      "essence_desc": "single white ball inside the black frame",
-      "action_desc": "moving straight down toward the bottom edge",
+      "essence_desc": "the single small bright white sphere",
+      "action_desc": "rolls rapidly straight downward toward the bottom edge of the static black grid frame",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
@@ -26,8 +26,8 @@
       "element_tag": "FCz_LEFT",
       "role_tag": "WM_AGENT",
       "display_name": "e0:LEFT",
-      "essence_desc": "single white ball inside the black frame",
-      "action_desc": "moving straight left toward the left edge",
+      "essence_desc": "the single small bright white sphere",
+      "action_desc": "rolls rapidly straight leftward toward the left edge of the static black grid frame",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
@@ -35,26 +35,26 @@
       "element_tag": "FCz_RIGHT",
       "role_tag": "WM_AGENT",
       "display_name": "e0:RIGHT",
-      "essence_desc": "single white ball inside the black frame",
-      "action_desc": "moving straight right toward the right edge",
+      "essence_desc": "the single small bright white sphere",
+      "action_desc": "rolls rapidly straight rightward toward the right edge of the static black grid frame",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
     "e1_s0": {
       "element_tag": "AFz_0",
       "role_tag": "WM_AGENT",
-      "display_name": "Top-Zone:Idle",
-      "essence_desc": "clear black space at the top edge",
-      "action_desc": "waiting for the ball",
+      "display_name": "Top-Zone:Open",
+      "essence_desc": "open top corridor of the dark grid",
+      "action_desc": "glows faintly cyan along the top border",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
     "e1_s1": {
       "element_tag": "AFz_1",
       "role_tag": "WM_AGENT",
-      "display_name": "Top-Zone:Near",
-      "essence_desc": "upper half of the black frame",
-      "action_desc": "receiving the white ball",
+      "display_name": "Top-Zone:Active",
+      "essence_desc": "upper region of the dark grid",
+      "action_desc": "pulses softly as the white sphere approaches the top border",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
@@ -62,26 +62,26 @@
       "element_tag": "AFz_2",
       "role_tag": "WM_AGENT",
       "display_name": "Top-Zone:Reached",
-      "essence_desc": "top margin of the black frame",
-      "action_desc": "holding the white ball inside the upper boundary",
+      "essence_desc": "top border beacon",
+      "action_desc": "lights up bright emerald as the white sphere reaches the top edge",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
     "e2_s0": {
       "element_tag": "F3_0",
       "role_tag": "WM_AGENT",
-      "display_name": "Bottom-Zone:Idle",
-      "essence_desc": "clear black space at the bottom edge",
-      "action_desc": "waiting for the ball",
+      "display_name": "Bottom-Zone:Open",
+      "essence_desc": "open bottom corridor of the dark grid",
+      "action_desc": "glows faintly cyan along the bottom border",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
     "e2_s1": {
       "element_tag": "F3_1",
       "role_tag": "WM_AGENT",
-      "display_name": "Bottom-Zone:Near",
-      "essence_desc": "lower half of the black frame",
-      "action_desc": "receiving the white ball",
+      "display_name": "Bottom-Zone:Active",
+      "essence_desc": "lower region of the dark grid",
+      "action_desc": "pulses softly as the white sphere approaches the bottom border",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
@@ -89,26 +89,26 @@
       "element_tag": "F3_2",
       "role_tag": "WM_AGENT",
       "display_name": "Bottom-Zone:Reached",
-      "essence_desc": "bottom margin of the black frame",
-      "action_desc": "holding the white ball inside the lower boundary",
+      "essence_desc": "bottom border beacon",
+      "action_desc": "lights up bright emerald as the white sphere reaches the bottom edge",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
     "e3_s0": {
       "element_tag": "F4_0",
       "role_tag": "WM_AGENT",
-      "display_name": "Left-Zone:Idle",
-      "essence_desc": "clear black space at the left edge",
-      "action_desc": "waiting for the ball",
+      "display_name": "Left-Zone:Open",
+      "essence_desc": "open left corridor of the dark grid",
+      "action_desc": "glows faintly cyan along the left border",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
     "e3_s1": {
       "element_tag": "F4_1",
       "role_tag": "WM_AGENT",
-      "display_name": "Left-Zone:Near",
-      "essence_desc": "left half of the black frame",
-      "action_desc": "receiving the white ball",
+      "display_name": "Left-Zone:Active",
+      "essence_desc": "left region of the dark grid",
+      "action_desc": "pulses softly as the white sphere approaches the left border",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
@@ -116,26 +116,26 @@
       "element_tag": "F4_2",
       "role_tag": "WM_AGENT",
       "display_name": "Left-Zone:Reached",
-      "essence_desc": "left margin of the black frame",
-      "action_desc": "holding the white ball inside the left boundary",
+      "essence_desc": "left border beacon",
+      "action_desc": "lights up bright emerald as the white sphere reaches the left edge",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
     "e4_s0": {
       "element_tag": "Fpz_0",
       "role_tag": "WM_AGENT",
-      "display_name": "Right-Zone:Idle",
-      "essence_desc": "clear black space at the right edge",
-      "action_desc": "waiting for the ball",
+      "display_name": "Right-Zone:Open",
+      "essence_desc": "open right corridor of the dark grid",
+      "action_desc": "glows faintly cyan along the right border",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
     "e4_s1": {
       "element_tag": "Fpz_1",
       "role_tag": "WM_AGENT",
-      "display_name": "Right-Zone:Near",
-      "essence_desc": "right half of the black frame",
-      "action_desc": "receiving the white ball",
+      "display_name": "Right-Zone:Active",
+      "essence_desc": "right region of the dark grid",
+      "action_desc": "pulses softly as the white sphere approaches the right border",
       "defense_desc": "",
       "impact_effect_desc": ""
     },
@@ -143,8 +143,8 @@
       "element_tag": "Fpz_2",
       "role_tag": "WM_AGENT",
       "display_name": "Right-Zone:Reached",
-      "essence_desc": "right margin of the black frame",
-      "action_desc": "holding the white ball inside the right boundary",
+      "essence_desc": "right border beacon",
+      "action_desc": "lights up bright emerald as the white sphere reaches the right edge",
       "defense_desc": "",
       "impact_effect_desc": ""
     }
@@ -152,7 +152,7 @@
   "stages": [
     {
       "global_stage": 1,
-      "stage_title": "Test_UP",
+      "stage_title": "Branch_UP",
       "entities": [
         {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_up", "e0_down", "e0_left", "e0_right"]},
         {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
@@ -165,18 +165,18 @@
         "catalyst_slot_idx": 0,
         "driver_tag": "MOVE_UP(e0->e1)",
         "reaction_formula": "e0[FCz] --> UP",
-        "ongoing_hypothesis": "white ball in the lower or middle area of the black frame",
-        "completed_hypothesis": "single white ball moving straight up toward the top edge",
-        "failed_hypothesis": "single white ball moving straight down toward the bottom edge",
+        "ongoing_hypothesis": "white sphere motionless on the dark grid",
+        "completed_hypothesis": "the single small bright white sphere rolls rapidly straight upward toward the top edge of the static black grid frame",
+        "failed_hypothesis": "the single small bright white sphere rolls rapidly straight downward toward the bottom edge of the static black grid frame",
         "completion_gain": 3.5,
         "entropy_drain": 0.1
       }
     },
     {
       "global_stage": 2,
-      "stage_title": "Test_DOWN",
+      "stage_title": "Branch_DOWN",
       "entities": [
-        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_down", "e0_up", "e0_left", "e0_right"]},
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_up", "e0_down", "e0_left", "e0_right"]},
         {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
         {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
         {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s0", "e3_s1", "e3_s2"]},
@@ -187,18 +187,18 @@
         "catalyst_slot_idx": 0,
         "driver_tag": "MOVE_DOWN(e0->e2)",
         "reaction_formula": "e0[FCz] --> DOWN",
-        "ongoing_hypothesis": "white ball in the upper or middle area of the black frame",
-        "completed_hypothesis": "single white ball moving straight down toward the bottom edge",
-        "failed_hypothesis": "single white ball moving straight up toward the top edge",
+        "ongoing_hypothesis": "white sphere motionless on the dark grid",
+        "completed_hypothesis": "the single small bright white sphere rolls rapidly straight downward toward the bottom edge of the static black grid frame",
+        "failed_hypothesis": "the single small bright white sphere rolls rapidly straight upward toward the top edge of the static black grid frame",
         "completion_gain": 3.5,
         "entropy_drain": 0.1
       }
     },
     {
       "global_stage": 3,
-      "stage_title": "Test_LEFT",
+      "stage_title": "Branch_LEFT",
       "entities": [
-        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_left", "e0_right", "e0_up", "e0_down"]},
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_up", "e0_down", "e0_left", "e0_right"]},
         {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
         {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
         {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s0", "e3_s1", "e3_s2"]},
@@ -209,18 +209,18 @@
         "catalyst_slot_idx": 0,
         "driver_tag": "MOVE_LEFT(e0->e3)",
         "reaction_formula": "e0[FCz] --> LEFT",
-        "ongoing_hypothesis": "white ball in the right or middle area of the black frame",
-        "completed_hypothesis": "single white ball moving straight left toward the left edge",
-        "failed_hypothesis": "single white ball moving straight right toward the right edge",
+        "ongoing_hypothesis": "white sphere motionless on the dark grid",
+        "completed_hypothesis": "the single small bright white sphere rolls rapidly straight leftward toward the left edge of the static black grid frame",
+        "failed_hypothesis": "the single small bright white sphere rolls rapidly straight rightward toward the right edge of the static black grid frame",
         "completion_gain": 3.5,
         "entropy_drain": 0.1
       }
     },
     {
       "global_stage": 4,
-      "stage_title": "Test_RIGHT",
+      "stage_title": "Branch_RIGHT",
       "entities": [
-        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_right", "e0_left", "e0_up", "e0_down"]},
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_up", "e0_down", "e0_left", "e0_right"]},
         {"slot_id": "e1", "control_binding": "eeg:AFz", "party_size": 1, "allowed_pool": ["e1_s0", "e1_s1", "e1_s2"]},
         {"slot_id": "e2", "control_binding": "eeg:F3",  "party_size": 1, "allowed_pool": ["e2_s0", "e2_s1", "e2_s2"]},
         {"slot_id": "e3", "control_binding": "eeg:F4",  "party_size": 1, "allowed_pool": ["e3_s0", "e3_s1", "e3_s2"]},
@@ -231,9 +231,9 @@
         "catalyst_slot_idx": 0,
         "driver_tag": "MOVE_RIGHT(e0->e4)",
         "reaction_formula": "e0[FCz] --> RIGHT",
-        "ongoing_hypothesis": "white ball in the left or middle area of the black frame",
-        "completed_hypothesis": "single white ball moving straight right toward the right edge",
-        "failed_hypothesis": "single white ball moving straight left toward the left edge",
+        "ongoing_hypothesis": "white sphere motionless on the dark grid",
+        "completed_hypothesis": "the single small bright white sphere rolls rapidly straight rightward toward the right edge of the static black grid frame",
+        "failed_hypothesis": "the single small bright white sphere rolls rapidly straight leftward toward the left edge of the static black grid frame",
         "completion_gain": 3.5,
         "entropy_drain": 0.1
       }
