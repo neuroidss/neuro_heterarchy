@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 neuro_controller.py — 96,000-D Контроллер Рабочей Памяти (Аконцептуальный: ЭЭГ × Геймпад × NPC-Агенты)
+С Тета-Гамма мультиплексированием нескольких концептов в ортогональные токен-слоты [1, 128, 4096].
 """
 
 from __future__ import annotations
@@ -37,6 +38,105 @@ DEFAULT_REGION_BINDINGS = {
 }
 
 _CANONICAL_WM_BASIS_CACHE: dict[tuple[int, int, torch.device], torch.Tensor] = {}
+
+
+@torch.no_grad()
+def multiplex_t5_concept_slots(
+    embeds_list: list[torch.Tensor],
+    masks_list: list[torch.Tensor] | None = None,
+    weights: list[float] | None = None,
+    max_len: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Тета-гамма мультиплексирование M концептов в непересекающиеся слоты [1, 128, 4096].
+    В LTX-Video attn2 кросс-внимание не использует позиционный RoPE для текста (image_rotary_emb=None),
+    поэтому упаковка активных токенов каждого концепта в отдельные слоты сохраняет 100% резкость
+    и позволяет 3D-DiT органично соединять несколько концептов в одной сцене без размытия в муть.
+    """
+    if not embeds_list:
+        raise ValueError("multiplex_t5_concept_slots requires at least one embedding")
+
+    ref_emb = embeds_list[0]
+    dev = ref_emb.device
+    orig_dtype = ref_emb.dtype
+    seq_len = int(ref_emb.shape[1]) if ref_emb.ndim == 3 else int(max_len)
+    dim = int(ref_emb.shape[-1])
+
+    if masks_list is None or len(masks_list) != len(embeds_list):
+        inferred_masks = []
+        for e in embeds_list:
+            e2 = e[0].float()
+            diff = torch.norm(e2 - e2[-1:], p=2, dim=-1)
+            m = diff > 1e-3
+            if not bool(m.any().item()):
+                m[0] = True
+            inferred_masks.append(m.unsqueeze(0))
+        masks_list = inferred_masks
+
+    if len(embeds_list) == 1:
+        return embeds_list[0], masks_list[0]
+
+    w_vals = (
+        [float(w) for w in weights]
+        if (weights is not None and len(weights) == len(embeds_list))
+        else [1.0] * len(embeds_list)
+    )
+    w_max = max(max(w_vals), 1e-6)
+
+    content_slices: list[tuple[torch.Tensor, float]] = []
+    eos_token_vec: torch.Tensor | None = None
+    pad_token_vec: torch.Tensor = ref_emb[0, -1:].float().clone()
+
+    for emb_i, msk_i, w_i in zip(embeds_list, masks_list, w_vals):
+        e_2d = emb_i[0].to(device=dev, dtype=torch.float32)
+        m_1d = msk_i[0].to(device=dev, dtype=torch.bool)
+        active_idx = torch.nonzero(m_1d, as_tuple=False).squeeze(-1)
+        n_act = int(active_idx.numel())
+        if n_act == 0:
+            continue
+        if eos_token_vec is None:
+            eos_token_vec = e_2d[active_idx[-1] : active_idx[-1] + 1].clone()
+        # Отделяем хвостовой </s>, оставляя чистые контентные токены концепта:
+        n_content = max(0, n_act - 1)
+        if n_content > 0:
+            c_idx = active_idx[:n_content]
+            content_slices.append((e_2d[c_idx], w_i))
+
+    if not content_slices:
+        return embeds_list[0], masks_list[0]
+
+    m_cnt = len(content_slices)
+    usable_len = max(1, seq_len - 1)
+    total_raw = sum(s[0].shape[0] for s in content_slices)
+
+    out_emb = pad_token_vec.expand(seq_len, dim).clone()
+    out_msk = torch.zeros((seq_len,), device=dev, dtype=torch.bool)
+
+    cursor = 0
+    for tok_mat, w_i in content_slices:
+        if cursor >= usable_len:
+            break
+        remaining_slots = usable_len - cursor
+        if total_raw <= usable_len:
+            take = min(tok_mat.shape[0], remaining_slots)
+        else:
+            fair_cap = max(2, usable_len // m_cnt)
+            take = min(tok_mat.shape[0], fair_cap, remaining_slots)
+        if take <= 0:
+            continue
+
+        # Мягкая иерархическая модуляция Value (0.72..1.0), сохраняющая все токены на многообразии T5:
+        rel_w = float(max(0.0, min(1.0, w_i / w_max)))
+        gain = 0.72 + 0.28 * rel_w
+        out_emb[cursor : cursor + take] = tok_mat[:take] * gain
+        out_msk[cursor : cursor + take] = True
+        cursor += take
+
+    if eos_token_vec is not None and cursor < seq_len:
+        out_emb[cursor : cursor + 1] = eos_token_vec
+        out_msk[cursor] = True
+
+    return out_emb.unsqueeze(0).to(orig_dtype), out_msk.unsqueeze(0)
 
 
 @torch.no_grad()
@@ -180,18 +280,12 @@ class SymmetricBotController:
 
     @torch.no_grad()
     def observe_oracle_feedback(self, reward_scalar: float):
-        """
-        Универсальная аконцептуальная обратная связь для автономного NPC-агента:
-        reward > 0 усиливает сработавшую моду WM, reward < 0 ослабляет её,
-        вынуждая NPC исследовать другие концепты своего пула.
-        """
         if not self.is_npc_binding() or self.npc_logits_K is None:
             return
         k_len = self.npc_logits_K.numel()
         if 0 <= self.last_chosen_idx < k_len:
             r_clamped = float(max(-1.0, min(1.0, reward_scalar)))
             self.npc_logits_K[self.last_chosen_idx] += 0.65 * r_clamped
-            # Мягкий гомеостаз, чтобы NPC не залипал навсегда при смене тактики оппонента:
             self.npc_logits_K.mul_(0.92)
             self.npc_logits_K.clamp_(-3.5, 3.5)
 
@@ -205,7 +299,7 @@ class SymmetricBotController:
         reg_key_up = reg_name.upper()
         eff_t = float(self.attempt_num) + float(sub_step_frac)
 
-        # 1. Автономный NPC-агент: синтезирует 19,200-D волну WM из своей политики над собственными модами
+        # 1. Автономный NPC-агент
         if self.is_npc_binding():
             K_safe = max(1, int(self.pool_size_hint))
             if (
@@ -216,7 +310,6 @@ class SymmetricBotController:
                 self.npc_logits_K = torch.zeros(K_safe, device=device, dtype=torch.float32)
 
             k_grid = torch.arange(K_safe, device=device, dtype=torch.float32)
-            # Детерминированная фазовая развёртка исследования (чтобы NPC пробовал разные моды при застое)
             explore_wave = 0.45 * torch.sin(
                 eff_t * 0.55 + k_grid * (2.0 * math.pi / float(K_safe)) + reg_idx * 0.9
             )
@@ -373,12 +466,22 @@ class SymmetricBotController:
         device: torch.device,
         current_state_id: str | None = None,
         catalyst_field_128x4096: torch.Tensor | None = None,
-    ) -> tuple[str, str, torch.Tensor, dict[str, float], list[int]]:
+        candidate_masks_Kx128: torch.Tensor | None = None,
+    ) -> tuple[str, str, torch.Tensor, torch.Tensor, dict[str, float], list[int]]:
         K = len(pool_ids)
         self.pool_size_hint = max(1, K)
+        if candidate_masks_Kx128 is None:
+            fallback_m = torch.ones(
+                (max(1, K), candidate_embeds_Kx128x4096.shape[1]),
+                device=device,
+                dtype=torch.bool,
+            )
+        else:
+            fallback_m = candidate_masks_Kx128.to(device=device, dtype=torch.bool)
+
         if K == 0:
             self.last_chosen_idx = -1
-            return "", "", candidate_embeds_Kx128x4096[:1], {}, []
+            return "", "", candidate_embeds_Kx128x4096[:1], fallback_m[:1], {}, []
 
         reg_idx, _, _, _ = self._get_region_specs()
         self.extract_whitened_wm_modes_128x64(device, sub_step_frac=0.0)
@@ -390,23 +493,20 @@ class SymmetricBotController:
             else torch.zeros((1, 19200), device=device, dtype=torch.float32)
         )
 
-        # Нулевой сигнал рабочей памяти -> равновесное среднее пула и пустой список активных индексов
+        # Нулевой сигнал рабочей памяти -> равновесное состояние (обрабатывается движком без рывка к строке #0)
         if float(wm_reg_19200.abs().max().item()) < 1e-4:
             self.last_chosen_idx = -1
-            eq_base = bank_float.mean(dim=0, keepdim=True)
-            ref_norms = torch.norm(bank_float[0:1], p=2, dim=-1, keepdim=True).clamp(min=1e-4)
-            eq_base = F.normalize(eq_base, p=2, dim=-1) * ref_norms
             eq_pct = round(100.0 / float(K), 1)
             probs_dict = {pool_ids[i]: eq_pct for i in range(K)}
-            return "", "", eq_base, probs_dict, []
+            return "", "", bank_float[0:1], fallback_m[0:1], probs_dict, []
 
         if K == 1:
             self.last_chosen_idx = 0
             only_id = pool_ids[0]
             steered = self.steer_semantic_probe_full_rank(
-                bank_float[0:1], device=device
+                bank_float[0:1], device=device, attention_mask_1x128=fallback_m[0:1]
             )
-            return only_id, only_id, steered, {only_id: 100.0}, [0]
+            return only_id, only_id, steered, fallback_m[0:1], {only_id: 100.0}, [0]
 
         basis_Kx19200 = get_canonical_concept_wm_basis_Kx5x32x120(
             K, reg_idx, device
@@ -428,9 +528,10 @@ class SymmetricBotController:
             for idx in range(K)
         }
 
+        # Разрешаем до 6 одновременно активных концептов (гамма-субциклы внутри тета-цикла региона):
         active_indices = [
-            idx for idx in choice_order if float(probs_K[idx].item()) >= 0.18
-        ]
+            idx for idx in choice_order if float(probs_K[idx].item()) >= 0.12
+        ][:6]
         if not active_indices:
             active_indices = [choice_order[0]]
 
@@ -438,23 +539,20 @@ class SymmetricBotController:
 
         if len(active_indices) == 1:
             top_idx = active_indices[0]
-            superposed_base = bank_float[top_idx : top_idx + 1]
+            composed_base = bank_float[top_idx : top_idx + 1]
+            composed_mask = fallback_m[top_idx : top_idx + 1]
             composite_target_id = pool_ids[top_idx]
         else:
-            sub_probs = probs_K[active_indices]
-            sub_probs = sub_probs / sub_probs.sum().clamp(min=1e-6)
-            weighted_sum = torch.sum(
-                bank_float[active_indices] * sub_probs.view(-1, 1, 1),
-                dim=0,
-                keepdim=True,
+            # ТЕТА-ГАММА МУЛЬТИПЛЕКСИРОВАНИЕ В ОРТОГОНАЛЬНЫЕ СЛОТЫ (0 размытия в муть!):
+            embeds_act = [bank_float[i : i + 1] for i in active_indices]
+            masks_act = [fallback_m[i : i + 1] for i in active_indices]
+            weights_act = [float(probs_K[i].item()) for i in active_indices]
+            composed_base, composed_mask = multiplex_t5_concept_slots(
+                embeds_list=embeds_act,
+                masks_list=masks_act,
+                weights=weights_act,
+                max_len=bank_float.shape[1],
             )
-            ref_norms = torch.norm(
-                bank_float[active_indices[0] : active_indices[0] + 1],
-                p=2,
-                dim=-1,
-                keepdim=True,
-            ).clamp(min=1e-4)
-            superposed_base = F.normalize(weighted_sum, p=2, dim=-1) * ref_norms
             composite_target_id = "+".join([pool_ids[i] for i in active_indices[:3]])
 
         start_id = (
@@ -463,14 +561,14 @@ class SymmetricBotController:
             else pool_ids[active_indices[0]]
         )
 
-        # Поворачиваем строго внутри собственного пространства выбранного концепта (без подмешивания чужих концептов!)
         steered_target = self.steer_semantic_probe_full_rank(
-            superposed_base, device=device
+            composed_base, device=device, attention_mask_1x128=composed_mask
         )
         return (
             start_id,
             composite_target_id,
             steered_target,
+            composed_mask,
             choice_probs_dict,
             active_indices,
         )
@@ -484,8 +582,8 @@ class SymmetricBotController:
         all_candidates_Kx128x4096: torch.Tensor | None = None,
         candidate_weights_K: torch.Tensor | None = None,
         sub_step_frac: float = 0.0,
+        attention_mask_1x128: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Если активен чистый геймпад при eeg_wm_gain == 0 — не размываем чёткий тензор лишним поворотом!
         if (
             self.wm_radius <= 0.001
             or self.stochastic >= 0.999
@@ -502,15 +600,17 @@ class SymmetricBotController:
         base_tokens = base_probe_1x128x4096[0].float()
         ref_norms = torch.norm(base_tokens, p=2, dim=-1, keepdim=True).clamp(min=1e-4)
 
-        pad_ref = base_tokens[-1:]
-        tok_diff = torch.norm(base_tokens - pad_ref, p=2, dim=-1)
-        active_mask = (tok_diff > 1e-3).unsqueeze(-1).float()
+        if attention_mask_1x128 is not None:
+            active_mask = attention_mask_1x128[0].to(device=device, dtype=torch.float32).unsqueeze(-1)
+        else:
+            pad_ref = base_tokens[-1:]
+            tok_diff = torch.norm(base_tokens - pad_ref, p=2, dim=-1)
+            active_mask = (tok_diff > 1e-3).unsqueeze(-1).float()
         active_mask[0] = 0.0
 
         if float(active_mask.sum().item()) < 1.0:
             return base_probe_1x128x4096
 
-        # Только собственный базис выбранного концепта (без чужих inter_modes, чтобы не смешивать противоположности):
         tok_centered = base_tokens - base_tokens.mean(dim=0, keepdim=True)
         q_mat, _ = torch.linalg.qr(tok_centered[:64].T, mode="reduced")
         q_basis = q_mat.T

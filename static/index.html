@@ -271,6 +271,14 @@
                     </select>
                     <button type="button" class="btn btn-blue btn-fixed" id="btnVideoResetGenesis">🔄 СБРОС</button>
                 </div>
+                
+                <label class="mt-4">🖼️ Стартовый кадр (только для 1-го шага, отменяется кнопкой ✕):</label>
+                <div class="input-row">
+                    <input type="file" id="videoInitImageInput" accept="image/*" style="padding:3px; font-size:10px;">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnUploadInitImage">🖼️ СТАРТ</button>
+                    <button type="button" class="btn btn-gray" id="btnClearInitImage" style="width:38px;" title="Отменить картинку и сбросить генезис">✕</button>
+                </div>
+                <div id="initImageStatus" style="font-size:10px; color:#64748b; margin-top:-2px; margin-bottom:4px;"></div>
 
                 <div class="grid-2 mt-4">
                     <div>

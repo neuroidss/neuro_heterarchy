@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 neuro_engine.py — Универсальный 100%-тензорный движок N агентов (ЭЭГ × Геймпад × NPC × Многоветвевой Оракул)
-Автоматически работает как:
-  1) Замкнутый каталитический мир с 3D-DiT Оракулом и NPC (если в манифесте есть гипотезы переходов),
-  2) Чистый открытый поток 3D-DiT без Оракула (если загружен .txt лор или 1 стадия без completed_hypothesis).
-Все команды смены мира/концептов/картинки из веб-моста применяются атомарно на границе шага (0 гонок IPC).
+- Иерархическое Тета-Гамма мультиплексирование концептов в [1, 128, 4096] (как внутри региона, так и между регионами Fpz->AFz->F3->F4->FCz).
+- Нет насильного отката к строке #0 при отпускании кнопок на .txt лорах.
+- Атомарная очередь команд из Web UI на границе шага (0 гонок IPC).
 """
 
 from __future__ import annotations
@@ -26,7 +25,11 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 mp.current_process().authkey = b"video_world"
 
 from neuro_world import GameWorldManifest, StageEntitySlot
-from neuro_controller import SymmetricBotController, DEFAULT_REGION_BINDINGS
+from neuro_controller import (
+    SymmetricBotController,
+    DEFAULT_REGION_BINDINGS,
+    multiplex_t5_concept_slots,
+)
 from neuro_ltx_backend import LTXModelBackend, RemoteLTXModelBackend
 from neuro_referee import (
     CoordinateFreeHistoryReferee,
@@ -37,6 +40,9 @@ from neuro_solver_stepper import (
     LatentFlowWindowStepper,
     imprint_allegiance_spin,
 )
+
+# Макро -> Микро иерархический приоритет слотов (SLOD: Fpz контекст -> AFz макросцена -> F3/F4 форма -> FCz действие):
+SLOT_MACRO_TO_MICRO_RANK = {4: 0, 1: 1, 2: 2, 3: 3, 0: 4}
 
 
 class UniversalLatentAutobattlerEngine:
@@ -90,7 +96,6 @@ class UniversalLatentAutobattlerEngine:
             k: list(v) for k, v in DEFAULT_REGION_BINDINGS.items()
         }
 
-        # Очередь атомарных команд из веб-интерфейса (применяются строго в начале execute_turn_step):
         self._cmd_lock = threading.Lock()
         self._pending_manifest: tuple[GameWorldManifest, str] | None = None
         self._pending_sections_fn = None
@@ -108,6 +113,7 @@ class UniversalLatentAutobattlerEngine:
         self.active_entity_parties: list[list[str]] = []
         self.persistent_entity_states: dict[str, str] = {}
         self.last_user_driven_slots: set[int] = set()
+        self.last_active_pos_pair: tuple[torch.Tensor, torch.Tensor] | None = None
         self.entity_coherences: list[float] = []
         self.entity_transitions: list[float] = []
         self.active_concept_idx_by_region: dict[str, int] = {
@@ -219,6 +225,7 @@ class UniversalLatentAutobattlerEngine:
             self.active_entity_parties = []
             self.persistent_entity_states.clear()
             self.last_user_driven_slots.clear()
+            self.last_active_pos_pair = None
             self.entity_controllers.clear()
             self.local_genesis_5d = None
             self.local_context_latents_5d = None
@@ -235,6 +242,7 @@ class UniversalLatentAutobattlerEngine:
             pend_sec_fn(self.manifest)
             self.active_entity_parties = []
             self.persistent_entity_states.clear()
+            self.last_active_pos_pair = None
             self._warmup_manifest_semantics()
             print(
                 "📝 [ENGINE LORE EDITOR] Пулы концептов 3D-DiT обновлены и прогреты!",
@@ -245,6 +253,7 @@ class UniversalLatentAutobattlerEngine:
             self.need_hard_genesis = True
             self.maneuver_phase = 0
             self.quest_progress_pct = 0.0
+            self.last_active_pos_pair = None
             self.local_genesis_5d = None
             self.local_context_latents_5d = None
             self.recent_clean_frames_rgb.clear()
@@ -258,7 +267,7 @@ class UniversalLatentAutobattlerEngine:
 
     @torch.no_grad()
     def set_init_image_bytes(self, img_bytes: bytes):
-        """Загружает произвольную стартовую PNG/JPG картинку (напр. карту лабиринта) в контекст z[0]."""
+        """Загружает произвольную стартовую PNG/JPG картинку ТОЛЬКО в начальный контекст z[0] (отменяется сбросом)."""
         try:
             pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             pil_img = pil_img.resize((self.width, self.height), Image.Resampling.LANCZOS)
@@ -341,7 +350,10 @@ class UniversalLatentAutobattlerEngine:
         prompts_to_warm = set()
         prompts_to_warm.add("")
         prompts_to_warm.add(self.manifest.negative_desc)
-        prompts_to_warm.add(self.manifest.static_hold_desc)
+        if self.manifest.static_hold_desc:
+            prompts_to_warm.add(self.manifest.static_hold_desc)
+        if self.manifest.arena_context_desc:
+            prompts_to_warm.add(self.manifest.arena_context_desc)
 
         for _, arch in self.manifest.archetypes.items():
             sentence = f"{arch.essence_desc} {arch.action_desc}".strip()
@@ -508,6 +520,34 @@ class UniversalLatentAutobattlerEngine:
         return branches, hyp_pairs
 
     @torch.no_grad()
+    def _build_balanced_initial_world_pair(
+        self, entity_pool_candidates: list[list[dict]], empty_pair: tuple[torch.Tensor, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Для .txt лоров без явного static_hold_desc синтезирует сбалансированный старт из всего лора (а не строку #0)."""
+        if self.manifest.arena_context_desc.strip():
+            return self.backend.encode_semantics(self.manifest.arena_context_desc.strip(), max_len=128)
+        all_prompts = []
+        for pool in entity_pool_candidates:
+            for item in pool:
+                p = item.get("probe_prompt", "").strip()
+                if p and p not in all_prompts:
+                    all_prompts.append(p)
+        if not all_prompts:
+            return empty_pair
+        if len(all_prompts) == 1:
+            return self.backend.encode_semantics(all_prompts[0], max_len=128)
+        # Выбираем до 4 равномерно распределённых концептов по всему лору и мультиплексируем в ортогональные слоты:
+        n_pick = min(4, len(all_prompts))
+        pick_indices = sorted(set(int(round(x)) for x in np.linspace(0, len(all_prompts) - 1, n_pick)))
+        pairs = [self.backend.encode_semantics(all_prompts[i], max_len=128) for i in pick_indices]
+        return multiplex_t5_concept_slots(
+            embeds_list=[p[0] for p in pairs],
+            masks_list=[p[1] for p in pairs],
+            weights=[1.0] * len(pairs),
+            max_len=128,
+        )
+
+    @torch.no_grad()
     def execute_turn_step(
         self,
     ) -> tuple[
@@ -594,7 +634,11 @@ class UniversalLatentAutobattlerEngine:
 
         empty_pair = self.backend.encode_semantics("", max_len=128)
         neg_emb, neg_mask = self.backend.encode_semantics(self.manifest.negative_desc, max_len=128)
-        passive_pair = self.backend.encode_semantics(self.manifest.static_hold_desc, max_len=128)
+        passive_pair = (
+            self.backend.encode_semantics(self.manifest.static_hold_desc, max_len=128)
+            if self.manifest.static_hold_desc.strip()
+            else empty_pair
+        )
 
         steered_probe_pairs: list[tuple[torch.Tensor, torch.Tensor]] = [
             empty_pair for _ in range(n_ents)
@@ -642,7 +686,7 @@ class UniversalLatentAutobattlerEngine:
                 self.backend.encode_semantics(p, max_len=128) for p in pool_prompts
             ]
             bank_K = torch.cat([ep[0] for ep in enc_pairs], dim=0)
-            masks_K = [ep[1] for ep in enc_pairs]
+            masks_K = torch.cat([ep[1] for ep in enc_pairs], dim=0)
 
             ext_cat = (
                 catalyst_field_128x4096
@@ -650,18 +694,19 @@ class UniversalLatentAutobattlerEngine:
                 else None
             )
 
-            start_id, target_id, steered_emb, probs_dict, active_indices = (
+            start_id, target_id, steered_emb, steered_mask, probs_dict, active_indices = (
                 ctrl.select_concept_full_rank_524288d(
                     pool_ids=pool_ids,
                     candidate_embeds_Kx128x4096=bank_K,
                     device=self.device,
                     current_state_id=cur_st_id,
                     catalyst_field_128x4096=ext_cat,
+                    candidate_masks_Kx128=masks_K,
                 )
             )
 
             if not active_indices:
-                steered_probe_pairs[idx_e] = (steered_emb.to(self.dtype), masks_K[0])
+                steered_probe_pairs[idx_e] = (steered_emb.to(self.dtype), steered_mask)
                 entity_choice_distributions[idx_e] = probs_dict
                 self.active_concept_idx_by_region[reg_ui_name] = -1
                 self.active_concept_indices_by_region[reg_ui_name] = []
@@ -674,7 +719,7 @@ class UniversalLatentAutobattlerEngine:
             top_idx = active_indices[0]
             steered_probe_pairs[idx_e] = (
                 steered_emb.to(self.dtype),
-                masks_K[top_idx],
+                steered_mask,
             )
             entity_choice_distributions[idx_e] = probs_dict
             self.active_concept_idx_by_region[reg_ui_name] = int(top_idx)
@@ -700,27 +745,38 @@ class UniversalLatentAutobattlerEngine:
 
         matchup_tag = " | ".join(dynamic_state_labels)
 
-        active_driven_slots = sorted(set(active_driven_slots))
+        # Композиция pos_emb:
+        # 1) Если нажаты/активны >= 2 региона — иерархическое SLOD-мультиплексирование (макро->микро) в ортогональные слоты!
+        # 2) Если 0 активных слотов:
+        #    - в JSON с явным static_hold_desc (напр. mode_05) -> passive_pair (шар честно стоит),
+        #    - в .txt лорах -> удерживаем последнее активное состояние (нет отката к "горам"!) либо синтез всего лора на старте.
+        active_driven_slots = sorted(
+            set(active_driven_slots),
+            key=lambda s_i: SLOT_MACRO_TO_MICRO_RANK.get(s_i, 10 + s_i),
+        )
         if not active_driven_slots:
-            pos_emb, pos_mask = passive_pair[0], passive_pair[1]
+            if self.manifest.static_hold_desc.strip():
+                pos_emb, pos_mask = passive_pair[0], passive_pair[1]
+            elif self.last_active_pos_pair is not None:
+                pos_emb, pos_mask = self.last_active_pos_pair
+            else:
+                pos_emb, pos_mask = self._build_balanced_initial_world_pair(
+                    entity_pool_candidates, empty_pair
+                )
             primary_i = 0
         elif len(active_driven_slots) == 1:
             primary_i = active_driven_slots[0]
             pos_emb, pos_mask = steered_probe_pairs[primary_i]
+            self.last_active_pos_pair = (pos_emb.detach().clone(), pos_mask.detach().clone())
         else:
-            primary_i = active_driven_slots[0]
-            emb_stack = torch.stack(
-                [steered_probe_pairs[s_i][0].float() for s_i in active_driven_slots],
-                dim=0,
+            primary_i = active_driven_slots[-1]
+            pos_emb, pos_mask = multiplex_t5_concept_slots(
+                embeds_list=[steered_probe_pairs[s_i][0] for s_i in active_driven_slots],
+                masks_list=[steered_probe_pairs[s_i][1] for s_i in active_driven_slots],
+                weights=[1.0] * len(active_driven_slots),
+                max_len=128,
             )
-            blend = emb_stack.mean(dim=0)
-            ref_n = torch.norm(
-                steered_probe_pairs[primary_i][0].float(), p=2, dim=-1, keepdim=True
-            ).clamp(min=1e-4)
-            pos_emb = (F.normalize(blend, p=2, dim=-1) * ref_n).to(self.dtype)
-            pos_mask = steered_probe_pairs[primary_i][1].clone()
-            for s_i in active_driven_slots[1:]:
-                pos_mask = pos_mask | steered_probe_pairs[s_i][1]
+            self.last_active_pos_pair = (pos_emb.detach().clone(), pos_mask.detach().clone())
 
         walk_in_emb, walk_in_mask = pos_emb, pos_mask
         drv_ctrl = self._get_controller(
@@ -732,7 +788,10 @@ class UniversalLatentAutobattlerEngine:
                 return pos_emb
             frac = float(step_i) / float(max(1, total_steps))
             return drv_ctrl.steer_semantic_probe_full_rank(
-                pos_emb, device=self.device, sub_step_frac=frac
+                pos_emb,
+                device=self.device,
+                sub_step_frac=frac,
+                attention_mask_1x128=pos_mask,
             ).to(self.dtype)
 
         wm_vecs = []

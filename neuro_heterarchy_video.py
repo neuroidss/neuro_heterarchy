@@ -194,7 +194,7 @@ def load_txt_lore_as_manifest(txt_path: str) -> GameWorldManifest:
     return GameWorldManifest(
         world_name=Path(txt_path).stem if txt_path else "Pure_WM_World",
         arena_context_desc=fpz_ctx if fpz_ctx != fcz_first else "",
-        static_hold_desc=fcz_first,
+        static_hold_desc="",
         negative_desc=neg_str,
         archetypes=archetypes,
         stages=[stage0],

@@ -856,6 +856,7 @@ async function updateVideoTransformerConfig(sourceEl = null, presetOverride = 'c
 
 async function uploadVideoInitImage() {
     const fileInp = document.getElementById('videoInitImageInput');
+    const stEl = document.getElementById('initImageStatus');
     if (!fileInp || !fileInp.files || fileInp.files.length === 0) {
         alert("Выберите файл картинки (PNG/JPG)!");
         return;
@@ -868,8 +869,27 @@ async function uploadVideoInitImage() {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ image_base64: reader.result })
         });
+        if (stEl) {
+            stEl.textContent = `✓ Стартовый кадр отправлен: ${file.name} (нажмите ✕ чтобы отменить и сбросить)`;
+            stEl.style.color = "#00ffc8";
+        }
     };
     reader.readAsDataURL(file);
+}
+
+async function clearVideoInitImage() {
+    const fileInp = document.getElementById('videoInitImageInput');
+    const stEl = document.getElementById('initImageStatus');
+    if (fileInp) fileInp.value = "";
+    await fetch('/api/video/reset_genesis', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({})
+    });
+    if (stEl) {
+        stEl.textContent = "✕ Стартовый кадр отменён (сброс к обычному генезису)";
+        stEl.style.color = "#94a3b8";
+    }
 }
 
 const PRESETS = {
@@ -1723,6 +1743,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     dom.btnAudio.addEventListener('click', toggleAudio);
 
     document.getElementById('btnUploadInitImage')?.addEventListener('click', uploadVideoInitImage);
+    document.getElementById('btnClearInitImage')?.addEventListener('click', clearVideoInitImage);
     if (dom.videoLoreSelect) {
         dom.videoLoreSelect.addEventListener('change', switchVideoLoreFile);
     }
