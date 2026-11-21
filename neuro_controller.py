@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
-neuro_controller.py — Точный 96,000-D Контроллер Рабочей Памяти с Ортонормированным Резонансом Мод
-==================================================================================================
-- ИСПРАВЛЕНО ПЕРЕБИВАНИЕ МОД:
-  Канонический базис собственных мод концептов `Phi_{r, k}` в пространстве [K, 19200] строго
-  ортонормирован (<Phi_{r, k}, Phi_{r, m}> = delta_{k, m}, ||Phi_{r, k}||_2 = 1.0).
-- Когда синтезатор геймпада (или кортикальный паттерн ЭЭГ) возбуждает моду k с весом alpha_k:
-      W_r = sum_k alpha_k * Phi_{r, k},
-  скалярное произведение <W_r, Phi_{r, k}> в `select_concept_full_rank_524288d` со 100% математической
-  точностью восстанавливает исходные веса alpha_k без перебивания со стороны фонового шума или T5!
+neuro_controller.py — 96,000-D Контроллер Рабочей Памяти (Аконцептуальный: ЭЭГ × Геймпад × NPC-Агенты)
 """
 
 from __future__ import annotations
@@ -51,12 +43,6 @@ _CANONICAL_WM_BASIS_CACHE: dict[tuple[int, int, torch.device], torch.Tensor] = {
 def get_canonical_concept_wm_basis_Kx5x32x120(
     K: int, reg_idx: int, device: torch.device
 ) -> torch.Tensor:
-    """
-    Строит K строго ортонормированных собственных волновых мод рабочей памяти Phi_{r, k}
-    размерности [K, 5, 32, 120] (19,200-D каждая), таких что:
-        sum_{b,s,p} Phi_{r, k}(b,s,p) * Phi_{r, m}(b,s,p) == 1.0 (при k == m) и 0.0 (при k != m),
-    а среднее каждой моды равно 0.0.
-    """
     K_safe = max(1, int(K))
     key = (K_safe, int(reg_idx), device)
     if key not in _CANONICAL_WM_BASIS_CACHE:
@@ -77,11 +63,9 @@ def get_canonical_concept_wm_basis_Kx5x32x120(
             wave = wave - wave.mean()
             modes.append(wave.reshape(-1))
 
-        raw_Kx19200 = torch.stack(modes, dim=0)  # [K, 19200]
-        # Центрируем каждую строку и ортонормируем через QR:
+        raw_Kx19200 = torch.stack(modes, dim=0)
         raw_Kx19200 = raw_Kx19200 - raw_Kx19200.mean(dim=-1, keepdim=True)
-        q_19200xK, _ = torch.linalg.qr(raw_Kx19200.T, mode="reduced")  # [19200, K], столбцы единичной L2-нормы!
-        # Масштабируем на sqrt(19200), чтобы std каждого вокселя был равен 1.0 (как у реальной ЭЭГ):
+        q_19200xK, _ = torch.linalg.qr(raw_Kx19200.T, mode="reduced")
         ortho_Kx5x32x120 = (
             q_19200xK.T * math.sqrt(19200.0)
         ).view(K_safe, 5, 32, 120).contiguous()
@@ -99,12 +83,6 @@ def synthesize_region_gamepad_wm_5x32x120(
     phase_step: float,
     device: torch.device,
 ) -> tuple[torch.Tensor | None, float, list[str]]:
-    """
-    Синтезирует 19,200-мерную волну рабочей памяти региона как точную линейную суперпозицию
-    собственных мод Phi_{r, k} для всех активных полуосей/кнопок геймпада:
-        W_gp = sum_{k=0}^{K-1} alpha_k * Phi_{r, k}
-    Без добавления паразитных несущих, чтобы <W_gp, Phi_{r, k}> / 19200 в точности равнялось alpha_k!
-    """
     if not gamepad_channels:
         return None, 0.0, []
 
@@ -185,12 +163,37 @@ class SymmetricBotController:
         self.latest_region_wm_5x32x120: torch.Tensor | None = None
         self.latest_source_tag: str = "WM"
 
+        # Состояние автономного NPC-агента (чистая репликаторная политика на собственных модах WM):
+        self.npc_logits_K: torch.Tensor | None = None
+        self.last_chosen_idx: int = -1
+
+    def is_npc_binding(self) -> bool:
+        m = self.source_mode.upper()
+        return m.startswith("NPC") or ":NPC" in m
+
     def _get_region_specs(self) -> tuple[int, str, float, float]:
         mode_clean = self.source_mode.upper()
         for k, val in CORTICAL_REGION_REGISTRY.items():
             if k in mode_clean:
                 return val
         return CORTICAL_REGION_REGISTRY["FCZ"]
+
+    @torch.no_grad()
+    def observe_oracle_feedback(self, reward_scalar: float):
+        """
+        Универсальная аконцептуальная обратная связь для автономного NPC-агента:
+        reward > 0 усиливает сработавшую моду WM, reward < 0 ослабляет её,
+        вынуждая NPC исследовать другие концепты своего пула.
+        """
+        if not self.is_npc_binding() or self.npc_logits_K is None:
+            return
+        k_len = self.npc_logits_K.numel()
+        if 0 <= self.last_chosen_idx < k_len:
+            r_clamped = float(max(-1.0, min(1.0, reward_scalar)))
+            self.npc_logits_K[self.last_chosen_idx] += 0.65 * r_clamped
+            # Мягкий гомеостаз, чтобы NPC не залипал навсегда при смене тактики оппонента:
+            self.npc_logits_K.mul_(0.92)
+            self.npc_logits_K.clamp_(-3.5, 3.5)
 
     @torch.no_grad()
     def sample_working_memory_5x5x32x120(
@@ -202,7 +205,40 @@ class SymmetricBotController:
         reg_key_up = reg_name.upper()
         eff_t = float(self.attempt_num) + float(sub_step_frac)
 
-        # 1. Считываем базовую волну ЭЭГ из VRAM-шины (или синтезируем фоновую фазу):
+        # 1. Автономный NPC-агент: синтезирует 19,200-D волну WM из своей политики над собственными модами
+        if self.is_npc_binding():
+            K_safe = max(1, int(self.pool_size_hint))
+            if (
+                self.npc_logits_K is None
+                or self.npc_logits_K.numel() != K_safe
+                or self.npc_logits_K.device != device
+            ):
+                self.npc_logits_K = torch.zeros(K_safe, device=device, dtype=torch.float32)
+
+            k_grid = torch.arange(K_safe, device=device, dtype=torch.float32)
+            # Детерминированная фазовая развёртка исследования (чтобы NPC пробовал разные моды при застое)
+            explore_wave = 0.45 * torch.sin(
+                eff_t * 0.55 + k_grid * (2.0 * math.pi / float(K_safe)) + reg_idx * 0.9
+            )
+            probs_npc = torch.softmax((self.npc_logits_K + explore_wave) / 0.45, dim=0)
+
+            basis_Kx5x32x120 = get_canonical_concept_wm_basis_Kx5x32x120(
+                K_safe, reg_idx, device
+            )
+            npc_wave = torch.sum(
+                basis_Kx5x32x120 * probs_npc.view(K_safe, 1, 1, 1), dim=0
+            ) * 3.0
+
+            out_wm = torch.zeros((5, 5, 32, 120), device=device, dtype=torch.float32)
+            out_wm[reg_idx] = npc_wave
+            top_k = int(torch.argmax(probs_npc).item())
+            src_tag = f"NPC_WM:{reg_name}(#{top_k+1}:{probs_npc[top_k].item()*100:.0f}%)"
+            self.latest_region_wm_5x32x120 = out_wm[reg_idx].clone()
+            self.latest_region_wm_19200 = out_wm[reg_idx].reshape(-1).clone()
+            self.latest_source_tag = src_tag
+            return out_wm, inertia, src_tag
+
+        # 2. Человеческий / биосигнальный агент (FreeEEG16 + Gamepad Synthesizer)
         base_wm_5x5x32x120 = None
         src_tag = f"SYNTH_WM:{reg_name}"
 
@@ -251,8 +287,6 @@ class SymmetricBotController:
         eeg_gain = float(max(0.0, min(1.0, self.eeg_wm_gain)))
         out_wm = base_wm_5x5x32x120 * eeg_gain
 
-        # 2. Если включен `gamepad_wm_mix > 0.0` и для этого региона нажата полуось/кнопка геймпада —
-        # синтезируем волну рабочей памяти и градуально вливаем её в `out_wm[reg_idx]`:
         gp_mix = float(max(0.0, min(1.0, self.gamepad_wm_mix)))
         if gp_mix > 0.001 and self.gamepad_channels:
             gp_wave_5x32x120, max_act, act_parts = synthesize_region_gamepad_wm_5x32x120(
@@ -265,8 +299,6 @@ class SymmetricBotController:
                 device=device,
             )
             if gp_wave_5x32x120 is not None and max_act > 0.05:
-                # При gp_mix == 1.0 активное нажатие геймпада доминирует (95% геймпад + 5% фон ЭЭГ),
-                # чтобы выбранная пользователем мода уверенно побеждала шум ЭЭГ!
                 w_gp = gp_mix * min(1.0, max_act)
                 w_eeg = eeg_gain * max(0.0, 1.0 - 0.96 * gp_mix)
                 out_wm[reg_idx] = (
@@ -342,30 +374,15 @@ class SymmetricBotController:
         current_state_id: str | None = None,
         catalyst_field_128x4096: torch.Tensor | None = None,
     ) -> tuple[str, str, torch.Tensor, dict[str, float], list[int]]:
-        """
-        Декодирует активные концепты из 19,200-D поля рабочей памяти региона `latest_region_wm_5x32x120`
-        через проекцию на ортонормированный базис собственных мод `Phi_{r, k}`:
-            wm_resonances_K[k] = < W_r, Phi_{r, k} > / 19200.0
-        Поскольку <Phi_{r, k}, Phi_{r, m}> / 19200 == delta_{k, m}, любая мода k, возбужденная
-        в рабочей памяти с амплитудой alpha_k, дает точный отклик wm_resonances_K[k] = alpha_k!
-        """
         K = len(pool_ids)
         self.pool_size_hint = max(1, K)
         if K == 0:
-            return "", "", candidate_embeds_Kx128x4096[:1], {}, [0]
+            self.last_chosen_idx = -1
+            return "", "", candidate_embeds_Kx128x4096[:1], {}, []
 
         reg_idx, _, _, _ = self._get_region_specs()
         self.extract_whitened_wm_modes_128x64(device, sub_step_frac=0.0)
         bank_float = candidate_embeds_Kx128x4096.to(device=device, dtype=torch.float32)
-
-        if K == 1:
-            only_id = pool_ids[0]
-            steered = self.steer_semantic_probe_full_rank(
-                bank_float[0:1],
-                device=device,
-                all_candidates_Kx128x4096=bank_float,
-            )
-            return only_id, only_id, steered, {only_id: 100.0}, [0]
 
         wm_reg_19200 = (
             self.latest_region_wm_5x32x120.reshape(1, 19200)
@@ -373,38 +390,34 @@ class SymmetricBotController:
             else torch.zeros((1, 19200), device=device, dtype=torch.float32)
         )
 
+        # Нулевой сигнал рабочей памяти -> равновесное среднее пула и пустой список активных индексов
         if float(wm_reg_19200.abs().max().item()) < 1e-4:
-            hold_id = (
-                current_state_id
-                if (current_state_id and current_state_id in pool_ids)
-                else pool_ids[0]
+            self.last_chosen_idx = -1
+            eq_base = bank_float.mean(dim=0, keepdim=True)
+            ref_norms = torch.norm(bank_float[0:1], p=2, dim=-1, keepdim=True).clamp(min=1e-4)
+            eq_base = F.normalize(eq_base, p=2, dim=-1) * ref_norms
+            eq_pct = round(100.0 / float(K), 1)
+            probs_dict = {pool_ids[i]: eq_pct for i in range(K)}
+            return "", "", eq_base, probs_dict, []
+
+        if K == 1:
+            self.last_chosen_idx = 0
+            only_id = pool_ids[0]
+            steered = self.steer_semantic_probe_full_rank(
+                bank_float[0:1], device=device
             )
-            hold_idx = pool_ids.index(hold_id)
-            probs_dict = {
-                pool_ids[i]: (100.0 if i == hold_idx else 0.0) for i in range(K)
-            }
-            return (
-                hold_id,
-                hold_id,
-                bank_float[hold_idx : hold_idx + 1],
-                probs_dict,
-                [hold_idx],
-            )
+            return only_id, only_id, steered, {only_id: 100.0}, [0]
 
         basis_Kx19200 = get_canonical_concept_wm_basis_Kx5x32x120(
             K, reg_idx, device
         ).reshape(K, 19200)
 
-        # Точная ортогональная проекция рабочей памяти на K собственных мод концептов:
         wm_resonances_K = torch.mm(wm_reg_19200, basis_Kx19200.T).squeeze(0) / 19200.0
 
-        # Если одна или несколько собственных мод рабочей памяти явно возбуждены (резонанс > 0.15),
-        # распределяем веса прямо пропорционально положительным резонансам (без искажения от T5 cat_sims!):
         pos_res = torch.relu(wm_resonances_K - 0.10)
         if float(pos_res.max().item()) > 0.12:
             probs_K = pos_res / pos_res.sum().clamp(min=1e-6)
         else:
-            # Для слабого/шумового фонового сигнала ЭЭГ нормализуем z-score резонансов:
             r_std = wm_resonances_K.std(unbiased=False).clamp(min=1e-5)
             logits_K = (wm_resonances_K - wm_resonances_K.mean()) / r_std
             probs_K = torch.softmax(logits_K / 0.45, dim=0)
@@ -420,6 +433,8 @@ class SymmetricBotController:
         ]
         if not active_indices:
             active_indices = [choice_order[0]]
+
+        self.last_chosen_idx = int(active_indices[0])
 
         if len(active_indices) == 1:
             top_idx = active_indices[0]
@@ -448,11 +463,9 @@ class SymmetricBotController:
             else pool_ids[active_indices[0]]
         )
 
+        # Поворачиваем строго внутри собственного пространства выбранного концепта (без подмешивания чужих концептов!)
         steered_target = self.steer_semantic_probe_full_rank(
-            superposed_base,
-            device=device,
-            all_candidates_Kx128x4096=bank_float,
-            candidate_weights_K=probs_K,
+            superposed_base, device=device
         )
         return (
             start_id,
@@ -472,7 +485,12 @@ class SymmetricBotController:
         candidate_weights_K: torch.Tensor | None = None,
         sub_step_frac: float = 0.0,
     ) -> torch.Tensor:
-        if self.wm_radius <= 0.001 or self.stochastic >= 0.999:
+        # Если активен чистый геймпад при eeg_wm_gain == 0 — не размываем чёткий тензор лишним поворотом!
+        if (
+            self.wm_radius <= 0.001
+            or self.stochastic >= 0.999
+            or (self.eeg_wm_gain <= 0.001 and not self.is_npc_binding())
+        ):
             return base_probe_1x128x4096
 
         wm_128x64, inertia, _ = self.extract_whitened_wm_modes_128x64(
@@ -492,19 +510,9 @@ class SymmetricBotController:
         if float(active_mask.sum().item()) < 1.0:
             return base_probe_1x128x4096
 
+        # Только собственный базис выбранного концепта (без чужих inter_modes, чтобы не смешивать противоположности):
         tok_centered = base_tokens - base_tokens.mean(dim=0, keepdim=True)
-        if (
-            all_candidates_Kx128x4096 is not None
-            and all_candidates_Kx128x4096.shape[0] > 1
-        ):
-            inter_modes = (
-                all_candidates_Kx128x4096.float() - base_tokens.unsqueeze(0)
-            ).reshape(-1, 4096)
-            raw_span = torch.cat([tok_centered[:32], inter_modes[:32]], dim=0)
-        else:
-            raw_span = tok_centered[:64]
-
-        q_mat, _ = torch.linalg.qr(raw_span.T, mode="reduced")
+        q_mat, _ = torch.linalg.qr(tok_centered[:64].T, mode="reduced")
         q_basis = q_mat.T
         M = q_basis.shape[0]
 
@@ -523,9 +531,10 @@ class SymmetricBotController:
 
         theta_rad = (
             (1.0 - inertia * 0.4)
-            * (math.pi * 0.10)
+            * (math.pi * 0.08)
             * float(self.wm_radius)
             * (1.0 - float(self.stochastic))
+            * float(self.eeg_wm_gain if not self.is_npc_binding() else 0.35)
         )
         steered_tokens = (
             torch.cos(theta_rad * active_mask) * base_tokens

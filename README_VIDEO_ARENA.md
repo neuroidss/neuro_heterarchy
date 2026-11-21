@@ -1,14 +1,14 @@
-# 🌌 EXOCORTEX 3D-DiT: CONTINUOUS REAL-TIME NEUROFEEDBACK WORLD ENGINE, HYBRID S³ + T5 CONCEPT MANIFOLD & GRADUAL WORKING MEMORY SYNTHESIS
+# 🌌 EXOCORTEX 3D-DiT: CONTINUOUS REAL-TIME NEUROFEEDBACK WORLD ENGINE, PURE-TENSOR T5 MANIFOLD & RECTIFIED-FLOW 3D-DiT ORACLE
 
-> **100% Continuous Real-Time 3D-DiT Neurofeedback Simulator (`LTX-Video`), Zero Turn-Based Blocking (All Cortical Regions Active on Every Denoising Sub-Step), On-Manifold Shared VAE Denoising Projection (*HaCohen et al., 2024*), Orthonormal 19,200-D Working Memory Eigenmode Resonance, Gradual Multi-Agent Working Memory Mixer (`FreeEEG16` × 24-Channel Gamepad/Agent Synthesizer × `TBP.Monty`), and Intransitive Autocatalytic Dynamics ($\delta = 4.6692016$)**
+> **100% Continuous Real-Time 3D-DiT World Engine (`LTX-Video 0.9.8-2B-Distilled` NF4 / FP8 & `0.9.0-Base`), 1-Step Batched Rectified-Flow 3D-DiT World-Model Oracle (Full `[1, 128, 4096]` T5 Embeddings, Zero Random Projections), Pure-Tensor Conditioning (Zero Hardcoded Words, Zero Runtime String Concatenation), Shared 96,000-D Working Memory Bus (`FreeEEG16` × 24-Channel Gamepad/Agent Synthesizer × `TBP.Monty`), and Intransitive Catalytic Dynamics**
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-EE4C2C.svg?style=flat&logo=pytorch)](https://pytorch.org/)
-[![CUDA](https://img.shields.io/badge/CUDA-FP8_%7C_INT8_%7C_NF4_%7C_BF16_Fast_Stream-76B900.svg?style=flat&logo=nvidia)](https://developer.nvidia.com/cuda-zone)
+[![CUDA](https://img.shields.io/badge/CUDA-NF4_%7C_FP8_%7C_INT8_%7C_BF16_Fast_Stream-76B900.svg?style=flat&logo=nvidia)](https://developer.nvidia.com/cuda-zone)
 [![DOI:10.1007/BF02478259](https://img.shields.io/badge/DOI-10.1007%2FBF02478259-00b4d8.svg)](https://doi.org/10.1007/BF02478259)
 [![DOI:10.1007/BF01020332](https://img.shields.io/badge/DOI-10.1007%2FBF01020332-ff9f1c.svg)](https://doi.org/10.1007/BF01020332)
 [![DOI:10.1016/0022-5193(86)90047-9](https://img.shields.io/badge/DOI-10.1016%2F0022--5193(86)90047--9-2ec4b6.svg)](https://doi.org/10.1016/0022-5193(86)90047-9)
 [![DOI:10.1088/1741-2552/aacfe4](https://img.shields.io/badge/DOI-10.1088%2F1741--2552%2Faacfe4-yellow.svg)](https://doi.org/10.1088/1741-2552/aacfe4)
-[![DOI:10.1016/j.neuron.2018.09.023](https://img.shields.io/badge/DOI-10.1016/j.neuron.2018.09.023-purple.svg)](https://doi.org/10.1016/j.neuron.2018.09.023)
+[![DOI:10.1016/j.neuron.2018.09.023](https://img.shields.io/badge/DOI-10.1016%2Fj.neuron.2018.09.023-purple.svg)](https://doi.org/10.1016/j.neuron.2018.09.023)
 [![DOI:10.1038/s41562-024-02047-8](https://img.shields.io/badge/DOI-10.1038%2Fs41562--024--02047--8-blue.svg)](https://doi.org/10.1038/s41562-024-02047-8)
 [![DOI:10.1016/j.neuron.2024.07.024](https://img.shields.io/badge/DOI-10.1016%2Fj.neuron.2024.07.024-red.svg)](https://doi.org/10.1016/j.neuron.2024.07.024)
 [![DOI:10.1073/pnas.2107797119](https://img.shields.io/badge/DOI-10.1073%2Fpnas.2107797119-green.svg)](https://doi.org/10.1073/pnas.2107797119)
@@ -18,137 +18,146 @@
 ---
 
 ## 📑 Table of Contents
-1. [Core Design Law: Continuous Real-Time Neurofeedback (Zero Turn-Based Windows, Zero User Blocking)](#1-core-design-law-continuous-real-time-neurofeedback-zero-turn-based-windows-zero-user-blocking)
-2. [Unified Working Memory Field (`[5 × 5 × 32 × 120]` = 96,000-D): How EEG, Gamepad, Monty & AI Agents Coexist](#2-unified-working-memory-field-5--5--32--120--96000-d-how-eeg-gamepad-monty--ai-agents-coexist)
-3. [Mathematical Fixes for 100% Visual Stability & Instant Concept Responsiveness](#3-mathematical-fixes-for-100-visual-stability--instant-concept-responsiveness)
-4. [24-Channel Gamepad/Keyboard Working Memory Synthesizer & Co-Catalytic Superposition (Diagonals & Multi-Region)](#4-24-channel-gamepadkeyboard-working-memory-synthesizer--co-catalytic-superposition-diagonals--multi-region)
-5. [Intransitive Mutable Catalysts & Free Latent Drift When Concept Pools Are Empty](#5-intransitive-mutable-catalysts--free-latent-drift-when-concept-pools-are-empty)
+1. [Core Design Laws: Pure-Tensor Engine, Neurofeedback-First & Zero Hardcoded Words](#1-core-design-laws-pure-tensor-engine-neurofeedback-first--zero-hardcoded-words)
+2. [Unified Working Memory Bus (`[5 × 5 × 32 × 120]`): EEG, Gamepad & NPC Agents on Equal Footing](#2-unified-working-memory-bus-5--5--32--120-eeg-gamepad--npc-agents-on-equal-footing)
+3. [1-Step Batched Rectified-Flow 3D-DiT Oracle (`neuro_referee.py`)](#3-1-step-batched-rectified-flow-3d-dit-oracle-neuro_refereepy)
+4. [LTX-Video 0.9.8-2B-Distilled In-Place 4-Bit NF4 & Stability Fixes](#4-ltx-video-098-2b-distilled-in-place-4-bit-nf4--stability-fixes)
+5. [24-Channel Gamepad/Keyboard WM Synthesizer & Zero-Input Equilibrium](#5-24-channel-gamepadkeyboard-wm-synthesizer--zero-input-equilibrium)
 6. [Architecture & Module Map](#6-architecture--module-map)
 7. [Quick Start & CLI Reference](#7-quick-start--cli-reference)
-8. [Comprehensive Scientific Bibliography & DOIs](#8-comprehensive-scientific-bibliography--dois)
+8. [Current Status & Next-Session Handoff Notes](#8-current-status--next-session-handoff-notes)
+9. [Comprehensive Scientific Bibliography & DOIs](#9-comprehensive-scientific-bibliography--dois)
 
 ---
 
-## 1. Core Design Law: Continuous Real-Time Neurofeedback (Zero Turn-Based Windows, Zero User Blocking)
+## 1. Core Design Laws: Pure-Tensor Engine, Neurofeedback-First & Zero Hardcoded Words
 
-**Exocortex 3D-DiT** is a **real-time neurofeedback world simulator**, not a turn-based strategy game. Three strict architectural invariants govern user and agent control:
+**Exocortex 3D-DiT** is a **language-agnostic, lore-agnostic continuous real-time world engine** built around four strict invariants:
 
-1. **Zero User Blocking Across Stages:**
-   No cortical region (`FCz`, `AFz`, `F3`, `F4`, `Fpz`) is ever locked into a passive `"HOLD"` state that ignores user input. Every region continuously projects its active concept(s) and working memory wave into the 3D-DiT scene on every frame. Catalytic stages modulate how regions interact and transmute one another, but **never block or mute the user's active region**.
-2. **Intra-Step Sub-150ms Real-Time Control (`_live_pos_emb_fn` on Every Euler Step):**
-   A 3D-DiT denoising window of 6 Euler steps takes ~900–1100 ms. Waiting until the next window to read working memory or user input introduces a 1-second lag and drops brief inputs. Instead:
-   * Both **concept selection (`select_concept_full_rank_524288d`)** and **geodesic T5 steering (`steer_semantic_probe_full_rank`)** are re-evaluated **inside `_live_pos_emb_fn(step_i, total_steps)` on every single Euler denoising step $i \in \{0 \dots S-1\}$** (~150 ms resolution), immediately steering the 3D-DiT velocity field $\mathbf{v}_\theta(\mathbf{z}_t, t, \mathbf{E}_{\text{T5}}(t_i))$ mid-flight!
-   * **Synaptic Calcium Trace Latch (`_latched_gamepad_channels`):** Following *Mongillo, Barak, & Tsodyks (Science 2008)* [[14]](#ref-14), transient control impulses are held in a decaying synaptic trace so no short keypress, stick flick, or gamma burst is ever missed between frames.
-3. **Canonical Pool Ordering Across All Stages:**
-   Each entity's concept pool `allowed_pool` maintains a **strictly invariant canonical index order (`#1, #2, #3, #4`)** across all stages (`stages[0..N]`), ensuring 1-to-1 consistency between Web Studio concept chips, working memory eigenmodes $\boldsymbol{\Phi}_{r, k}$, and gamepad bindings.
+1. **Zero Hardcoded Words or Prompts in Engine Code:**
+   All Python engine modules (`neuro_controller.py`, `neuro_engine.py`, `neuro_referee.py`, `neuro_solver_stepper.py`, `neuro_ltx_backend.py`) are 100% aconceptual mathematical operators. No language-specific prompts, directions, or magic state strings are ever injected into the model. All world semantics come strictly from external JSON manifests (`configs/*.json`) and are encoded once into GPU tensors at warmup.
+2. **100% Pure-Tensor Loop (Zero String Concatenation at Runtime):**
+   `neuro_engine.py` composes `pos_emb` directly in `[1, 128, 4096]` embedding space via spherical normalization/superposition of pre-encoded `steered_probe_pairs` (or `passive_pair` at zero-input equilibrium), preserving continuous diagonal and multi-region superpositions without ever re-concatenating text strings.
+3. **Neurofeedback-First Universal Agent Architecture:**
+   Every participant in the world — human EEG (`FreeEEG16`), human gamepad/keyboard emulator, or autonomous NPC — operates through the exact same Working Memory field $\mathbf{W} \in \mathbb{R}^{5 \times 5 \times 32 \times 120}$ and catalytic competition loop. No classic game commands (`if btn: move()`) bypass the Working Memory bus.
+4. **Continuous Intra-Step Steering & Zero User Blocking:**
+   No cortical region is ever locked into a passive `"HOLD"` state. Geodesic T5 steering (`_live_pos_emb_fn`) runs on every Euler denoising step, and transient impulses are latched via a synaptic trace (`_latched_gamepad_channels`).
 
 ---
 
-## 2. Unified Working Memory Field (`[5 × 5 × 32 × 120]` = 96,000-D): How EEG, Gamepad, Monty & AI Agents Coexist
-
-In **Exocortex 3D-DiT**, **no controller, gamepad, or AI agent is allowed to hardcode prompts or bypass Working Memory**. Every control source is an **Agent that writes waves into the shared 96,000-D Working Memory Tensor** $\mathbf{W} \in \mathbb{R}^{5 \times 5 \times 32 \times 120}$ (`5 Regions × 5 Oscillatory Bands × 32 Causal Time-Frequency Slots × 120 Dipoles`):
+## 2. Unified Working Memory Bus (`[5 × 5 × 32 × 120]`): EEG, Gamepad & NPC Agents on Equal Footing
 
 ```
  ═════════════════════════════════════════════════════════════════════════════
-   UNIFIED 96,000-D WORKING MEMORY BUS: GRADUAL MULTI-AGENT SUPERPOSITION
+   UNIFIED WORKING MEMORY BUS: GRADUAL MULTI-AGENT SUPERPOSITION
  ═════════════════════════════════════════════════════════════════════════════
 
   [1. Biological EEG (FreeEEG16 BLE/LSL)] ──(eeg_wm_gain ∈ [0..1])──┐
   [2. 24-Ch Gamepad / Keyboard Synthesizer] ──(gamepad_wm_mix ∈ [0..1])┼─► ┌───────────────────────────────┐
-  [3. Self-Learning Monty Columns (TBT 2.0)] ─────────────────────────┤   │ SHARED 96,000-D WM FIELD      │
-  [4. External AI Agents (Local Heuristic / Cloud VLM)] ──────────────┘   │ W_r ∈ R^{5 × 32 × 120} (VRAM) │
+  [3. Autonomous NPC / Monty Agents] ─────────────────────────────────┘   │ SHARED WM FIELD (VRAM IPC)    │
+                                                                          │ W_r ∈ R^{5 × 32 × 120}        │
                                                                           └───────────────┬───────────────┘
                                                                                           │
-                          ┌───────────────────────────────────────────────────────────────┴───────────────┐
-                          ▼ (Orthonormal Eigenmode Resonance: <W_r, Φ_{r,k}>)                             ▼
-  ┌───────────────────────────────────────────────────────┐               ┌───────────────────────────────┐
-  │ PURE WORKING MEMORY CONCEPT DECODER & T5 NAVIGATOR    │               │ COHERENT S³ WAVE INTEGRATOR   │
-  │ • Projects W_r onto K Orthonormal Modes Φ_{r,k}       │               │ • [1, 128, F, 1, 1] Phase     │
-  │ • Co-Catalytic Superposition of Simultaneously Active │               │ • Quadratic Context Vibration │
-  │   Modes (e.g. 50% UP + 50% LEFT -> Diagonal Vector!)  │               │ • On-Manifold VAE Projection  │
-  │ • QR-Tangent Rotation strictly inside T5 Manifold     │               │   (Zero Grey Washout / Fog)   │
-  └───────────────────────────────────────────────────────┘               └───────────────────────────────┘
+            ┌─────────────────────────────────────────────────────────────────────────────┴──────────────────┐
+            ▼ (Orthonormal Mode Projection + Pure-Tensor Spherical Superposition)                            ▼
+  ┌──────────────────────────────────────────────────────┐                ┌────────────────────────────────────────┐
+  │ PURE-TENSOR T5 CONDITIONING & S³ STEPPER             │                │ 1-STEP RECTIFIED-FLOW 3D-DiT ORACLE    │
+  │ • LTX-Video 0.9.8-2B-Distilled (In-Place 4-bit NF4)  │                │ • Evaluates P(z_new | z_prev, H_k)     │
+  │ • Official t² anchor jitter (image_cond_noise=0.15)  │───────────────►│ • Full [M, 128, 4096] T5 Hypotheses    │
+  │ • Causal Multi-Frame VAE Encode + last_frame_fix     │  unpacked_z0   │ • Shared ε + Motion-Weighted t-stat    │
+  └──────────────────────────────────────────────────────┘                └────────────────────────────────────────┘
  ═════════════════════════════════════════════════════════════════════════════
 ```
 
-### Gradual Non-Binary Mixing (`eeg_wm_gain` × `gamepad_wm_mix`)
-Instead of a brittle binary switch that can shock the latent space on transition, the system uses two continuous sliders in the Web Studio (`:8080`):
-* **`eeg_wm_gain` $\gamma_{\text{EEG}} \in [0.00, 1.00]$ (Default `1.00`):** Scales the biological `FreeEEG16` (or background phase clock) contribution. Setting `eeg_wm_gain = 0.00` silences background drift completely so you can test **100% isolated Gamepad / AI Agent control**.
-* **`gamepad_wm_mix` $\gamma_{\text{GP}} \in [0.00, 1.00]$ (Default `1.00`):** Scales the Gamepad/Agent Working Memory Synthesizer.
-  * When `gamepad_wm_mix = 0.00`, the gamepad synthesizer is **100% disabled** (zero effect on the system).
-  * When `gamepad_wm_mix > 0.00` and the gamepad is **released** ($\|\mathbf{a}_{\text{GP}}\| = 0$), the synthesized wave is zero ($\mathbf{W}_r^{\text{GP}} = 0$), so **100% unmodified EEG Working Memory** drives the world!
-  * As soon as any stick half-axis or button is pressed with intensity $a \in (0, 1]$, the synthesized eigenmode wave $\mathbf{W}_r^{\text{GP}}$ smoothly blends into $\mathbf{W}_r$ on the sphere.
+* **`eeg_wm_gain` $\in [0.00, 1.00]$:** Scales biological `FreeEEG16` (or background phase clock) contribution. Set to `0.00` for isolated Gamepad/Agent verification.
+* **`gamepad_wm_mix` $\in [0.00, 1.00]$:** Scales the 24-channel Gamepad/Keyboard Working Memory Synthesizer. When `gamepad_wm_mix = 0.00` (or stick/keys released), zero gamepad wave is injected.
 
 ---
 
-## 3. Mathematical Fixes for 100% Visual Stability & Instant Concept Responsiveness
+## 3. 1-Step Batched Rectified-Flow 3D-DiT Oracle (`neuro_referee.py`)
 
-| Issue / Symptom | Root Cause | Exact Mathematical Solution Implemented |
+Instead of a static 2D image classifier (like CLIP, which cannot perceive temporal motion) or a random projection matrix, `CoordinateFreeHistoryReferee` uses **LTX-Video's own 3D-DiT** to judge the actual spatiotemporal transition $\mathbf{z}_{\text{prev}} \to \mathbf{z}_{\text{new}}$:
+
+1. Keeps conditioning prefix frames `:n_cond` clean ($t_c = 0$) and noises only generated frames `n_cond:` at $\sigma_{\text{probe}}$ (`0.725` for `0.9.8-distilled`, `0.55` for `0.9.0-base`) with a **single shared noise tensor** $\boldsymbol{\epsilon}$ (Common Random Numbers) across all hypotheses $H_k \in \{H_{\text{ongoing}}, H_{\text{completed}}, H_{\text{failed}}\}$:
+   $$\mathbf{z}_\sigma^{\text{new}} = (1 - \sigma)\mathbf{z}_0^{\text{new}} + \sigma\boldsymbol{\epsilon}, \qquad \mathbf{v}^* = \boldsymbol{\epsilon} - \mathbf{z}_0^{\text{new}}$$
+2. Runs **one batched forward pass** of `LTXVideoTransformer3DModel` (`B = 2` or `3`) with **full `[B, 128, 4096]` T5 embeddings** (0 extra VRAM).
+3. Computes per-token squared velocity error weighted by actual spatiotemporal motion $w_{\text{motion}} \propto \|\mathbf{z}_0^{\text{new}} - \mathbf{z}_0^{\text{prev}}\|_2$ and a scale-invariant paired $t$-statistic across tokens.
+4. Produces unbiased probabilities (`50/50` at neutral, zero hardcoded positive bias, zero mechanical progress ratchet).
+
+---
+
+## 4. LTX-Video 0.9.8-2B-Distilled In-Place 4-Bit NF4 & Stability Fixes
+
+| Issue / Symptom | Root Cause | Solution Implemented |
 | :--- | :--- | :--- |
-| **1. Rainbow blotches at `00:00` in 3D-DiT** | Passing `per_token_timesteps` to `FlowMatchEulerDiscreteScheduler.step(noise_pred, ...)` without negating `-noise_pred` flipped `dt = current_sigma - next_sigma > 0`, adding noise instead of denoising. | Step generated frames `latents[:, :, n_cond:]` via standard `scheduler.step(noise_pred[:, :, n_cond:], t, latents[:, :, n_cond:])` (`dt = sigma_next - sigma < 0`) with `shift_terminal = None`. |
-| **2. Progressive grey washout over time** | Iterative `tone_map_latents` compression + raw transformer latent feedback bypassing the Denoising VAE Decoder (`decode_t = 0.05`). | Re-encode `clean_video_frames[-1]` (after Denoising VAE `decode_t = 0.05`, `decode_noise_scale = 0.0`) via `encode_frame_to_latent` + gentle AdaIN (`factor = 0.15`) to the genesis reference. |
-| **3. Concept selection stuck on `s0` (`#1`)** | 1) Zero-mean averaging `wm_flat[k::K].mean() ~ 0`.<br>2) `stages[1..3]` had permuted `allowed_pool` lists in JSON.<br>3) High cosine similarity of `catalyst_field` in T5 overwhelmed WM scores.<br>4) Arrow keys were bound to `RS_*` (`AFz`) while viewing `FCZ`. | 1) Orthonormal 19,200-D eigenmodes $\langle \boldsymbol{\Phi}_{r,k}, \boldsymbol{\Phi}_{r,m}\rangle = \delta_{km}$ recover exact mode weights $\alpha_k = \langle \mathbf{W}_r, \boldsymbol{\Phi}_{r,k}\rangle$.<br>2) Canonical `stages[0]` pool ordering across all stages.<br>3) Direct positive-resonance allocation $p_k \propto \max(0, s_k - \tau)$.<br>4) Keyboard `WASD` & `Arrow Keys` dynamically route to the currently selected region in the Web Studio! |
+| **1. `from_single_file` + `BitsAndBytesConfig` fails on `0.9.8-distilled`** | `diffusers` `from_single_file` fails with `_no_split_modules` and `bitsandbytes__*` missing keys when loading raw `.safetensors` into `Linear4bit`. | `quantize_model_inplace_bnb()` in `neuro_ltx_backend.py`: loads `ltxv-2b-0.9.8-distilled.safetensors` on CPU, replaces `nn.Linear` (`in/out >= 512`) layer-by-layer with `bnb.nn.Linear4bit` (NF4) / `Linear8bitLt`, and streams each layer directly to CUDA (~8.0–8.5 GB total VRAM with 4-bit T5). |
+| **2. Pitch-black screen / vertical striping at 6–7 steps on `0.9.0-base`** | Double-shifted `linear_quadratic_sigmas(6)` + `mu` shift wasted 4/6 steps above $\sigma=0.97$ and jumped $-0.66 \to 0.0$ in one step. | Default to `ltxv-2b-0.9.8-distilled.safetensors` (matched 0.9.8 Transformer + 0.9.8 VAE + exact distilled sigma schedule `use_dynamic_shifting=False`), plus fixed uniform `np.linspace(1.0, min_sigma, steps)` for `--model base`. |
+| **3. Past-frame throwback & boundary seams** | Feeding 8-frame latent into 1-frame slot `z[0]` + 3-frame `torch.roll` noise loop + non-causal decoder tail artifact. | Multi-frame causal `encode_frames_to_latent`, full-window decode from `z[0]` with `last_frame_fix=True`, monotonic S³ noise seeds, and `decode_noise_scale=0.025` for distilled VAE. |
+| **4. Object frozen on `z[0]` in 1-frame I2V** | Zero noise on conditioning prefix `z[:n_cond]` glued objects to frame 0. | Added official `image_cond_noise_scale = 0.15` quadratic jitter (`+ 0.15 * noise * t_norm**2` from `pipeline_ltx_condition.py`) inside `neuro_solver_stepper.py`. |
 
 ---
 
-## 4. 24-Channel Gamepad/Keyboard Working Memory Synthesizer & Co-Catalytic Superposition (Diagonals & Multi-Region)
+## 5. 24-Channel Gamepad/Keyboard WM Synthesizer & Zero-Input Equilibrium
 
-Every concept $k \in \{0 \dots K-1\}$ in cortical region $r \in \{\text{FCz}, \text{AFz}, \text{F3}, \text{F4}, \text{Fpz}\}$ is assigned a strictly orthonormal 19,200-D standing wave eigenmode $\boldsymbol{\Phi}_{r, k} \in \mathbb{R}^{5 \times 32 \times 120}$ via QR decomposition (`get_canonical_concept_wm_basis_Kx5x32x120`).
-
-* **24 Bindable Hardware Channels (`ALL_GAMEPAD_CHANNELS`):**
-  * **Left Stick Half-Axes:** `LS_UP`, `LS_DOWN`, `LS_LEFT`, `LS_RIGHT`
-  * **Right Stick Half-Axes:** `RS_UP`, `RS_DOWN`, `RS_LEFT`, `RS_RIGHT`
-  * **Analog Triggers & Bumpers:** `LT`, `RT`, `LB`, `RB`
-  * **D-Pad:** `DPAD_UP`, `DPAD_DOWN`, `DPAD_LEFT`, `DPAD_RIGHT`
-  * **Face & System Buttons:** `BTN_A`, `BTN_B`, `BTN_X`, `BTN_Y`, `L3`, `R3`, `BACK`, `START`
-* **1-Click Interactive Binding (`🎯` Button on Every Concept Chip):**
-  Click `🎯` next to any concept in the Web Studio and push any stick direction (or hold two axes simultaneously for a diagonal combo like `LS_UP+LS_LEFT`) or press any gamepad button — the browser captures the channel and binds it to that concept's working memory eigenmode $\boldsymbol{\Phi}_{r, k}$.
-* **Simultaneous Multi-Concept & Multi-Region Superposition (Co-Catalysis):**
-  When multiple channels are active simultaneously (e.g., pushing the stick diagonally `LS_UP = 0.71` + `LS_LEFT = 0.71` in `FCz` while holding `BTN_A = 1.0` in `F3`), the synthesizer excites the linear superposition of those standing waves in Working Memory:
-  $$\mathbf{W}_r^{\text{GP}} = \sum_{k=0}^{K-1} a_{r, k} \, \boldsymbol{\Phi}_{r, k}$$
-  The Working Memory decoder projects $\mathbf{W}_r$ onto $\{\boldsymbol{\Phi}_{r, k}\}$, recovers $p_{\text{UP}} = 50\%$ and $p_{\text{LEFT}} = 50\%$, highlights **both** active chips with `★` in the Web UI, and computes the geodesic spherical superposition of both T5 embeddings!
-
----
-
-## 5. Intransitive Mutable Catalysts & Free Latent Drift When Concept Pools Are Empty
-
-* **Concepts as Mutable Catalysts:** In each region, the selected concept(s) act as a **Catalyst** that drives state transitions in downstream regions (`e0 -> e1 -> e2 -> e3 -> e0`) while simultaneously contributing directly to the active visual scene.
-* **Free Latent Drift (`🧹 Clear Region` / Empty Pool `[]`):** Clicking `🧹 Очистить регион (Свободный дрейф)` removes all text concepts from that region, setting its T5 anchor to `""` (`empty_embed`) so the 96,000-D working memory wave steers the 3D-DiT $S^3$ phase manifold in pure aconceptual mode.
+* **24 Bindable Channels (`ALL_GAMEPAD_CHANNELS`):** Left/Right stick half-axes (`LS_*`, `RS_*`), triggers/bumpers (`LT`, `RT`, `LB`, `RB`), D-Pad (`DPAD_*`), and buttons (`BTN_A/B/X/Y`, `L3`, `R3`, `BACK`, `START`).
+* **Orthonormal 19,200-D Standing Wave Basis (`get_canonical_concept_wm_basis_Kx5x32x120`):** Simultaneous presses (e.g., diagonals `LS_UP + LS_LEFT`) excite linear superpositions $\mathbf{W}_r^{\text{GP}} = \sum_k a_{r,k}\boldsymbol{\Phi}_{r,k}$ and recover exact mode weights.
+* **Zero-Input Equilibrium (Aconceptual):** When $\|\mathbf{W}_r\|_\infty < 10^{-4}$ (nothing pressed and `eeg_wm_gain = 0`), `select_concept_full_rank_524288d` returns empty `active_indices = []` and the spherical mean tensor of the pool, causing `neuro_engine.py` to condition on the manifest's `passive_pair` (`static_hold_desc`) instead of latching onto the last direction.
 
 ---
 
 ## 6. Architecture & Module Map
 
-| File | Role in the Heterarchy |
+| File | Role |
 | :--- | :--- |
-| **`neuro_battle_server.py`** | Immortal LTX-Video Weights Server (`localhost:6008`) with resident 4-bit NF4 T5-XXL, 3D-DiT (`fp8`/`int8`/`nf4`/`bf16`), and 3D-VAE (`encode_frame` + `decode_latents`). |
-| **`neuro_ltx_backend.py`** | `LTXModelBackend` & `RemoteLTXModelBackend` with `shift_terminal=None`, `decode_t=0.05`, `decode_noise_scale=0.0`, and `encode_frame_to_latent`. |
-| **`neuro_controller.py`** | `SymmetricBotController` + `get_canonical_concept_wm_basis_Kx5x32x120` + `synthesize_region_gamepad_wm_5x32x120`: orthonormal 19,200-D WM eigenmode synthesizer and QR-tangent T5 navigator. |
-| **`neuro_solver_stepper.py`** | `LatentFlowWindowStepper`: hybrid I2V + $S^3$ integrator with `[1, 128, F, 1, 1]` travelling waves, quadratic timestep vibration on context frames, and standard negative-`dt` Euler stepping. |
-| **`neuro_engine.py`** | `UniversalLatentAutobattlerEngine`: continuous real-time multi-region orchestrator with synaptic input latch (`_latched_gamepad_channels`), canonical pool ordering, and On-Manifold VAE projection. |
-| **`neuro_run.py`** | Unified launcher with 60 Hz `SharedAmodalCognitiveEngine` BLE/LSL $\to$ VRAM bus thread, `SmoothRealtimeVideoPacer` (`:6002`), and Web Studio control bridge (`:6007`). |
-| **`web_cloud_gateway.py` & `static/app.js`** | Unified HTTPS Web Studio (`:8080`) with Gradual WM Mixer (`EEG WM Gain` × `Gamepad WM Mix`), 24-channel HTML5 Gamepad poller, and `🎯` 1-click concept binding. |
+| **`neuro_battle_server.py`** | Immortal LTX-Video Weights Server (`localhost:6008`) supporting `--model distilled\|base` and `--quant nf4\|fp8\|int8\|bf16`. |
+| **`neuro_ltx_backend.py`** | `LTXModelBackend`, `RemoteLTXModelBackend`, `quantize_model_inplace_bnb` (in-place 4-bit NF4 for single-file `.safetensors`), distilled/base sigma schedules, and `encode_frames_to_latent`. |
+| **`neuro_controller.py`** | `SymmetricBotController`, orthonormal 19,200-D WM eigenmode synthesizer, zero-input spherical equilibrium, and QR-tangent T5 navigator. |
+| **`neuro_solver_stepper.py`** | `LatentFlowWindowStepper`: S³ wave integrator, automatic `CFG=1.0` for distilled, `image_cond_noise_scale=0.15` anchor jitter, and negative-`dt` Euler stepping. |
+| **`neuro_referee.py`** | `CoordinateFreeHistoryReferee`: 1-step batched Rectified-Flow 3D-DiT Oracle over full `[M, 128, 4096]` T5 embeddings with motion-weighted paired $t$-stat. |
+| **`neuro_engine.py`** | `UniversalLatentAutobattlerEngine`: pure-tensor multi-agent orchestrator (zero string concatenation in the loop), synaptic input latch, and multi-frame causal VAE feedback. |
+| **`neuro_run.py`** | Unified launcher with 60 Hz `SharedAmodalCognitiveEngine` BLE/LSL $\to$ VRAM bus, `SmoothRealtimeVideoPacer` (`:6002`), and Web Studio bridge (`:6007`). |
+| **`web_cloud_gateway.py` & `static/app.js`** | Unified HTTPS Web Studio (`:8080`) with Gradual WM Mixer, 24-channel HTML5 Gamepad poller, and `🎯` 1-click concept binding. |
 
 ---
 
 ## 7. Quick Start & CLI Reference
 
 ```bash
-# Terminal 1: Launch Immortal Weights Server in VRAM (T5-XXL resident in VRAM)
-python3 neuro_battle_server.py --port 6008 --quant fp8
+# Terminal 1: Launch Immortal Weights Server (LTX 0.9.8-2B-Distilled in 4-bit NF4)
+python3 neuro_battle_server.py --port 6008 --model distilled --quant nf4 --allow-t5-offload
 
 # Terminal 2: Launch Unified Web Studio Gateway on :8080
-python3 web_cloud_gateway.py --port 8080 --cert cert.pem --key key.pem --video-lore configs/mode_03_semantic_maze_gm.json
+python3 web_cloud_gateway.py --port 8080 --cert cert.pem --key key.pem --video-lore configs/mode_05_wm_control_test_arena.json
 
 # Terminal 3: Launch Continuous Real-Time 3D-DiT Engine
-# Use --eeg-wm-gain 0.0 --gamepad-wm-mix 1.0 to test pure isolated Gamepad/Keyboard WM synthesis,
-# or --eeg-wm-gain 1.0 --gamepad-wm-mix 1.0 for automatic gradual mixing!
-python3 neuro_run.py --mode maze --context-latents 1 --step-latents 2 --steps 6 --cfg 3.2 --stochastic 0.0 --wm-radius 0.50 --eeg-wm-gain 0.0 --gamepad-wm-mix 1.0
+# Recommended: --steps 8 (full 8-sigma distilled schedule)
+python3 neuro_run.py --mode ball --context-latents 1 --step-latents 2 --steps 8 --cfg 1.0 --stochastic 0.0 --wm-radius 0.35 --eeg-wm-gain 0.0 --gamepad-wm-mix 1.0
 ```
 
 ---
 
-## 8. Comprehensive Scientific Bibliography & DOIs
+## 8. Current Status & Next-Session Handoff Notes
+
+### ✅ Verified Working (as of Nov 20, 2026)
+* **`0.9.8-2B-Distilled` + In-Place NF4 (`neuro_ltx_backend.py`):** Loads cleanly into 12 GB VRAM (`RTX 3060`) alongside 4-bit T5-XXL. Produces **1+ minute of razor-sharp, artifact-free video** with **zero vertical striping and zero grey washout** (`00:00–01:09` verified).
+* **Pure-Tensor Pipeline & Zero-Input Equilibrium:** `neuro_controller.py` and `neuro_engine.py` cleanly decode `up/down/left/right: 100%` on press and return to equal-weight equilibrium (`25%` each -> `passive_pair`) on release, with zero hardcoded words in Python.
+* **1-Step Rectified-Flow 3D-DiT Oracle (`neuro_referee.py`):** Runs in ~150 ms with 0 extra VRAM on full `[128, 4096]` T5 embeddings and honestly rejects mismatched / static scenes without fake progress inflation.
+
+### ⚠️ Open Engineering Issues to Address Next Session
+1. **Weak Directional Prompt Adherence in `mode_05` at `cfg=1.0` / `steps=7`:**
+   * At `steps=7`, `build_distilled_sigmas(7)` dropped the 8th sigma (`0.4219`). Always test with **`--steps 8`**.
+   * At `cfg=1.0` (no CFG, currently forced when `is_distilled=True` in `neuro_solver_stepper.py`), `0.9.8-distilled` preserves the sharp white sphere cleanly for 70s, **but weakly obeys directional text changes** on a featureless black background (no visual landmarks for optical flow).
+   * **Next experiments to run:**
+     1. Allow optional mild CFG (`--cfg 1.5..2.5`) on `distilled` in `neuro_solver_stepper.py` (remove `not is_distilled` hard override) to test whether CFG restores strong directional steering.
+     2. Compare pure-tensor `0.78 * c_emb + 0.22 * a_emb` blending vs. pure `c_emb` (`e0` alone, without blending `e1`'s static zone description into `pos_emb`, since `e1_s0` says `"waiting for the ball"` and pulls the prompt toward stillness!).
+     3. Test `0.9.8-distilled` + new RF Oracle on richer semantic/catalytic worlds (`--mode maze` / `mode_03_semantic_maze_gm.json` and `--mode ritual` / `mode_04_forest_neuro_ritual.json`) for the Crocus Expo demo (Nov 24–26).
+2. **Real EEG vs. Gamepad Basis (`neuro_controller.py`):**
+   * Current `get_canonical_concept_wm_basis_Kx5x32x120` uses synthetic sinusoids (100% exact for gamepad emulation, noisy for raw non-invasive `FreeEEG16` EEG). Next step for live EEG: replace fixed sinusoids with online-calibrated subject subspaces / physiological Gamma-vs-Beta gating (Miller et al., 2018; Chen et al., 2024) + EMG check on 70–100 Hz.
+3. **Repo Hygiene:** Remove self-signed `key.pem` from git tracking and archive legacy duplicate video stack (`video_world_server.py` / `video_render_logic.py`) once `neuro_battle_server.py` + `neuro_engine.py` is finalized.
+
+---
+
+## 9. Comprehensive Scientific Bibliography & DOIs
 
 1. <a id="ref-1"></a>**McCulloch, W. S. (1945).** *A heterarchy of values determined by the topology of nervous nets.* The Bulletin of Mathematical Biophysics, 7(2), 89–93. [https://doi.org/10.1007/BF02478259](https://doi.org/10.1007/BF02478259)
 2. <a id="ref-2"></a>**Hawkins, J., Leadholm, N., & Clay, V. (2025/2026).** *The Thousand Brains Theory 2.0: An Extension for the Long-Range Connections of the Neocortical Heterarchy.* arXiv:2507.05888. [https://doi.org/10.48550/arXiv.2507.05888](https://doi.org/10.48550/arXiv.2507.05888)
@@ -158,7 +167,7 @@ python3 neuro_run.py --mode maze --context-latents 1 --step-latents 2 --steps 6 
 6. <a id="ref-6"></a>**Feigenbaum, M. J. (1978).** *Quantitative universality for a class of nonlinear transformations.* Journal of Statistical Physics, 19(1), 25–52. [https://doi.org/10.1007/BF01020332](https://doi.org/10.1007/BF01020332)
 7. <a id="ref-7"></a>**May, R. M. (1976).** *Simple mathematical models with very complicated dynamics.* Nature, 261(5560), 459–467. [https://doi.org/10.1038/261459a0](https://doi.org/10.1038/261459a0)
 8. <a id="ref-8"></a>**Kauffman, S. A. (1986).** *Autocatalytic sets of proteins.* Journal of Theoretical Biology, 119(1), 1–24. [https://doi.org/10.1016/0022-5193(86)90047-9](https://doi.org/10.1016/0022-5193(86)90047-9)
-9. <a id="ref-9"></a>**Soloveichik, D., Seelig, G., & Winfree, E. (2010).** *DNA as a universal substrate for chemical kinetics.* Proceedings of the National Academy of Sciences (PNAS), 107(12), 5393–5398. [https://doi.org/10.1073/pnas.0909380107](https://doi.org/10.1073/pnas.0909380107)
+9. <a id="ref-9"></a>**Soloveichik, D., Seelig, G., & Winfree, E. (2010).** *DNA as a universal substrate for chemical kinetics.* PNAS, 107(12), 5393–5398. [https://doi.org/10.1073/pnas.0909380107](https://doi.org/10.1073/pnas.0909380107)
 10. <a id="ref-10"></a>**Bruña, R., Maestú, F., & Pereda, E. (2018).** *Phase Locking Value revisited: teaching new tricks to an old dog.* Journal of Neural Engineering, 15(5), 056011. [https://doi.org/10.1088/1741-2552/aacfe4](https://doi.org/10.1088/1741-2552/aacfe4)
 11. <a id="ref-11"></a>**Dickey, C. W., et al. (2022).** *Widespread ripples synchronize human cortical activity during sleep, waking, and memory recall.* PNAS, 119(28), e2107797119. [https://doi.org/10.1073/pnas.2107797119](https://doi.org/10.1073/pnas.2107797119)
 12. <a id="ref-12"></a>**HaCohen, Y., et al. (2024).** *LTX-Video: Realtime Video Latent Diffusion.* arXiv:2501.00103. [https://doi.org/10.48550/arXiv.2501.00103](https://doi.org/10.48550/arXiv.2501.00103)

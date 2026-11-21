@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-neuro_ltx_backend.py — Аппаратный бэкенд LTX-Video (Multi-Frame Causal VAE Encode + Last-Frame Fix)
-====================================================================================================
-- Добавлен encode_frames_to_latent(frames_rgb): корректно кодирует 1 + k*8 кадров в каузальный
-  5D-латент [1, 128, 1+k, H_lat, W_lat], сохраняя вектор скорости движения для context_latents >= 2.
-- В decode_latents_chunk добавлен официальный last_frame_fix (дублирование последнего латента перед
-  некаузальным 3D-декодером и обрезка tsf кадров), убирающий артефакты стыка.
-- Для малого числа шагов (steps <= 12) используется сгущение сигм к 0 (меньше призраков на последнем шаге).
-====================================================================================================
+neuro_ltx_backend.py — Аппаратный бэкенд LTX-Video (0.9.8-2B-Distilled NF4/INT8/FP8/BF16 + Base 0.9.0)
+С автоматическим взаимоисключением T5 <-> VAE в VRAM (0 OOM при смене концептов на лету).
 """
 
 from __future__ import annotations
@@ -42,6 +36,9 @@ except ImportError:
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 MODEL_REPO = "Lightricks/LTX-Video"
+DISTILLED_CKPT_FILENAME = "ltxv-2b-0.9.8-distilled.safetensors"
+DISTILLED_SIGMAS_8 = [1.0000, 0.9937, 0.9875, 0.9812, 0.9750, 0.9094, 0.7250, 0.4219]
+
 BASE_CACHE_DIR = (
     Path("/workspace/hf_cache")
     if Path("/workspace/hf_cache").exists()
@@ -73,22 +70,13 @@ def calculate_shift(
     return float(image_seq_len * m + b)
 
 
-def linear_quadratic_sigmas(num_steps: int, threshold_noise: float = 0.025) -> list[float]:
-    """Сигмы из pipeline_ltx_condition.py: точнее сходится к sigma -> 0 при малом числе шагов."""
-    if num_steps < 2:
-        return [1.0]
-    linear_steps = num_steps // 2
-    linear_sigma_schedule = [i * threshold_noise / max(1, linear_steps) for i in range(linear_steps)]
-    threshold_noise_step_diff = linear_steps - threshold_noise * num_steps
-    quadratic_steps = num_steps - linear_steps
-    quadratic_coef = threshold_noise_step_diff / (max(1, linear_steps) * (quadratic_steps ** 2))
-    linear_coef = threshold_noise / max(1, linear_steps) - 2 * threshold_noise_step_diff / (quadratic_steps ** 2)
-    const = quadratic_coef * (linear_steps ** 2)
-    quadratic_sigma_schedule = [
-        quadratic_coef * (i ** 2) + linear_coef * i + const for i in range(linear_steps, num_steps)
-    ]
-    sigma_schedule = linear_sigma_schedule + quadratic_sigma_schedule
-    return [float(max(1e-3, min(1.0, 1.0 - x))) for x in sigma_schedule]
+def build_distilled_sigmas(steps: int) -> list[float]:
+    s = max(2, int(steps))
+    if s == len(DISTILLED_SIGMAS_8):
+        return list(DISTILLED_SIGMAS_8)
+    xp = np.linspace(0.0, 1.0, len(DISTILLED_SIGMAS_8))
+    x_new = np.linspace(0.0, 1.0, s)
+    return [float(v) for v in np.interp(x_new, xp, DISTILLED_SIGMAS_8)]
 
 
 def rescale_noise_cfg(
@@ -111,8 +99,85 @@ def rescale_noise_cfg(
     )
 
 
+@torch.no_grad()
+def quantize_model_inplace_bnb(
+    model: torch.nn.Module,
+    quant_mode: str,
+    compute_dtype: torch.dtype,
+    device: torch.device,
+) -> int:
+    import bitsandbytes as bnb
+
+    q_count = 0
+
+    def _replace(parent: torch.nn.Module):
+        nonlocal q_count
+        for name, child in list(parent.named_children()):
+            if (
+                isinstance(child, torch.nn.Linear)
+                and child.in_features >= 512
+                and child.out_features >= 512
+            ):
+                has_bias = child.bias is not None
+                if quant_mode == "int8":
+                    q_lin = bnb.nn.Linear8bitLt(
+                        child.in_features,
+                        child.out_features,
+                        bias=has_bias,
+                        has_fp16_weights=False,
+                        threshold=6.0,
+                    )
+                    q_lin.weight = bnb.nn.Int8Params(
+                        child.weight.data.to("cpu", dtype=torch.float16),
+                        requires_grad=False,
+                        has_fp16_weights=False,
+                    )
+                else:
+                    q_lin = bnb.nn.Linear4bit(
+                        child.in_features,
+                        child.out_features,
+                        bias=has_bias,
+                        compute_dtype=compute_dtype,
+                        compress_statistics=True,
+                        quant_type="nf4",
+                    )
+                    q_lin.weight = bnb.nn.Params4bit(
+                        child.weight.data.to("cpu"),
+                        requires_grad=False,
+                        compress_statistics=True,
+                        quant_type="nf4",
+                    )
+                if has_bias:
+                    q_lin.bias = torch.nn.Parameter(
+                        child.bias.data.to(device=device, dtype=compute_dtype),
+                        requires_grad=False,
+                    )
+                q_lin.to(device)
+                setattr(parent, name, q_lin)
+                del child
+                q_count += 1
+            else:
+                _replace(child)
+
+    _replace(model)
+
+    for mod in model.modules():
+        if isinstance(mod, (bnb.nn.Linear4bit, bnb.nn.Linear8bitLt)):
+            continue
+        for _, p in mod.named_parameters(recurse=False):
+            if p is not None and p.device != device:
+                p.data = p.data.to(device=device)
+        for b_name, b in list(mod.named_buffers(recurse=False)):
+            if b is not None and b.device != device:
+                mod.register_buffer(b_name, b.to(device=device))
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    return q_count
+
+
 class LTXModelBackend:
-    """Контейнер весов LTX-Video с постоянным удержанием T5 в VRAM по умолчанию."""
+    """Контейнер весов LTX-Video (0.9.8-2B-Distilled или Base 0.9.0)."""
 
     def __init__(
         self,
@@ -120,13 +185,22 @@ class LTXModelBackend:
         quant_mode: str = "fp8",
         vae_tile_min_px: int = 384,
         allow_t5_offload: bool = False,
+        model_variant: str = "distilled",
     ):
-        from diffusers import LTXPipeline, LTXVideoTransformer3DModel
+        from diffusers import (
+            AutoencoderKLLTXVideo,
+            FlowMatchEulerDiscreteScheduler,
+            LTXPipeline,
+            LTXVideoTransformer3DModel,
+        )
+        from huggingface_hub import hf_hub_download
         from transformers import AutoTokenizer, BitsAndBytesConfig, T5EncoderModel
 
         self.device = device or DEVICE
         self.quant_mode = str(quant_mode).lower().strip()
         self.allow_t5_offload = bool(allow_t5_offload)
+        self.model_variant = str(model_variant).lower().strip()
+        self.is_distilled = self.model_variant in ("distilled", "0.9.8", "0.9.8-distilled")
         self.dtype = (
             torch.bfloat16
             if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
@@ -141,9 +215,7 @@ class LTXModelBackend:
             self.quant_mode = "bf16" if high_vram else "fp8"
 
         if high_vram:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                MODEL_REPO, subfolder="tokenizer"
-            )
+            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO, subfolder="tokenizer")
             self.text_encoder = T5EncoderModel.from_pretrained(
                 MODEL_REPO,
                 subfolder="text_encoder",
@@ -156,6 +228,7 @@ class LTXModelBackend:
                 self.tokenizer = AutoTokenizer.from_pretrained(str(QUANT_T5_DIR))
                 self.text_encoder = T5EncoderModel.from_pretrained(
                     str(QUANT_T5_DIR),
+                    torch_dtype=self.dtype,
                     device_map="cuda",
                     low_cpu_mem_usage=True,
                     attn_implementation="eager",
@@ -167,13 +240,12 @@ class LTXModelBackend:
                     bnb_4bit_compute_dtype=self.dtype,
                     bnb_4bit_use_double_quant=True,
                 )
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    MODEL_REPO, subfolder="tokenizer"
-                )
+                self.tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO, subfolder="tokenizer")
                 self.text_encoder = T5EncoderModel.from_pretrained(
                     MODEL_REPO,
                     subfolder="text_encoder",
                     quantization_config=bnb_cfg,
+                    torch_dtype=self.dtype,
                     device_map="cuda",
                     low_cpu_mem_usage=True,
                     attn_implementation="eager",
@@ -184,66 +256,113 @@ class LTXModelBackend:
 
         self.text_encoder.eval()
         self.t5_offloaded = False
+        self.vae_on_gpu = False
 
         transformer = None
-        if self.quant_mode in ("int8", "nf4", "4bit"):
-            try:
-                from diffusers import BitsAndBytesConfig as DiffusersBnBConfig
-                if self.quant_mode == "int8":
-                    print("⚙️ [3D-DiT QUANT] Загрузка трансформера в аппаратном 8-bit (BitsAndBytes INT8)...")
-                    dit_bnb = DiffusersBnBConfig(load_in_8bit=True)
-                else:
-                    print("⚙️ [3D-DiT QUANT] Загрузка трансформера в ультра-легком 4-bit NF4...")
-                    dit_bnb = DiffusersBnBConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_quant_type="nf4",
-                        bnb_4bit_compute_dtype=self.dtype,
-                        bnb_4bit_use_double_quant=True,
+        if self.is_distilled:
+            print(f"📥 [LTX 0.9.8 DISTILLED] Загрузка {DISTILLED_CKPT_FILENAME}...")
+            ckpt_path = hf_hub_download(repo_id=MODEL_REPO, filename=DISTILLED_CKPT_FILENAME)
+            transformer = LTXVideoTransformer3DModel.from_single_file(
+                ckpt_path, torch_dtype=self.dtype
+            )
+            if self.quant_mode in ("int8", "nf4", "4bit"):
+                try:
+                    n_q = quantize_model_inplace_bnb(
+                        transformer,
+                        quant_mode=self.quant_mode,
+                        compute_dtype=self.dtype,
+                        device=self.device,
                     )
-                transformer = LTXVideoTransformer3DModel.from_pretrained(
-                    MODEL_REPO,
-                    subfolder="transformer",
-                    quantization_config=dit_bnb,
-                    torch_dtype=self.dtype,
-                    device_map="cuda",
-                    low_cpu_mem_usage=True,
-                )
-            except Exception as e:
-                print(f"⚠️ [BnB Quant Fallback to FP8]: {e}")
-                self.quant_mode = "fp8"
-                transformer = None
+                    print(
+                        f"⚡ [LTX 0.9.8 {self.quant_mode.upper()}] "
+                        f"Послойно квантовано {n_q} линейных слоёв на CUDA!"
+                    )
+                except Exception as e:
+                    print(f"⚠️ [Distilled BnB -> FP8 fallback]: {e}")
+                    self.quant_mode = "fp8"
+                    if hasattr(transformer, "enable_layerwise_casting"):
+                        transformer.enable_layerwise_casting(
+                            storage_dtype=torch.float8_e4m3fn, compute_dtype=self.dtype
+                        )
+                    transformer.to(self.device)
+            else:
+                if self.quant_mode in ("fp8", "8bit") and hasattr(transformer, "enable_layerwise_casting"):
+                    transformer.enable_layerwise_casting(
+                        storage_dtype=torch.float8_e4m3fn, compute_dtype=self.dtype
+                    )
+                transformer.to(self.device)
 
-        if transformer is None:
+            vae = AutoencoderKLLTXVideo.from_single_file(ckpt_path, torch_dtype=self.dtype)
+            scheduler = FlowMatchEulerDiscreteScheduler(
+                use_dynamic_shifting=False, shift=1.0, shift_terminal=None
+            )
+            self.pipe = LTXPipeline(
+                scheduler=scheduler,
+                vae=vae,
+                text_encoder=None,
+                tokenizer=None,
+                transformer=transformer,
+            )
+        else:
             transformer = LTXVideoTransformer3DModel.from_pretrained(
                 MODEL_REPO,
                 subfolder="transformer",
                 torch_dtype=self.dtype,
                 low_cpu_mem_usage=True,
             )
-            if self.quant_mode in ("fp8", "8bit") and hasattr(transformer, "enable_layerwise_casting"):
-                print("⚡ [3D-DiT QUANT] Включен Layerwise Casting FP8 (float8_e4m3fn) -> экономия ~2 GB VRAM!")
-                transformer.enable_layerwise_casting(
-                    storage_dtype=torch.float8_e4m3fn, compute_dtype=self.dtype
-                )
+            if self.quant_mode in ("int8", "nf4", "4bit"):
+                try:
+                    n_q = quantize_model_inplace_bnb(
+                        transformer,
+                        quant_mode=self.quant_mode,
+                        compute_dtype=self.dtype,
+                        device=self.device,
+                    )
+                    print(
+                        f"⚡ [LTX BASE {self.quant_mode.upper()}] "
+                        f"Послойно квантовано {n_q} линейных слоёв на CUDA!"
+                    )
+                except Exception as e:
+                    print(f"⚠️ [Base BnB -> FP8 fallback]: {e}")
+                    self.quant_mode = "fp8"
+                    if hasattr(transformer, "enable_layerwise_casting"):
+                        transformer.enable_layerwise_casting(
+                            storage_dtype=torch.float8_e4m3fn, compute_dtype=self.dtype
+                        )
+                    transformer.to(self.device)
             else:
-                print(f"🚀 [3D-DiT QUANT] Трансформер в нативном {self.dtype} (максимальная скорость Tensor Cores)!")
+                if self.quant_mode in ("fp8", "8bit") and hasattr(transformer, "enable_layerwise_casting"):
+                    transformer.enable_layerwise_casting(
+                        storage_dtype=torch.float8_e4m3fn, compute_dtype=self.dtype
+                    )
+                transformer.to(self.device)
 
-        self.pipe = LTXPipeline.from_pretrained(
-            MODEL_REPO,
-            text_encoder=None,
-            tokenizer=None,
-            transformer=transformer,
-            torch_dtype=self.dtype,
-        )
-        self.pipe.scheduler.config.shift_terminal = None
+            self.pipe = LTXPipeline.from_pretrained(
+                MODEL_REPO,
+                text_encoder=None,
+                tokenizer=None,
+                transformer=transformer,
+                torch_dtype=self.dtype,
+            )
+            self.pipe.scheduler.config.shift_terminal = None
+
         self.pipe.set_progress_bar_config(disable=True)
-        if self.quant_mode not in ("int8", "nf4", "4bit"):
-            self.pipe.transformer.to(self.device)
         self.pipe.transformer.eval()
-        self.pipe.vae.to(self.device).eval()
+        self.pipe.vae.eval()
 
-        tile_min = max(256, int(vae_tile_min_px))
-        tile_stride = max(192, tile_min - 64)
+        # Если разрешён T5 offload: пока T5 на GPU, держим VAE на CPU (~1.7 ГБ экономии VRAM!).
+        if self.allow_t5_offload:
+            self.pipe.vae.to("cpu")
+            self.vae_on_gpu = False
+        else:
+            self.pipe.vae.to(self.device)
+            self.vae_on_gpu = True
+
+        eff_tile_px = int(vae_tile_min_px)
+        if self.is_distilled and vram_gb <= 16.5:
+            eff_tile_px = min(eff_tile_px, 256)
+        tile_min = max(192, eff_tile_px)
+        tile_stride = max(128, tile_min - 64)
         if hasattr(self.pipe.vae, "enable_tiling"):
             self.pipe.vae.enable_tiling(
                 tile_sample_min_height=tile_min,
@@ -259,7 +378,25 @@ class LTXModelBackend:
         torch.cuda.empty_cache()
         if torch.cuda.is_available():
             used_gb = torch.cuda.memory_allocated(0) / (1024**3)
-            print(f"📊 [VRAM USAGE] Занято после инициализации: {used_gb:.2f} GB / {vram_gb:.1f} GB (quant={self.quant_mode})")
+            print(
+                f"📊 [VRAM USAGE] {used_gb:.2f} GB / {vram_gb:.1f} GB "
+                f"(variant={'0.9.8-distilled' if self.is_distilled else '0.9.0-base'}, "
+                f"quant={self.quant_mode}, vae_tile={tile_min}px, vae_on_gpu={self.vae_on_gpu})"
+            )
+
+    @torch.no_grad()
+    def _move_vae_to_cpu(self):
+        if hasattr(self, "pipe") and self.pipe is not None and self.vae_on_gpu:
+            self.pipe.vae.to("cpu")
+            self.vae_on_gpu = False
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    @torch.no_grad()
+    def _move_vae_to_gpu(self):
+        if hasattr(self, "pipe") and self.pipe is not None and not self.vae_on_gpu:
+            self.pipe.vae.to(self.device)
+            self.vae_on_gpu = True
 
     @torch.no_grad()
     def offload_t5_to_cpu(self, force: bool = False) -> float:
@@ -272,24 +409,47 @@ class LTXModelBackend:
                 self.t5_offloaded = True
                 gc.collect()
                 torch.cuda.empty_cache()
-                used_gb = torch.cuda.memory_allocated(0) / (1024**3) if torch.cuda.is_available() else 0.0
-                print(f"🧹 [T5 OFFLOAD] T5-XXL выгружен из VRAM! Занято {used_gb:.2f} GB VRAM.")
-                return used_gb
-            except Exception as e:
-                print(f"⚠️ [T5 Offload Note]: {e}")
-        return 0.0
+            except Exception:
+                pass
+        # После выгрузки T5 сразу возвращаем VAE в VRAM (готовы к генерации видео):
+        self._move_vae_to_gpu()
+        used_gb = torch.cuda.memory_allocated(0) / (1024**3) if torch.cuda.is_available() else 0.0
+        print(f"🧹 [T5 -> VAE SWAP] T5 выгружен, VAE на CUDA -> занято {used_gb:.2f} GB.", flush=True)
+        return used_gb
 
+    @torch.no_grad()
+    def prepare_for_video_generation(self):
+        """Гарантирует, что перед шагом DiT/VAE T5 выгружен (если allow_t5_offload) и VAE на CUDA."""
+        if self.allow_t5_offload and self.text_encoder is not None:
+            self.offload_t5_to_cpu(force=False)
+        elif not self.vae_on_gpu:
+            self._move_vae_to_gpu()
+
+    @torch.no_grad()
     def _ensure_t5_loaded(self):
         if self.text_encoder is None:
             from transformers import T5EncoderModel
-            print("📥 [T5 RELOAD] Подгрузка 4-битного T5-XXL...")
+
+            # Освобождаем ~1.7 ГБ под T5, временно перенося VAE на CPU (~0.1с):
+            if self.allow_t5_offload:
+                self._move_vae_to_cpu()
+                used_before = torch.cuda.memory_allocated(0) / (1024**3) if torch.cuda.is_available() else 0.0
+                print(
+                    f"🔄 [VAE -> T5 SWAP] VAE временно на CPU (VRAM={used_before:.2f} GB), "
+                    f"загрузка T5-XXL ({self.dtype})...",
+                    flush=True,
+                )
+
             self.text_encoder = T5EncoderModel.from_pretrained(
                 str(QUANT_T5_DIR),
+                torch_dtype=self.dtype,
                 device_map="cuda",
                 low_cpu_mem_usage=True,
                 attn_implementation="eager",
             ).eval()
             self.t5_offloaded = False
+            gc.collect()
+            torch.cuda.empty_cache()
 
     @property
     def transformer(self):
@@ -336,10 +496,13 @@ class LTXModelBackend:
 
     @torch.no_grad()
     def set_scheduler_timesteps(self, steps: int, video_seq_len: int):
-        if steps <= 12:
-            sigmas = linear_quadratic_sigmas(steps, threshold_noise=0.04)
-        else:
-            sigmas = np.linspace(1.0, 1.0 / steps, steps).tolist()
+        if self.is_distilled:
+            sigmas = build_distilled_sigmas(steps)
+            self.scheduler.set_timesteps(sigmas=sigmas, device=self.device)
+            return self.scheduler.timesteps
+
+        min_sigma = min(0.10, 1.0 / max(2, steps))
+        sigmas = np.linspace(1.0, min_sigma, steps).tolist()
         mu = calculate_shift(
             video_seq_len,
             self.scheduler.config.get("base_image_seq_len", 256),
@@ -352,10 +515,7 @@ class LTXModelBackend:
 
     @torch.no_grad()
     def encode_frames_to_latent(self, frames_rgb: list[np.ndarray] | np.ndarray) -> torch.Tensor:
-        """
-        Кодирует последовательность из (1 + k * temporal_ratio) RGB-кадров [T, H, W, 3]
-        в каузальный 5D-латент [1, 128, 1 + k, H_lat, W_lat] с сохранением скорости движения.
-        """
+        self.prepare_for_video_generation()
         if isinstance(frames_rgb, list):
             arr = np.stack(frames_rgb, axis=0)
         elif frames_rgb.ndim == 3:
@@ -398,9 +558,10 @@ class LTXModelBackend:
         latents_5d: torch.Tensor,
         generator: torch.Generator | None = None,
         decode_t: float = 0.05,
-        decode_noise_scale: float = 0.0,
+        decode_noise_scale: float = 0.025,
         last_frame_fix: bool = True,
     ) -> list[np.ndarray]:
+        self.prepare_for_video_generation()
         denorm = self.pipe._denormalize_latents(
             latents_5d.to(dtype=torch.float32),
             self.vae.latents_mean,
@@ -433,9 +594,7 @@ class LTXModelBackend:
         if last_frame_fix and decoded.shape[2] > tsf:
             decoded = decoded[:, :, :-tsf, :, :]
 
-        post = self.pipe.video_processor.postprocess_video(
-            decoded, output_type="pt"
-        )
+        post = self.pipe.video_processor.postprocess_video(decoded, output_type="pt")
         frames_uint8 = (
             (post[0].permute(0, 2, 3, 1).float().clamp(0.0, 1.0) * 255.0)
             .to(torch.uint8)
@@ -451,9 +610,7 @@ class _TransformerConfigProxy:
 
 
 class _RemoteTransformerProxy:
-    def __init__(
-        self, conn, device: torch.device, dtype: torch.dtype, in_channels: int = 128
-    ):
+    def __init__(self, conn, device: torch.device, dtype: torch.dtype, in_channels: int = 128):
         self.conn = conn
         self.device = device
         self.dtype = dtype
@@ -482,77 +639,44 @@ class _RemoteTransformerProxy:
                 "hidden_states": self._to_np_f16(hidden_states),
                 "encoder_hidden_states": self._to_np_f16(encoder_hidden_states),
                 "timestep": timestep.detach().float().cpu().numpy(),
-                "encoder_attention_mask": encoder_attention_mask.detach()
-                .cpu()
-                .numpy(),
+                "encoder_attention_mask": encoder_attention_mask.detach().cpu().numpy(),
                 "num_frames": int(num_frames),
                 "height": int(height),
                 "width": int(width),
-                "rope_interpolation_scale": tuple(
-                    float(x) for x in rope_interpolation_scale
-                ),
+                "rope_interpolation_scale": tuple(float(x) for x in rope_interpolation_scale),
             }
         )
         resp = self.conn.recv()
         if resp.get("status") != "ok":
             raise RuntimeError(f"Remote transformer error: {resp.get('error')}")
-        sample = torch.from_numpy(resp["sample"]).to(
-            device=self.device, dtype=self.dtype
-        )
+        sample = torch.from_numpy(resp["sample"]).to(device=self.device, dtype=self.dtype)
         return (sample,)
 
 
 class _LocalLatentPackerPipe:
     @staticmethod
-    def _pack_latents(
-        latents: torch.Tensor, patch_size: int = 1, patch_size_t: int = 1
-    ) -> torch.Tensor:
-        batch_size, num_channels, num_frames, height, width = latents.shape
-        post_patch_num_frames = num_frames // patch_size_t
-        post_patch_height = height // patch_size
-        post_patch_width = width // patch_size
+    def _pack_latents(latents: torch.Tensor, patch_size: int = 1, patch_size_t: int = 1) -> torch.Tensor:
+        batch_size, _, num_frames, height, width = latents.shape
         latents = latents.reshape(
-            batch_size,
-            -1,
-            post_patch_num_frames,
-            patch_size_t,
-            post_patch_height,
-            patch_size,
-            post_patch_width,
-            patch_size,
+            batch_size, -1, num_frames // patch_size_t, patch_size_t,
+            height // patch_size, patch_size, width // patch_size, patch_size,
         )
         return latents.permute(0, 2, 4, 6, 1, 3, 5, 7).flatten(4, 7).flatten(1, 3)
 
     @staticmethod
     def _unpack_latents(
-        latents: torch.Tensor,
-        num_frames: int,
-        height: int,
-        width: int,
-        patch_size: int = 1,
-        patch_size_t: int = 1,
+        latents: torch.Tensor, num_frames: int, height: int, width: int,
+        patch_size: int = 1, patch_size_t: int = 1,
     ) -> torch.Tensor:
         batch_size = latents.size(0)
         latents = latents.reshape(
-            batch_size,
-            num_frames,
-            height,
-            width,
-            -1,
-            patch_size_t,
-            patch_size,
-            patch_size,
+            batch_size, num_frames, height, width, -1, patch_size_t, patch_size, patch_size
         )
-        return (
-            latents.permute(0, 4, 1, 5, 2, 6, 3, 7)
-            .flatten(6, 7)
-            .flatten(4, 5)
-            .flatten(2, 3)
-        )
+        return latents.permute(0, 4, 1, 5, 2, 6, 3, 7).flatten(6, 7).flatten(4, 5).flatten(2, 3)
 
 
 class RemoteLTXModelBackend:
-    """Клиентский прокси к бессмертному серверу весов (neuro_battle_server.py)."""
+    """Клиентский прокси к серверу весов (neuro_battle_server.py)."""
 
     def __init__(self, conn, ping_info: dict, device: torch.device | None = None):
         from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
@@ -566,26 +690,27 @@ class RemoteLTXModelBackend:
         )
         self._spatial_ratio = int(ping_info.get("spatial_ratio", 32))
         self._temporal_ratio = int(ping_info.get("temporal_ratio", 8))
+        self.is_distilled = bool(ping_info.get("is_distilled", False))
         in_channels = int(ping_info.get("in_channels", 128))
 
         self.pipe = _LocalLatentPackerPipe()
         self.transformer = _RemoteTransformerProxy(
-            conn=self.conn,
-            device=self.device,
-            dtype=self.dtype,
-            in_channels=in_channels,
+            conn=self.conn, device=self.device, dtype=self.dtype, in_channels=in_channels
         )
-        self.scheduler = FlowMatchEulerDiscreteScheduler(
-            use_dynamic_shifting=True,
-            base_image_seq_len=int(ping_info.get("base_image_seq_len", 256)),
-            max_image_seq_len=int(ping_info.get("max_image_seq_len", 4096)),
-            base_shift=float(ping_info.get("base_shift", 0.5)),
-            max_shift=float(ping_info.get("max_shift", 1.15)),
-            shift_terminal=None,
-        )
-        self._local_prompt_cache: dict[
-            tuple[str, int], tuple[torch.Tensor, torch.Tensor]
-        ] = {}
+        if self.is_distilled:
+            self.scheduler = FlowMatchEulerDiscreteScheduler(
+                use_dynamic_shifting=False, shift=1.0, shift_terminal=None
+            )
+        else:
+            self.scheduler = FlowMatchEulerDiscreteScheduler(
+                use_dynamic_shifting=True,
+                base_image_seq_len=int(ping_info.get("base_image_seq_len", 256)),
+                max_image_seq_len=int(ping_info.get("max_image_seq_len", 4096)),
+                base_shift=float(ping_info.get("base_shift", 0.5)),
+                max_shift=float(ping_info.get("max_shift", 1.15)),
+                shift_terminal=None,
+            )
+        self._local_prompt_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._decode_call_idx = 0
 
     @property
@@ -596,44 +721,38 @@ class RemoteLTXModelBackend:
     def temporal_ratio(self) -> int:
         return self._temporal_ratio
 
-    def offload_t5_to_cpu(self):
-        pass
+    def offload_t5_to_cpu(self) -> float:
+        try:
+            self.conn.send({"cmd": "evict_t5_to_cpu"})
+            resp = self.conn.recv()
+            return float(resp.get("vram_gb", 0.0))
+        except Exception:
+            return 0.0
 
     @torch.no_grad()
-    def encode_semantics(
-        self, text: str, max_len: int = 128
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode_semantics(self, text: str, max_len: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
         key = (str(text), int(max_len))
         if key not in self._local_prompt_cache:
             if len(self._local_prompt_cache) > 1024:
                 self._local_prompt_cache.clear()
-            self.conn.send(
-                {
-                    "cmd": "encode_semantics",
-                    "text": str(text),
-                    "max_len": int(max_len),
-                }
-            )
+            self.conn.send({"cmd": "encode_semantics", "text": str(text), "max_len": int(max_len)})
             resp = self.conn.recv()
             if resp.get("status") != "ok":
-                raise RuntimeError(
-                    f"Remote encode_semantics error: {resp.get('error')}"
-                )
-            emb = torch.from_numpy(resp["embeds"]).to(
-                device=self.device, dtype=self.dtype
-            )
-            msk = torch.from_numpy(resp["mask"]).to(
-                device=self.device, dtype=torch.bool
-            )
+                raise RuntimeError(f"Remote encode_semantics error: {resp.get('error')}")
+            emb = torch.from_numpy(resp["embeds"]).to(device=self.device, dtype=self.dtype)
+            msk = torch.from_numpy(resp["mask"]).to(device=self.device, dtype=torch.bool)
             self._local_prompt_cache[key] = (emb, msk)
         return self._local_prompt_cache[key]
 
     @torch.no_grad()
     def set_scheduler_timesteps(self, steps: int, video_seq_len: int):
-        if steps <= 12:
-            sigmas = linear_quadratic_sigmas(steps, threshold_noise=0.04)
-        else:
-            sigmas = np.linspace(1.0, 1.0 / steps, steps).tolist()
+        if self.is_distilled:
+            sigmas = build_distilled_sigmas(steps)
+            self.scheduler.set_timesteps(sigmas=sigmas, device=self.device)
+            return self.scheduler.timesteps
+
+        min_sigma = min(0.10, 1.0 / max(2, steps))
+        sigmas = np.linspace(1.0, min_sigma, steps).tolist()
         mu = calculate_shift(
             video_seq_len,
             self.scheduler.config.get("base_image_seq_len", 256),
@@ -654,35 +773,19 @@ class RemoteLTXModelBackend:
             arr = frames_rgb
         if arr.shape[0] == 1:
             return self.encode_frame_to_latent(arr[0])
-
-        self.conn.send(
-            {
-                "cmd": "encode_frames",
-                "frames_rgb": np.ascontiguousarray(arr, dtype=np.uint8),
-            }
-        )
+        self.conn.send({"cmd": "encode_frames", "frames_rgb": np.ascontiguousarray(arr, dtype=np.uint8)})
         resp = self.conn.recv()
         if resp.get("status") != "ok":
-            # Фоллбек на 1 кадр, если сервер старой версии
             return self.encode_frame_to_latent(arr[-1])
-        return torch.from_numpy(resp["latent_5d"]).to(
-            device=self.device, dtype=torch.float32
-        )
+        return torch.from_numpy(resp["latent_5d"]).to(device=self.device, dtype=torch.float32)
 
     @torch.no_grad()
     def encode_frame_to_latent(self, frame_rgb: np.ndarray) -> torch.Tensor:
-        self.conn.send(
-            {
-                "cmd": "encode_frame",
-                "frame_rgb": np.ascontiguousarray(frame_rgb, dtype=np.uint8),
-            }
-        )
+        self.conn.send({"cmd": "encode_frame", "frame_rgb": np.ascontiguousarray(frame_rgb, dtype=np.uint8)})
         resp = self.conn.recv()
         if resp.get("status") != "ok":
             raise RuntimeError(f"Remote encode_frame error: {resp.get('error')}")
-        return torch.from_numpy(resp["latent_5d"]).to(
-            device=self.device, dtype=torch.float32
-        )
+        return torch.from_numpy(resp["latent_5d"]).to(device=self.device, dtype=torch.float32)
 
     @torch.no_grad()
     def decode_latents_chunk(
@@ -690,7 +793,7 @@ class RemoteLTXModelBackend:
         latents_5d: torch.Tensor,
         generator: torch.Generator | None = None,
         decode_t: float = 0.05,
-        decode_noise_scale: float = 0.0,
+        decode_noise_scale: float = 0.025,
         last_frame_fix: bool = True,
     ) -> list[np.ndarray]:
         self._decode_call_idx += 1

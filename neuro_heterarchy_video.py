@@ -1,655 +1,1281 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS: PER-REGION FULL-RANK [1, 128, 4096] VIDEO RUNNER (PORT 6007 VIDEO IPC)
+neuro_heterarchy_video.py — Единый 3D-DiT Видео-Раннер (Каталитический & Чистый WM)
 ===================================================================================
-- Отправляет все промежуточные кадры видео-блока (jpg_frames) в WebUI без потерь,
-  чтобы в браузере отображалось плавное непрерывное видео движения шарика, а не слайд-шоу!
+- Поддерживает КАК JSON-манифесты с катализаторами/NPC (configs/*.json),
+  ТАК И обычные .txt лоры (lore/*.txt) — автоматически отключая Оракул при отсутствии гипотез.
+- Подключается к video_world_server.py на порту 6006 (authkey=b"video_world").
+- Работает с web_cloud_gateway.py (:6002 видео + :6007 управление, геймпад, set_init_image).
 ===================================================================================
 """
 
 from __future__ import annotations
-import sys
-import time
 import argparse
-import os
-import threading
-from pathlib import Path
+from collections import deque
+from copy import copy
+import json
 from multiprocessing.connection import Client
-import numpy as np
+import os
+from pathlib import Path
+import threading
+import time
 import cv2
-import torch
-import torch.nn.functional as F
+import numpy as np
 
-CURRENT_DIR = Path(__file__).resolve().parent
-for p in [CURRENT_DIR, CURRENT_DIR / "src", CURRENT_DIR.parent / "src"]:
-    if p.exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
-
-from neuro_heterarchy_core import DEVICE
-from neuro_genesis_engine import SelfSufficientHeterarchyRouter
-from neuro_amodal_engine import (
-    SharedAmodalCognitiveEngine,
-    HardwareVRAMBus,
-    REGION_ROLES,
-    EXTENDED_ROLE_TO_FUNCTIONAL,
-    BAND_DELTA,
-    BAND_THETA,
-    BAND_BETA,
-    BAND_GAMMA,
-    BAND_RIPPLES,
-    MONTY_CODE_TO_STR,
+from neuro_world import (
+    load_game_manifest,
+    StageSpec,
+    StageEntitySlot,
+    GenerativeQuestSpec,
+    GameWorldManifest,
+    ArchetypeSpec,
 )
+from neuro_engine import UniversalLatentAutobattlerEngine
+from neuro_clash_hud import draw_identity_hud
+from neuro_referee import LatentIdentityFrameTelemetry
 from neuro_recorder import recorder_instance
 
-ROLE_TO_BUS_IDX = {r: i for i, r in enumerate(REGION_ROLES)}
-CORE_REGIONS = ("FPZ", "AFZ", "F3", "F4", "FCZ")
+try:
+    from neuro_amodal_engine import (
+        SharedAmodalCognitiveEngine,
+        SelfSufficientHeterarchyRouter,
+        EXTENDED_ROLE_TO_FUNCTIONAL,
+    )
+    HAS_AMODAL_LSL_ENGINE = True
+except ImportError:
+    HAS_AMODAL_LSL_ENGINE = False
+
+MODE_TO_MANIFEST = {
+    "ball": [
+        "configs/mode_05_wm_control_test_arena.json",
+        "mode_05_wm_control_test_arena.json",
+    ],
+    "maze": [
+        "configs/mode_03_semantic_maze_gm.json",
+        "mode_03_semantic_maze_gm.json",
+    ],
+    "ritual": [
+        "configs/mode_04_forest_neuro_ritual.json",
+        "mode_04_forest_neuro_ritual.json",
+    ],
+    "duel": [
+        "configs/mode_02_catalytic_duel.json",
+        "mode_02_catalytic_duel.json",
+    ],
+    "psy": [
+        "lore/video_lore_psy.txt",
+        "lore/video_lore_plain_psy.txt",
+    ],
+}
+
+ROLE_TO_ENTITY_SLOT = {
+    "FCz": "e0",
+    "AFz": "e1",
+    "F3":  "e2",
+    "F4":  "e3",
+    "Fpz": "e0",
+}
 
 
-class RegionalLoreReader:
-    def __init__(self, lore_file: str | None = None):
-        self.lock = threading.RLock()
-        s = (lore_file or "").strip()
-        if s.startswith("/app/"):
-            s = s[len("/app/"):]
-        self.lore_file = s
-        self.sections: dict[str, list[str]] = {
-            "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
-        }
-        self.load_file(self.lore_file)
+def resolve_lore_or_manifest_path(
+    mode: str | None, manifest_arg: str, lore_arg: str
+) -> str:
+    if lore_arg and lore_arg.strip():
+        p = lore_arg.strip()
+        if Path(p).exists():
+            return p
+        return p
 
-    def load_file(self, lore_file: str):
-        with self.lock:
-            self.lore_file = lore_file
-            self.sections = {"FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []}
-            unassigned_global = []
-            if lore_file and os.path.exists(lore_file):
-                current_sec = None
-                with open(lore_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        s = line.strip()
-                        if not s or s.startswith("#"):
-                            continue
-                        if s.startswith("[") and s.endswith("]"):
-                            current_sec = s[1:-1].strip().upper()
-                            if current_sec not in self.sections:
-                                self.sections[current_sec] = []
-                        else:
-                            if current_sec is None:
-                                unassigned_global.append(s)
-                            else:
-                                self.sections[current_sec].append(s)
+    if mode and mode in MODE_TO_MANIFEST:
+        for candidate in MODE_TO_MANIFEST[mode]:
+            if Path(candidate).exists():
+                return candidate
+        return MODE_TO_MANIFEST[mode][0]
 
-                if unassigned_global:
-                    for r_k in CORE_REGIONS:
-                        if not self.sections[r_k]:
-                            self.sections[r_k] = list(unassigned_global)
-
-                non_empty = next((self.sections[r] for r in CORE_REGIONS if self.sections[r]), [])
-                if non_empty:
-                    for r_k in CORE_REGIONS:
-                        if not self.sections[r_k]:
-                            self.sections[r_k] = list(non_empty)
-
-                print("=" * 80)
-                print(f"📜 [ЗАГРУЖЕН ПОРЕГИОННЫЙ ЛОР ВИДЕО-МИРА ИЗ {lore_file}]:")
-                for sec, lines in self.sections.items():
-                    if lines:
-                        print(f"  • [{sec}] {len(lines)} концепт(ов): {lines[0][:65]}...")
-                print("=" * 80)
-
-    def replace_sections(self, new_sections: dict[str, list[str]], lore_file: str | None = None):
-        with self.lock:
-            if lore_file:
-                self.lore_file = lore_file
-            for k in ("FPZ", "AFZ", "F3", "F4", "FCZ", "NEGATIVE"):
-                if k in new_sections and isinstance(new_sections[k], list):
-                    self.sections[k] = [str(x).strip() for x in new_sections[k] if str(x).strip()]
-            non_empty = next((self.sections[r] for r in CORE_REGIONS if self.sections[r]), [])
-            if non_empty:
-                for r_k in CORE_REGIONS:
-                    if not self.sections[r_k]:
-                        self.sections[r_k] = list(non_empty)
-
-    def get_copy(self) -> dict[str, list[str]]:
-        with self.lock:
-            return {k: list(v) for k, v in self.sections.items()}
+    if Path(manifest_arg).exists():
+        return manifest_arg
+    alt = Path(manifest_arg).name
+    if Path(alt).exists():
+        return alt
+    return manifest_arg
 
 
-@torch.no_grad()
-def compile_per_region_full_rank_wm_tensor_gpu(bus: HardwareVRAMBus) -> torch.Tensor:
-    wm_field = bus.wm_field_5x5x32x120
-    sdr_l23  = bus.monty_l23_5x4096
-    sdr_anom = bus.monty_anom_5x4096
-    c_flow   = bus.ripple_dag_5x16x16
-    meta     = bus.meta_64
+def load_txt_lore_as_manifest(txt_path: str) -> GameWorldManifest:
+    """Превращает обычный .txt лор (lore/*.txt) в 1-стадийный манифест без Оракула (чистый WM-поток)."""
+    secs: dict[str, list[str]] = {
+        "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
+    }
+    unassigned: list[str] = []
+    if txt_path and Path(txt_path).is_file():
+        cur = None
+        with open(txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if s.startswith("[") and s.endswith("]"):
+                    cur = s[1:-1].strip().upper()
+                    if cur not in secs:
+                        secs[cur] = []
+                else:
+                    if cur is None:
+                        unassigned.append(s)
+                    else:
+                        secs[cur].append(s)
 
-    monty_code = int(round(float(meta[27].item())))
-    monty_mode = MONTY_CODE_TO_STR.get(monty_code, "missing_only")
+    if unassigned and not secs["FCZ"]:
+        secs["FCZ"] = list(unassigned)
 
-    wm_128x4096 = torch.zeros((1, 128, 4096), dtype=torch.float32, device=DEVICE)
+    fpz_ctx = secs["FPZ"][0].rstrip(".") if secs["FPZ"] else ""
+    fcz_first = secs["FCZ"][0] if secs["FCZ"] else fpz_ctx
+    neg_str = ", ".join(secs["NEGATIVE"]) if secs["NEGATIVE"] else ""
 
-    region_windows = [
-        ("Fpz", 0, 25),
-        ("AFz", 25, 50),
-        ("F3",  50, 75),
-        ("F4",  75, 100),
-        ("FCz", 100, 128),
+    archetypes: dict[str, ArchetypeSpec] = {}
+    entities: list[StageEntitySlot] = []
+    reg_bindings = [
+        (0, "FCZ", "eeg:FCz"),
+        (1, "AFZ", "eeg:AFz"),
+        (2, "F3",  "eeg:F3"),
+        (3, "F4",  "eeg:F4"),
     ]
+    for idx_s, r_key, binding in reg_bindings:
+        lines = secs.get(r_key, [])
+        pool_ids = []
+        for l_i, txt in enumerate(lines):
+            aid = f"e{idx_s}_s{l_i}"
+            pool_ids.append(aid)
+            archetypes[aid] = ArchetypeSpec(
+                archetype_id=aid,
+                element_tag=f"{r_key}_{l_i}",
+                role_tag="WM_AGENT",
+                display_name=f"e{idx_s}:{txt[:18]}",
+                essence_desc=txt,
+                action_desc="",
+            )
+        entities.append(
+            StageEntitySlot(
+                slot_id=f"e{idx_s}",
+                control_binding=binding,
+                party_size=1,
+                allowed_pool=pool_ids,
+            )
+        )
 
-    for role_name, start_i, end_i in region_windows:
-        r_idx = ROLE_TO_BUS_IDX[role_name]
-        span = end_i - start_i
-        is_phys = bool(meta[21 + r_idx].item() > 0.5)
-        use_monty_here = (monty_mode == "full") or (monty_mode == "missing_only" and not is_phys)
-
-        dag_flat_256 = c_flow[r_idx].reshape(-1)
-
-        pac_dt_3840 = (wm_field[r_idx, BAND_DELTA] * wm_field[r_idx, BAND_THETA]).reshape(-1)
-        pac_tg_3840 = (wm_field[r_idx, BAND_THETA] * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
-        pac_bg_3840 = (wm_field[r_idx, BAND_BETA]  * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
-        rip_g_3840  = (wm_field[r_idx, BAND_RIPPLES] * wm_field[r_idx, BAND_GAMMA]).reshape(-1)
-
-        if use_monty_here and torch.norm(sdr_l23[r_idx]) > 1e-4:
-            row5_4096 = sdr_l23[r_idx]
-            row6_4096 = sdr_anom[r_idx]
-            tail_256  = F.adaptive_avg_pool1d(sdr_l23[r_idx].unsqueeze(0), 256).squeeze(0)
-            anom_256  = F.adaptive_avg_pool1d(sdr_anom[r_idx].unsqueeze(0), 256).squeeze(0)
-        else:
-            tail_256  = (wm_field[r_idx, BAND_GAMMA, :16, :16] - wm_field[r_idx, BAND_BETA, 16:32, :16]).reshape(-1)
-            anom_256  = (wm_field[r_idx, BAND_RIPPLES, 16:32, :16] - wm_field[r_idx, BAND_RIPPLES, :16, :16]).reshape(-1)
-            row5_4096 = torch.cat([pac_dt_3840, tail_256], dim=0)
-            row6_4096 = torch.cat([wm_field[r_idx].mean(dim=0).reshape(-1), anom_256], dim=0)
-
-        for b in range(5):
-            wave_3840 = wm_field[r_idx, b].reshape(-1)
-            wm_128x4096[0, start_i + b, 0:3840] = wave_3840
-            wm_128x4096[0, start_i + b, 3840:4096] = tail_256
-
-        wm_128x4096[0, start_i + 5, :] = row5_4096
-        wm_128x4096[0, start_i + 6, :] = row6_4096
-
-        wm_128x4096[0, start_i + 7, 0:3840] = pac_tg_3840
-        wm_128x4096[0, start_i + 7, 3840:4096] = dag_flat_256
-
-        wm_128x4096[0, start_i + 8, 0:3840] = pac_bg_3840
-        wm_128x4096[0, start_i + 8, 3840:4096] = anom_256
-
-        wm_128x4096[0, start_i + 9, 0:3840] = rip_g_3840
-        wm_128x4096[0, start_i + 9, 3840:4096] = tail_256
-
-        rem = span - 10
-        for k in range(rem):
-            s_a = (k * 2) % 32
-            s_b = (k * 2 + 1) % 32
-            s_c = (k * 2 + 16) % 32
-            slot_pair_1200 = wm_field[r_idx, :, [s_a, s_b], :].reshape(-1)
-            chord_600 = (wm_field[r_idx, :, -1, :] - wm_field[r_idx, :, s_a, :]).reshape(-1)
-            sagitta_600 = (wm_field[r_idx, :, s_c, :] - 0.5 * (wm_field[r_idx, :, -1, :] + wm_field[r_idx, :, 0, :])).reshape(-1)
-            wm_128x4096[0, start_i + 10 + k, 0:1200] = slot_pair_1200
-            wm_128x4096[0, start_i + 10 + k, 1200:1800] = chord_600
-            wm_128x4096[0, start_i + 10 + k, 1800:2056] = dag_flat_256
-            if use_monty_here and torch.norm(sdr_l23[r_idx]) > 1e-4:
-                wm_128x4096[0, start_i + 10 + k, 2056:4096] = sdr_l23[r_idx, :2040]
-            else:
-                extra_1440 = wm_field[r_idx, :, [s_b, s_c, (s_c + 1) % 32], :96].reshape(-1)
-                wm_128x4096[0, start_i + 10 + k, 2056:2656] = sagitta_600
-                wm_128x4096[0, start_i + 10 + k, 2656:4096] = extra_1440
-
-    return wm_128x4096
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Per-Region Full-Rank 3D-DiT Video Runner")
-    parser.add_argument("--video-lore", "--lore", dest="video_lore", type=str, default="")
-    parser.add_argument("--users", type=str, default="")
-    parser.add_argument("--gamma-max", type=float, default=100.0)
-    parser.add_argument("--video-port", type=int, default=6006)
-    parser.add_argument("--gateway-port", type=int, default=6002)
-    parser.add_argument("--video-ctrl-port", type=int, default=6007)
-    parser.add_argument("--headless", action="store_true", default=False)
-    parser.add_argument("--stochastic", type=float, default=0.0,
-                        help="Стохастика активных регионов с девайсами (0.0 = 100% управление из рабочей памяти)")
-    parser.add_argument("--unassigned-stochastic", type=float, default=1.0,
-                        help="Стохастика пустых регионов без девайсов (1.0 = живой DiT, 0.0 = строгий детерминизм)")
-    parser.add_argument("--wm-radius", type=float, default=0.25,
-                        help="Радиус области концепта в нестохастическом режиме (0.05..0.80)")
-    parser.add_argument("--seed", type=int, default=42)
-
-    parser.add_argument("--monty-mode", type=str, default="missing_only", choices=["off", "missing_only", "full"],
-                        help="Режим Монти: off (чистая рабочая память), missing_only (оператор пустых регионов), full")
-    parser.add_argument("--no-monty", action="store_true", default=False,
-                        help="Полностью отключить Монти (100% чистая рабочая память)")
-
-    parser.add_argument("--active-gain", type=float, default=0.92)
-    parser.add_argument("--inactive-gain", type=float, default=0.06)
-    parser.add_argument("--cross-bleed", type=float, default=0.25)
-    args = parser.parse_args()
-
-    init_monty_mode = "off" if args.no_monty else args.monty_mode
-    init_stoch = float(np.clip(args.stochastic, 0.0, 1.0))
-    init_unass_stoch = float(np.clip(args.unassigned_stochastic, 0.0, 1.0))
-    init_wm_radius = float(np.clip(args.wm_radius, 0.0, 1.0))
-
-    print(f"⏳ Подключение к video_world_server (порт {args.video_port})...")
-    vid_conn = None
-    while vid_conn is None:
-        try:
-            vid_conn = Client(("localhost", args.video_port), authkey=b"video_world")
-        except Exception:
-            time.sleep(0.5)
-    print(
-        f"✅ [VIDEO-RUNNER] Видео-сервер 3D-DiT подключен! "
-        f"(Monty={init_monty_mode.upper()}, Stoch={init_stoch:.2f}, UnassStoch={init_unass_stoch:.2f}, Radius={init_wm_radius:.2f})"
+    stage0 = StageSpec(
+        global_stage=1,
+        stage_title=Path(txt_path).stem if txt_path else "Pure_WM_Stream",
+        entities=entities,
+        quest=GenerativeQuestSpec(
+            ongoing_hypothesis="",
+            completed_hypothesis="",
+            failed_hypothesis="",
+            active_slot_idx=0,
+            catalyst_slot_idx=0,
+            driver_tag="PURE_WM",
+            reaction_formula="PURE_WM_STREAM",
+        ),
     )
 
-    lore_reader = RegionalLoreReader(lore_file=args.video_lore)
-    router = SelfSufficientHeterarchyRouter(args.users)
+    return GameWorldManifest(
+        world_name=Path(txt_path).stem if txt_path else "Pure_WM_World",
+        arena_context_desc=fpz_ctx if fpz_ctx != fcz_first else "",
+        static_hold_desc=fcz_first,
+        negative_desc=neg_str,
+        archetypes=archetypes,
+        stages=[stage0],
+    )
+
+
+def load_manifest_or_txt_lore(path_str: str) -> GameWorldManifest:
+    if path_str.endswith(".json"):
+        return load_game_manifest(path_str)
+    return load_txt_lore_as_manifest(path_str)
+
+
+def manifest_to_web_sections(manifest: GameWorldManifest) -> dict[str, list[str]]:
+    secs: dict[str, list[str]] = {
+        "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
+    }
+    if manifest.negative_desc:
+        secs["NEGATIVE"] = [manifest.negative_desc]
+    if manifest.arena_context_desc:
+        secs["FPZ"].append(manifest.arena_context_desc)
+
+    if manifest.stages:
+        st0 = manifest.stages[0]
+        for slot in st0.entities:
+            reg_key = "FCZ"
+            b_up = slot.control_binding.upper()
+            for r_k in ("FCZ", "AFZ", "F3", "F4", "FPZ"):
+                if r_k in b_up:
+                    reg_key = r_k
+                    break
+            for aid in slot.allowed_pool:
+                arch = manifest.archetypes.get(aid)
+                if arch:
+                    full_s = f"{arch.essence_desc} {arch.action_desc}".strip()
+                    if full_s and full_s not in secs[reg_key]:
+                        secs[reg_key].append(full_s)
+    return secs
+
+
+def apply_web_sections_to_manifest(
+    manifest: GameWorldManifest, sections: dict[str, list[str]]
+):
+    if "NEGATIVE" in sections:
+        neg_list = [s.strip() for s in sections.get("NEGATIVE", []) if s.strip()]
+        manifest.negative_desc = ", ".join(neg_list) if neg_list else ""
+
+    if "FPZ" in sections:
+        fpz_list = [s.strip() for s in sections.get("FPZ", []) if s.strip()]
+        fcz_list = [s.strip() for s in sections.get("FCZ", []) if s.strip()]
+        if not fpz_list or (fpz_list == fcz_list):
+            manifest.arena_context_desc = ""
+        else:
+            manifest.arena_context_desc = fpz_list[0].rstrip(".")
+
+    for idx_s, reg_key in [(0, "FCZ"), (1, "AFZ"), (2, "F3"), (3, "F4")]:
+        if reg_key not in sections:
+            continue
+        lines = [s.strip() for s in sections.get(reg_key, []) if s.strip()]
+        new_pool_ids = []
+        for l_idx, line_txt in enumerate(lines):
+            aid = f"e{idx_s}_s{l_idx}"
+            new_pool_ids.append(aid)
+            manifest.archetypes[aid] = ArchetypeSpec(
+                archetype_id=aid,
+                element_tag=f"{reg_key}_{l_idx}",
+                role_tag="WM_AGENT",
+                display_name=f"e{idx_s}:{line_txt[:18]}",
+                essence_desc=line_txt,
+                action_desc="",
+            )
+        for st in manifest.stages:
+            if idx_s < len(st.entities):
+                st.entities[idx_s].allowed_pool = list(new_pool_ids)
+
+
+def build_compact_telemetry(telem: dict) -> dict:
+    win_map = {}
+    for k, v in telem.get("wm_524288d_choice_debug", {}).items():
+        ch = v.get("chosen", {})
+        if ch:
+            c_id, c_pct = next(iter(ch.items()))
+            short_id = c_id.split("_", 1)[-1] if "_" in c_id else c_id
+            win_map[k] = f"{short_id}:{int(round(c_pct))}%"
+
+    br_map = {
+        k.replace("CAT(", "").replace(")", ""): int(round(v))
+        for k, v in telem.get("reaction_branch_competition_128d", {}).items()
+    }
+    chaos = telem.get("feigenbaum_chaos_metrics", {})
+    oracle = telem.get("quest_oracle_metrics", {})
+    rt = telem.get("realtime_pacing", {})
+
+    return {
+        "step": telem.get("step"),
+        "t": telem.get("t"),
+        "stg": telem.get("global_stage"),
+        "drv": telem.get("driver_tag"),
+        "dS": oracle.get("quest_progress_pct"),
+        "P+": oracle.get("prob_completed_peak_pct"),
+        "r": round(float(chaos.get("feigenbaum_r", 3.57)), 3),
+        "cat_res": chaos.get("catalytic_resonance_pct"),
+        "win": win_map,
+        "branches": br_map,
+        "rtf": rt.get("ema_rtf"),
+        "spd": rt.get("play_speed"),
+        "ms": int(round(float(rt.get("gen_ms", 0)))),
+    }
+
+
+def draw_minimal_rtf_banner(
+    frame_rgb: np.ndarray,
+    rtf: float,
+    play_speed: float,
+    gen_ms: float,
+    raw_video_ms: float,
+    q_sec: float,
+    ctx_lat: int,
+    telem: LatentIdentityFrameTelemetry | None,
+) -> np.ndarray:
+    canvas = frame_rgb.copy()
+    h, w, _ = canvas.shape
+    overlay = canvas.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 22), (8, 12, 18), -1)
+    cv2.addWeighted(overlay, 0.78, canvas, 0.22, 0, canvas)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    diff_ms = gen_ms - raw_video_ms
+    if rtf >= 1.0:
+        headroom_pct = int(round((rtf - 1.0) * 100.0))
+        status_col = (80, 255, 140)
+        rtf_txt = f"RTF:{rtf:.2f}x (+{headroom_pct}% ZAPAS -> OK TO ADD CTX={ctx_lat+1})"
+    else:
+        lag_pct = int(round((1.0 - rtf) * 100.0))
+        status_col = (255, 200, 60) if rtf >= 0.55 else (255, 110, 90)
+        rtf_txt = f"RTF:{rtf:.2f}x (SLOWDOWN {play_speed:.2f}x | LAG +{diff_ms:.0f}ms / -{lag_pct}%)"
+
+    d_str = (
+        f" | dS:{telem.quest_progress_pct:.0f}% r:{telem.feigenbaum_r:.3f}"
+        if telem
+        else ""
+    )
+    line = f"{rtf_txt} | Gen:{gen_ms:.0f}ms Buf:{q_sec:.1f}s{d_str} [H:HUD]"
+    cv2.putText(canvas, line[:92], (6, 15), font, 0.25, status_col, 1, cv2.LINE_AA)
+    return canvas
+
+
+class SmoothRealtimeVideoPacer(threading.Thread):
+
+    def __init__(
+        self,
+        gateway_port: int,
+        width: int,
+        height: int,
+        monochrome: bool,
+        show_window: bool = False,
+        hud_mode: str = "off",
+        manifest: GameWorldManifest | None = None,
+        game_mode: str = "strict_ko",
+        context_latents: int = 1,
+        runner: UniversalLatentAutobattlerEngine | None = None,
+    ):
+        super().__init__(daemon=True)
+        self.gateway_port = gateway_port
+        self.width = width
+        self.height = height
+        self.monochrome = monochrome
+        self.show_window = show_window
+        self.hud_mode = hud_mode.lower()
+        self.manifest = manifest
+        self.game_mode = game_mode
+        self.context_latents = context_latents
+        self.runner = runner
+
+        self.frame_queue: deque[
+            tuple[
+                np.ndarray,
+                LatentIdentityFrameTelemetry | None,
+                StageSpec | None,
+                list[list[str]],
+                int,
+            ]
+        ] = deque(maxlen=160)
+        self.hud_traj_history: list[LatentIdentityFrameTelemetry] = []
+        self.prev_tail_clean_rgb: np.ndarray | None = None
+        self.prev_quest_pct: float = 0.0
+        self.prev_cat_res_pct: float = 75.0
+
+        self.lock = threading.Lock()
+        self.running = True
+
+        self.ema_gen_sec = 0.90
+        self.ema_rtf = 1.05
+        self.play_speed = 1.00
+        self.frame_seq_id = 0
+        self.last_gen_ms = 900.0
+        self.last_raw_video_ms = 1000.0
+        self.actual_steps = 8
+        self.gateway_conn = None
+
+    def cycle_hud_mode(self):
+        order = ["off", "minimal", "full"]
+        idx = (order.index(self.hud_mode) + 1) % len(order) if self.hud_mode in order else 0
+        self.hud_mode = order[idx]
+        print(
+            f"🖥️ [HUD MODE] Режим отображения на экране: {self.hud_mode.upper()} (Клавиша H для смены)",
+            flush=True,
+        )
+
+    def push_generated_batch(
+        self,
+        clean_rgb_frames: list[np.ndarray],
+        traj: list[LatentIdentityFrameTelemetry],
+        stage: StageSpec,
+        active_parties: list[list[str]],
+        attempt_num: int,
+        gen_ms: float,
+        actual_steps: int,
+    ):
+        if not clean_rgb_frames:
+            return
+        gen_sec = max(0.05, gen_ms / 1000.0)
+        raw_video_sec = len(clean_rgb_frames) / 16.0
+        inst_rtf = raw_video_sec / gen_sec
+
+        with self.lock:
+            self.last_gen_ms = gen_ms
+            self.last_raw_video_ms = raw_video_sec * 1000.0
+            self.actual_steps = actual_steps
+            self.ema_gen_sec = 0.65 * self.ema_gen_sec + 0.35 * gen_sec
+            self.ema_rtf = 0.65 * self.ema_rtf + 0.35 * inst_rtf
+
+            frames_work = [f.copy() for f in clean_rgb_frames]
+            if self.prev_tail_clean_rgb is not None and len(frames_work) >= 2:
+                frames_work[0] = cv2.addWeighted(
+                    self.prev_tail_clean_rgb, 0.22, frames_work[0], 0.78, 0.0
+                )
+            self.prev_tail_clean_rgb = clean_rgb_frames[-1].copy()
+
+            target_out_frames = int(
+                np.clip(
+                    round(self.ema_gen_sec * 16.0),
+                    len(frames_work),
+                    len(frames_work) * 3,
+                )
+            )
+            self.play_speed = round(
+                len(frames_work) / max(1.0, float(target_out_frames)), 2
+            )
+
+            base_telem = traj[-1]
+            target_q_pct = float(base_telem.quest_progress_pct)
+            target_c_pct = float(base_telem.catalytic_resonance_pct)
+            start_q_pct = (
+                self.prev_quest_pct if target_q_pct >= self.prev_quest_pct else 0.0
+            )
+            start_c_pct = self.prev_cat_res_pct
+
+            n_src = len(frames_work)
+            for k in range(target_out_frames):
+                frac = k / float(max(1, target_out_frames - 1))
+                pos = frac * (n_src - 1)
+                i0 = int(np.floor(pos))
+                i1 = min(n_src - 1, i0 + 1)
+                alpha = float(pos - i0)
+                if alpha <= 0.01 or i0 == i1:
+                    interp_rgb = frames_work[i0]
+                else:
+                    interp_rgb = cv2.addWeighted(
+                        frames_work[i0], 1.0 - alpha, frames_work[i1], alpha, 0.0
+                    )
+
+                smooth_t = copy(base_telem)
+                smooth_t.quest_progress_pct = round(
+                    start_q_pct + (target_q_pct - start_q_pct) * frac, 1
+                )
+                smooth_t.catalytic_resonance_pct = round(
+                    start_c_pct + (target_c_pct - start_c_pct) * frac, 1
+                )
+                smooth_trans = list(base_telem.entity_transition_pcts)
+                if 0 <= stage.quest.active_slot_idx < len(smooth_trans):
+                    smooth_trans[stage.quest.active_slot_idx] = (
+                        smooth_t.quest_progress_pct
+                    )
+                smooth_t.entity_transition_pcts = smooth_trans
+
+                self.frame_queue.append(
+                    (interp_rgb, smooth_t, stage, list(active_parties), attempt_num)
+                )
+
+            self.prev_quest_pct = 0.0 if target_q_pct >= 95.0 else target_q_pct
+            self.prev_cat_res_pct = target_c_pct
+
+            while len(self.frame_queue) > 48:
+                self.frame_queue.popleft()
+
+    def _render_hud_on_clean_frame(
+        self,
+        clean_rgb: np.ndarray,
+        telem: LatentIdentityFrameTelemetry | None,
+        stage: StageSpec | None,
+        parties: list[list[str]],
+        attempt_num: int,
+        q_sec: float,
+    ) -> np.ndarray:
+        if (
+            self.hud_mode == "off"
+            or telem is None
+            or stage is None
+            or self.manifest is None
+        ):
+            return clean_rgb
+
+        if self.hud_mode == "minimal":
+            return draw_minimal_rtf_banner(
+                clean_rgb,
+                rtf=self.ema_rtf,
+                play_speed=self.play_speed,
+                gen_ms=self.last_gen_ms,
+                raw_video_ms=self.last_raw_video_ms,
+                q_sec=q_sec,
+                ctx_lat=self.context_latents,
+                telem=telem,
+            )
+
+        self.hud_traj_history.append(telem)
+        if len(self.hud_traj_history) > 64:
+            self.hud_traj_history.pop(0)
+
+        with_full_hud = draw_identity_hud(
+            clean_rgb,
+            self.hud_traj_history,
+            len(self.hud_traj_history) - 1,
+            stage,
+            parties,
+            self.manifest,
+            attempt_num,
+            self.game_mode,
+            monochrome=False,
+        )
+        return draw_minimal_rtf_banner(
+            with_full_hud,
+            rtf=self.ema_rtf,
+            play_speed=self.play_speed,
+            gen_ms=self.last_gen_ms,
+            raw_video_ms=self.last_raw_video_ms,
+            q_sec=q_sec,
+            ctx_lat=self.context_latents,
+            telem=telem,
+        )
+
+    def run(self):
+        pg = None
+        screen = None
+        joystick = None
+        local_keys_held: dict[str, float] = {}
+        win_w, win_h = max(768, self.width * 2), max(512, self.height * 2)
+
+        if self.show_window:
+            try:
+                if os.environ.get("SDL_VIDEODRIVER") == "dummy":
+                    del os.environ["SDL_VIDEODRIVER"]
+                import pygame
+                pygame.init()
+                pygame.joystick.init()
+                if pygame.joystick.get_count() > 0:
+                    joystick = pygame.joystick.Joystick(0)
+                    joystick.init()
+                    print(f"🎮 [LOCAL GAMEPAD] Подключен физический геймпад: {joystick.get_name()}")
+                screen = pygame.display.set_mode(
+                    (win_w, win_h), pygame.HWSURFACE | pygame.DOUBLEBUF
+                )
+                pygame.display.set_caption(
+                    "Exocortex 3D-DiT World ([WASD/Arrows/Gamepad] WM Agent | [H] Toggle HUD)"
+                )
+                pg = pygame
+            except Exception as e:
+                print(f"⚠️ [Pygame Window Warning]: {e}")
+                pg = None
+
+        last_item = None
+        while self.running:
+            t_tick = time.perf_counter()
+
+            if pg is not None:
+                key_to_ch = {
+                    pg.K_w: "LS_UP",
+                    pg.K_s: "LS_DOWN",
+                    pg.K_a: "LS_LEFT",
+                    pg.K_d: "LS_RIGHT",
+                    pg.K_UP: "RS_UP",
+                    pg.K_DOWN: "RS_DOWN",
+                    pg.K_LEFT: "RS_LEFT",
+                    pg.K_RIGHT: "RS_RIGHT",
+                    pg.K_1: "BTN_A",
+                    pg.K_2: "BTN_B",
+                    pg.K_3: "BTN_X",
+                    pg.K_4: "BTN_Y",
+                }
+                changed_local = False
+                for event in pg.event.get():
+                    if event.type == pg.QUIT:
+                        self.running = False
+                        os._exit(0)
+                    elif event.type == pg.KEYDOWN:
+                        if event.key == pg.K_h:
+                            self.cycle_hud_mode()
+                        elif event.key in key_to_ch:
+                            local_keys_held[key_to_ch[event.key]] = 1.0
+                            changed_local = True
+                    elif event.type == pg.KEYUP:
+                        if event.key in key_to_ch:
+                            local_keys_held.pop(key_to_ch[event.key], None)
+                            changed_local = True
+
+                if joystick is not None and self.runner is not None:
+                    try:
+                        dz = 0.12
+                        ax0 = float(joystick.get_axis(0))
+                        ax1 = float(joystick.get_axis(1))
+                        ax2 = float(joystick.get_axis(2)) if joystick.get_numaxes() > 2 else 0.0
+                        ax3 = float(joystick.get_axis(3)) if joystick.get_numaxes() > 3 else 0.0
+                        joy_ch = dict(local_keys_held)
+                        if ax1 < -dz:
+                            joy_ch["LS_UP"] = min(1.0, (-ax1 - dz) / (1.0 - dz))
+                        if ax1 > dz:
+                            joy_ch["LS_DOWN"] = min(1.0, (ax1 - dz) / (1.0 - dz))
+                        if ax0 < -dz:
+                            joy_ch["LS_LEFT"] = min(1.0, (-ax0 - dz) / (1.0 - dz))
+                        if ax0 > dz:
+                            joy_ch["LS_RIGHT"] = min(1.0, (ax0 - dz) / (1.0 - dz))
+                        if ax3 < -dz:
+                            joy_ch["RS_UP"] = min(1.0, (-ax3 - dz) / (1.0 - dz))
+                        if ax3 > dz:
+                            joy_ch["RS_DOWN"] = min(1.0, (ax3 - dz) / (1.0 - dz))
+                        if ax2 < -dz:
+                            joy_ch["RS_LEFT"] = min(1.0, (-ax2 - dz) / (1.0 - dz))
+                        if ax2 > dz:
+                            joy_ch["RS_RIGHT"] = min(1.0, (ax2 - dz) / (1.0 - dz))
+                        self.runner.set_gamepad_channels(joy_ch)
+                    except Exception:
+                        pass
+                elif changed_local and self.runner is not None:
+                    self.runner.set_gamepad_channels(local_keys_held)
+
+            with self.lock:
+                q_len = len(self.frame_queue)
+                if q_len > 0:
+                    last_item = self.frame_queue.popleft()
+                gen_ms = self.last_gen_ms
+                act_steps = self.actual_steps
+
+            if last_item is None:
+                time.sleep(0.015)
+                continue
+
+            clean_rgb, telem, stg, parties, att_num = last_item
+            q_sec = q_len / 16.0
+            display_rgb = self._render_hud_on_clean_frame(
+                clean_rgb, telem, stg, parties, att_num, q_sec
+            )
+
+            if pg is not None and screen is not None:
+                try:
+                    surf = pg.image.frombuffer(
+                        display_rgb.tobytes(),
+                        (display_rgb.shape[1], display_rgb.shape[0]),
+                        "RGB",
+                    )
+                    if (display_rgb.shape[1], display_rgb.shape[0]) != (win_w, win_h):
+                        surf = pg.transform.smoothscale(surf, (win_w, win_h))
+                    screen.blit(surf, (0, 0))
+                    pg.display.flip()
+                except Exception:
+                    pass
+
+            if self.gateway_conn is None and self.gateway_port > 0:
+                try:
+                    self.gateway_conn = Client(
+                        ("localhost", self.gateway_port), authkey=b"canvas"
+                    )
+                except Exception:
+                    self.gateway_conn = None
+
+            if self.gateway_conn is not None:
+                try:
+                    bgr = cv2.cvtColor(display_rgb, cv2.COLOR_RGB2BGR)
+                    _, enc_jpg = cv2.imencode(
+                        ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 90]
+                    )
+                    self.frame_seq_id += 1
+                    self.gateway_conn.send(
+                        {
+                            "frame_id": self.frame_seq_id,
+                            "ts": time.time(),
+                            "gen_ms": gen_ms,
+                            "fps": round(16.0 * self.play_speed, 1),
+                            "actual_steps": act_steps,
+                            "w": self.width,
+                            "h": self.height,
+                            "use_taesd": False,
+                            "use_color": not self.monochrome,
+                            "jpg": enc_jpg.tobytes(),
+                        }
+                    )
+                    if recorder_instance.is_recording:
+                        recorder_instance.push_frame(
+                            bgr,
+                            {
+                                "dag_log_parts": [
+                                    stg.quest.driver_tag if stg else "3D_DIT"
+                                ]
+                            },
+                        )
+                except Exception:
+                    self.gateway_conn = None
+
+            target_dt = (
+                0.055 if q_len > 16 else (0.0625 if q_len > 3 else 0.075)
+            )
+            elapsed = time.perf_counter() - t_tick
+            if target_dt > elapsed:
+                time.sleep(target_dt - elapsed)
+
+
+def start_live_lsl_to_vram_bus_thread(
+    pacer: SmoothRealtimeVideoPacer, users_arg: str = ""
+):
+    if not HAS_AMODAL_LSL_ENGINE:
+        return None, None
+
+    router = SelfSufficientHeterarchyRouter(users_arg)
     amodal_engine = SharedAmodalCognitiveEngine(
         router=router,
-        gamma_max=args.gamma_max,
-        strength_low=args.inactive_gain,
-        strength_high=args.active_gain,
-        cross_region_bleed=args.cross_bleed,
-        monty_mode=init_monty_mode
+        gamma_max=100.0,
+        strength_low=0.06,
+        strength_high=0.92,
+        cross_region_bleed=0.65,
+        monty_mode="off",
     )
 
-    hud = None
-    if not args.headless:
-        from neuro_hud import NeuroCanvasHUD
-        hud = NeuroCanvasHUD(device=DEVICE)
-
-    runtime_state = {
-        "monty_mode": init_monty_mode,
-        "stochastic": init_stoch,
-        "unassigned_stochastic": init_unass_stoch,
-        "wm_radius": init_wm_radius,
-        "seed": int(args.seed),
-        "auto_active_boost": True,
-        "active_user_gain": float(args.active_gain),
-        "inactive_base_gain": float(args.inactive_gain),
-        "cross_region_bleed": float(args.cross_bleed),
-        "region_gains": {
-            "Fpz": 0.06, "AFz": 0.08, "F3": 0.08, "F4": 0.10, "FCz": 0.92
-        },
-        "cascade_rate": 1.0,
-        "psi_threshold": 0.55,
-        "geodesic_lock": init_wm_radius,
-        "num_frames": 9,
-        "context_ring_len": 9,
-        "steps": 4,
-        "genesis_steps": 12,
-        "cfg_scale": 3.0,
-        "current_active_role": "FCz",
-        "force_reset_genesis": True,
-        "running": True,
-    }
-    ctrl_lock = threading.Lock()
-    video_ctrl_conn = None
-
-    def video_control_listener_thread():
-        nonlocal video_ctrl_conn
-        while runtime_state["running"]:
+    def _lsl_loop():
+        while pacer.running:
             try:
-                if video_ctrl_conn is None:
-                    c = Client(("localhost", args.video_ctrl_port), authkey=b"video_ctrl")
+                amodal_engine.step(0.016)
+            except Exception:
+                pass
+            time.sleep(0.016)
+
+    threading.Thread(target=_lsl_loop, daemon=True).start()
+    print(
+        "🧠 [LIVE BLE/LSL -> VRAM BUS] 60 Гц конвейер рабочей памяти запущен! Любая BLE-плата из браузера сразу управляет 3D-DiT."
+    )
+    return router, amodal_engine
+
+
+def start_web_studio_control_bridge(
+    runner: UniversalLatentAutobattlerEngine,
+    pacer: SmoothRealtimeVideoPacer,
+    video_ctrl_port: int,
+    initial_manifest_path: str,
+    router=None,
+    amodal_engine=None,
+):
+    ctrl_lock = threading.Lock()
+    ctrl_conn = None
+
+    def _listener_loop():
+        nonlocal ctrl_conn
+        while pacer.running:
+            try:
+                if ctrl_conn is None and video_ctrl_port > 0:
+                    c = Client(
+                        ("localhost", video_ctrl_port), authkey=b"video_ctrl"
+                    )
                     with ctrl_lock:
-                        video_ctrl_conn = c
-                        video_ctrl_conn.send({
-                            "cmd": "sync_from_video_runner",
-                            "lore_file": lore_reader.lore_file,
-                            "sections": lore_reader.get_copy(),
-                            "monty_mode": runtime_state["monty_mode"]
-                        })
+                        ctrl_conn = c
+                        ctrl_conn.send(
+                            {
+                                "cmd": "sync_from_video_runner",
+                                "lore_file": initial_manifest_path,
+                                "sections": manifest_to_web_sections(
+                                    runner.manifest
+                                ),
+                                "concept_bindings": dict(
+                                    runner.concept_bindings_by_region
+                                ),
+                                "eeg_wm_gain": runner.eeg_wm_gain,
+                                "gamepad_wm_mix": runner.gamepad_wm_mix,
+                                "monty_mode": "off",
+                                "stochastic": runner.stochastic,
+                                "wm_radius": runner.wm_radius,
+                                "hud_mode": pacer.hud_mode,
+                                "context_latents": runner.context_lat_frames,
+                                "step_latents": runner.step_lat_frames,
+                                "steps": runner.steps,
+                                "cfg_scale": runner.cfg_scale,
+                            }
+                        )
+                    print(
+                        f"🌐 [WEB STUDIO BRIDGE] Подключено к web_cloud_gateway (порт {video_ctrl_port})! Управление из браузера :8080 активно."
+                    )
 
                 has_msg = False
+                msg = None
                 with ctrl_lock:
-                    if video_ctrl_conn is not None and video_ctrl_conn.poll(0.02):
-                        msg = video_ctrl_conn.recv()
+                    if ctrl_conn is not None and ctrl_conn.poll(0.02):
+                        msg = ctrl_conn.recv()
                         has_msg = True
 
                 if has_msg and isinstance(msg, dict):
                     cmd = msg.get("cmd")
-                    if cmd == "switch_lore":
-                        l_file = msg.get("lore_file", "")
-                        secs = msg.get("sections")
-                        if secs and isinstance(secs, dict):
-                            lore_reader.replace_sections(secs, lore_file=l_file)
-                        elif l_file:
-                            lore_reader.load_file(l_file)
-                        runtime_state["force_reset_genesis"] = True
-                        print(f"🌍 [VIDEO WORLD SWITCH] Переключен мир/лор: {lore_reader.lore_file}")
+                    if cmd == "update_video_config":
+                        cfg = msg.get("config", {})
+                        if "monty_mode" in cfg and amodal_engine is not None:
+                            amodal_engine.set_monty_mode(str(cfg["monty_mode"]))
+                        if "stochastic" in cfg:
+                            runner.stochastic = float(
+                                np.clip(float(cfg["stochastic"]), 0.0, 1.0)
+                            )
+                        if "wm_radius" in cfg:
+                            runner.wm_radius = float(
+                                np.clip(float(cfg["wm_radius"]), 0.02, 0.85)
+                            )
+                        elif "geodesic_lock" in cfg:
+                            runner.wm_radius = float(
+                                np.clip(float(cfg["geodesic_lock"]), 0.02, 0.85)
+                            )
+                        if "eeg_wm_gain" in cfg:
+                            runner.eeg_wm_gain = float(
+                                np.clip(float(cfg["eeg_wm_gain"]), 0.0, 1.0)
+                            )
+                        if "gamepad_wm_mix" in cfg:
+                            runner.gamepad_wm_mix = float(
+                                np.clip(float(cfg["gamepad_wm_mix"]), 0.0, 1.0)
+                            )
+                        if "concept_bindings" in cfg and isinstance(
+                            cfg["concept_bindings"], dict
+                        ):
+                            runner.set_concept_bindings(cfg["concept_bindings"])
+                        if "hud_mode" in cfg:
+                            pacer.hud_mode = str(cfg["hud_mode"]).lower()
+                        if "context_latents" in cfg:
+                            runner.context_lat_frames = max(
+                                1, min(3, int(cfg["context_latents"]))
+                            )
+                            pacer.context_latents = runner.context_lat_frames
+                        if "step_latents" in cfg:
+                            runner.step_lat_frames = max(
+                                1, min(3, int(cfg["step_latents"]))
+                            )
+                        elif "num_frames" in cfg:
+                            nf = int(cfg["num_frames"])
+                            runner.step_lat_frames = max(1, (nf - 1) // 8)
+                        if "steps" in cfg:
+                            runner.steps = max(3, min(20, int(cfg["steps"])))
+                        if "cfg_scale" in cfg:
+                            runner.cfg_scale = float(
+                                np.clip(float(cfg["cfg_scale"]), 1.0, 6.0)
+                            )
+                        print(
+                            f"🎛️ [WEB CONFIG] Из браузера: wm_radius={runner.wm_radius:.2f}, stoch={runner.stochastic:.2f}, "
+                            f"eeg_gain={runner.eeg_wm_gain:.2f}, gp_mix={runner.gamepad_wm_mix:.2f}, "
+                            f"hud={pacer.hud_mode}, ctx={runner.context_lat_frames}, step={runner.step_lat_frames}, "
+                            f"steps={runner.steps}, cfg={runner.cfg_scale:.1f}"
+                        )
+                    elif cmd == "set_gamepad_input":
+                        if "eeg_wm_gain" in msg:
+                            runner.eeg_wm_gain = float(
+                                np.clip(float(msg["eeg_wm_gain"]), 0.0, 1.0)
+                            )
+                        if "gamepad_wm_mix" in msg:
+                            runner.gamepad_wm_mix = float(
+                                np.clip(float(msg["gamepad_wm_mix"]), 0.0, 1.0)
+                            )
+                        if "concept_bindings" in msg and isinstance(
+                            msg["concept_bindings"], dict
+                        ):
+                            runner.set_concept_bindings(msg["concept_bindings"])
+                        if "channels" in msg and isinstance(
+                            msg["channels"], dict
+                        ):
+                            runner.set_gamepad_channels(msg["channels"])
+                        else:
+                            runner.set_gamepad_input(
+                                lx=float(msg.get("lx", 0.0)),
+                                ly=float(msg.get("ly", 0.0)),
+                                rx=float(msg.get("rx", 0.0)),
+                                ry=float(msg.get("ry", 0.0)),
+                                manual_idx=int(msg.get("manual_idx", -1)),
+                                target_slot=str(msg.get("target_slot", "*")),
+                            )
                     elif cmd == "update_lore_sections":
                         secs = msg.get("sections", {})
                         if isinstance(secs, dict):
-                            lore_reader.replace_sections(secs)
-                            print("📝 [VIDEO LORE] Обновлены региональные концепты из браузера!")
-                    elif cmd == "update_video_config":
-                        cfg = msg.get("config", {})
-                        if "monty_mode" in cfg:
-                            runtime_state["monty_mode"] = str(cfg["monty_mode"])
-                            amodal_engine.set_monty_mode(runtime_state["monty_mode"])
-                        if "stochastic" in cfg:
-                            runtime_state["stochastic"] = float(np.clip(float(cfg["stochastic"]), 0.0, 1.0))
-                        if "unassigned_stochastic" in cfg:
-                            runtime_state["unassigned_stochastic"] = float(np.clip(float(cfg["unassigned_stochastic"]), 0.0, 1.0))
-                        if "wm_radius" in cfg:
-                            runtime_state["wm_radius"] = float(np.clip(float(cfg["wm_radius"]), 0.0, 1.0))
-                        if "geodesic_lock" in cfg:
-                            runtime_state["geodesic_lock"] = float(np.clip(float(cfg["geodesic_lock"]), 0.02, 0.80))
-                            runtime_state["wm_radius"] = runtime_state["geodesic_lock"]
-                        for k in (
-                            "auto_active_boost", "active_user_gain", "inactive_base_gain",
-                            "cross_region_bleed", "cascade_rate", "psi_threshold",
-                            "num_frames", "context_ring_len",
-                            "steps", "genesis_steps", "cfg_scale"
-                        ):
-                            if k in cfg:
-                                runtime_state[k] = cfg[k]
-                        if "region_gains" in cfg and isinstance(cfg["region_gains"], dict):
-                            runtime_state["region_gains"].update(cfg["region_gains"])
-                        amodal_engine.cross_region_bleed = float(runtime_state["cross_region_bleed"])
+                            apply_web_sections_to_manifest(runner.manifest, secs)
+                            print(
+                                "📝 [WEB LORE EDITOR] Пулы концептов 3D-DiT обновлены на лету из браузера!"
+                            )
+                    elif cmd == "switch_lore":
+                        l_file = str(msg.get("lore_file", "")).strip()
+                        secs = msg.get("sections")
+                        if l_file and Path(l_file).exists():
+                            runner.manifest = load_manifest_or_txt_lore(l_file)
+                            pacer.manifest = runner.manifest
+                            runner.curr_idx = 0
+                            runner.maneuver_phase = 0
+                            runner.need_hard_genesis = True
+                            runner._warmup_manifest_semantics()
+                            print(
+                                f"🌍 [WEB WORLD SWITCH] Загружен мир/лор: {l_file}"
+                            )
+                        elif isinstance(secs, dict):
+                            apply_web_sections_to_manifest(runner.manifest, secs)
+                            runner.need_hard_genesis = True
+                            print(
+                                f"🌍 [WEB LORE SWITCH] Применен региональный лор: {l_file}"
+                            )
+                    elif cmd == "set_init_image":
+                        raw_bytes = msg.get("image_bytes")
+                        if raw_bytes:
+                            runner.set_init_image_bytes(raw_bytes)
+                    elif cmd == "reset_genesis":
+                        runner.need_hard_genesis = True
+                        runner.maneuver_phase = 0
+                        if amodal_engine is not None:
+                            amodal_engine.reset_seals()
+                        print(
+                            "🔄 [WEB RESET] Сброс генезиса 3D-DiT по кнопке из браузера!"
+                        )
                     elif cmd == "set_device_mapping":
                         s_name = str(msg.get("stream_name", "")).strip()
                         r_val = str(msg.get("role", "FCz")).strip()
                         u_val = str(msg.get("user", "User1")).strip()
-                        if s_name:
+                        if router is not None and s_name:
                             router.set_device_mapping(s_name, r_val, u_val)
-                        if r_val and r_val.upper() not in ("NONE", "OFF", "UNASSIGNED"):
-                            runtime_state["current_active_role"] = EXTENDED_ROLE_TO_FUNCTIONAL.get(r_val, "FCz")
-                        print(f"🎛️ [VIDEO DEVICE MAP] '{s_name}' -> Роль: {r_val} (Субъект: {u_val})")
-                    elif cmd == "set_device_role":
-                        raw_role = str(msg.get("role", "FCz")).strip()
-                        func_role = EXTENDED_ROLE_TO_FUNCTIONAL.get(raw_role, "FCz")
-                        router.set_role(0, raw_role)
-                        runtime_state["current_active_role"] = func_role
-                        print(f"🎛️ [VIDEO ROLE SWITCH] Девайс юзера переключен на регион: {raw_role} (-> {func_role})")
-                    elif cmd == "set_ladder_stage":
-                        stage = int(msg.get("stage", 1))
-                        if stage == 1:
-                            runtime_state["inactive_base_gain"] = 0.04
-                            runtime_state["active_user_gain"] = 0.94
-                        elif stage == 2:
-                            runtime_state["inactive_base_gain"] = 0.10
-                            runtime_state["active_user_gain"] = 0.90
-                        elif stage == 3:
-                            runtime_state["inactive_base_gain"] = 0.16
-                            runtime_state["active_user_gain"] = 0.88
-                        else:
-                            runtime_state["inactive_base_gain"] = 0.22
-                            runtime_state["active_user_gain"] = 0.88
-                    elif cmd == "reset_genesis":
-                        runtime_state["force_reset_genesis"] = True
-                        amodal_engine.reset_seals()
-                    elif cmd == "set_init_image":
-                        runtime_state["pending_init_image_bytes"] = msg.get("image_bytes")
+                        if r_val and r_val.upper() not in (
+                            "NONE",
+                            "OFF",
+                            "UNASSIGNED",
+                        ):
+                            func_r = (
+                                EXTENDED_ROLE_TO_FUNCTIONAL.get(r_val, "FCz")
+                                if HAS_AMODAL_LSL_ENGINE
+                                else r_val
+                            )
+                            target_slot = ROLE_TO_ENTITY_SLOT.get(func_r, "e0")
+                            runner.set_entity_source(
+                                target_slot, f"eeg:{func_r}"
+                            )
+                            print(
+                                f"📡 [BLE DEVICE MAPPED] Плата '{s_name}' (Субъект: {u_val}) -> Зона: {r_val} ({target_slot}=eeg:{func_r})"
+                            )
                     elif cmd == "start_recording":
-                        recorder_instance.start_session(session_name=msg.get("session_name"))
+                        recorder_instance.start_session(
+                            session_name=msg.get("session_name")
+                        )
                     elif cmd == "stop_recording":
                         recorder_instance.stop_session()
                 else:
-                    time.sleep(0.01)
+                    time.sleep(0.02)
             except Exception:
                 with ctrl_lock:
-                    video_ctrl_conn = None
+                    ctrl_conn = None
                 time.sleep(0.5)
 
-    threading.Thread(target=video_control_listener_thread, daemon=True).start()
+    threading.Thread(target=_listener_loop, daemon=True).start()
 
-    gateway_conn = None
-    frame_seq_id = 0
-    sent_vram_ipc = False
-    last_debug_tag = ""
-    last_telem_push = 0.0
+    def push_telemetry_to_web(telem: dict, fps: float, gen_ms: float):
+        with ctrl_lock:
+            if ctrl_conn is not None:
+                try:
+                    q_metrics = telem.get("quest_oracle_metrics", {})
+                    c_metrics = telem.get("feigenbaum_chaos_metrics", {})
+                    ctrl_conn.send(
+                        {
+                            "cmd": "video_telemetry",
+                            "fps": round(fps, 1),
+                            "gen_ms": round(gen_ms, 1),
+                            "rtf": round(pacer.ema_rtf, 2),
+                            "play_speed": pacer.play_speed,
+                            "feigenbaum_r": round(
+                                float(c_metrics.get("feigenbaum_r", 3.72)), 3
+                            ),
+                            "reaction_formula": telem.get(
+                                "reaction_formula", ""
+                            ),
+                            "branch_scores": telem.get(
+                                "reaction_branch_competition_128d", {}
+                            ),
+                            "debug_tokens": f"[{telem.get('driver_tag')}] dS:{q_metrics.get('quest_progress_pct', 0):.0f}% | {telem.get('active_entities', '')}",
+                            "fpz_meta_charge": round(
+                                float(
+                                    c_metrics.get(
+                                        "catalytic_resonance_pct", 50.0
+                                    )
+                                )
+                                / 100.0,
+                                3,
+                            ),
+                            "afz_stage_progress": round(
+                                float(q_metrics.get("quest_progress_pct", 0.0))
+                                / 100.0,
+                                3,
+                            ),
+                            "monty_loss": 0.015,
+                            "persistence": round(
+                                float(
+                                    c_metrics.get(
+                                        "catalytic_resonance_pct", 80.0
+                                    )
+                                )
+                                / 100.0,
+                                2,
+                            ),
+                            "surprise": round(
+                                abs(
+                                    float(c_metrics.get("feigenbaum_r", 3.7))
+                                    - 3.57
+                                ),
+                                2,
+                            ),
+                            "monty_mode": "off",
+                            "stochastic": runner.stochastic,
+                            "unassigned_stochastic": runner.stochastic,
+                            "wm_radius": runner.wm_radius,
+                            "eeg_wm_gain": runner.eeg_wm_gain,
+                            "gamepad_wm_mix": runner.gamepad_wm_mix,
+                            "hud_mode": pacer.hud_mode,
+                            "context_latents": runner.context_lat_frames,
+                            "step_latents": runner.step_lat_frames,
+                            "steps": runner.steps,
+                            "cfg_scale": runner.cfg_scale,
+                            "active_region_mask": {
+                                "Fpz": True,
+                                "AFz": True,
+                                "F3": True,
+                                "F4": True,
+                                "FCz": True,
+                            },
+                            "active_concept_idx": telem.get(
+                                "active_concept_idx",
+                                runner.active_concept_idx_by_region,
+                            ),
+                            "active_concept_indices": telem.get(
+                                "active_concept_indices",
+                                runner.active_concept_indices_by_region,
+                            ),
+                            "region_choice_probs": telem.get(
+                                "region_choice_probs",
+                                runner.region_choice_probs,
+                            ),
+                            "concept_bindings": telem.get(
+                                "concept_bindings",
+                                runner.concept_bindings_by_region,
+                            ),
+                        }
+                    )
+                except Exception:
+                    pass
+
+    return push_telemetry_to_web
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Unified 3D-DiT Video Heterarchy Runner (Web Studio :8080 & Local Pygame)"
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="ball",
+        choices=["ball", "maze", "ritual", "duel", "psy"],
+        help="Быстрый пресет: ball | maze | ritual | duel | psy",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default="configs/mode_05_wm_control_test_arena.json",
+        help="Путь к внешнему JSON-манифесту мира",
+    )
+    parser.add_argument(
+        "--video-lore",
+        "--lore",
+        dest="video_lore",
+        type=str,
+        default="",
+        help="Путь к .json манифесту или .txt лору (перекрывает --mode)",
+    )
+    parser.add_argument(
+        "--init-image",
+        type=str,
+        default="",
+        help="Опциональный путь к стартовой PNG/JPG картинке (напр. карта лабиринта)",
+    )
+    parser.add_argument(
+        "--users",
+        type=str,
+        default="",
+        help="Статическая раскладка плат ЭЭГ (например 'User1:FCz=0')",
+    )
+    parser.add_argument(
+        "--entity-source",
+        "--wm-source",
+        dest="entity_source",
+        type=str,
+        default="auto",
+        help="Источник рабочей памяти ('auto' = из JSON-манифеста, или 'e0=eeg:FCz,e1=npc:AFz')",
+    )
+    parser.add_argument("--stochastic", type=float, default=0.0)
+    parser.add_argument("--wm-radius", type=float, default=0.35)
+    parser.add_argument("--eeg-wm-gain", type=float, default=1.0)
+    parser.add_argument("--gamepad-wm-mix", type=float, default=1.0)
+    parser.add_argument(
+        "--hud",
+        type=str,
+        default="off",
+        choices=["off", "minimal", "full"],
+    )
+    parser.add_argument("--no-hud", action="store_true", default=False)
+    parser.add_argument("--headless", action="store_true", default=False)
+    parser.add_argument("--context-latents", type=int, default=1)
+    parser.add_argument("--step-latents", type=int, default=2)
+    parser.add_argument("--steps", type=int, default=8)
+    parser.add_argument("--cfg", type=float, default=1.0)
+    parser.add_argument("--width", type=int, default=384)
+    parser.add_argument("--height", type=int, default=256)
+    parser.add_argument("--monochrome", action="store_true", default=False)
+    parser.add_argument("--show-window", action="store_true", default=False)
+    parser.add_argument(
+        "--game-mode",
+        type=str,
+        default="strict_ko",
+        choices=["strict_ko", "sudden_death"],
+    )
+    parser.add_argument("--max-overtime-chunks", type=int, default=12)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--hours", type=float, default=5.0)
+    parser.add_argument("--gateway-port", type=int, default=6002)
+    parser.add_argument("--video-ctrl-port", type=int, default=6007)
+    parser.add_argument(
+        "--video-port",
+        "--battle-server-port",
+        dest="video_port",
+        type=int,
+        default=6006,
+        help="Порт video_world_server.py (по умолчанию 6006)",
+    )
+    parser.add_argument("--local", action="store_true", default=False)
+    parser.add_argument("--save-mp4", type=str, default="neuro_video_rollout.mp4")
+    parser.add_argument("--no-save", action="store_true", default=False)
+    args = parser.parse_args()
+
+    eff_hud_mode = "off" if args.no_hud else args.hud
+    resolved_manifest = resolve_lore_or_manifest_path(
+        args.mode, args.manifest, args.video_lore
+    )
+    manifest = load_manifest_or_txt_lore(resolved_manifest)
+
+    save_path = "" if args.no_save else args.save_mp4
+    compact_log_path = "telemetry_compact.jsonl"
+
+    runner = UniversalLatentAutobattlerEngine(
+        manifest=manifest,
+        width=args.width,
+        height=args.height,
+        game_mode=args.game_mode,
+        max_overtime_chunks=args.max_overtime_chunks,
+        steps=args.steps,
+        cfg_scale=args.cfg,
+        seed=args.seed,
+        video_server_port=args.video_port,
+        force_local=args.local,
+        monochrome=args.monochrome,
+        context_lat_frames=args.context_latents,
+        step_lat_frames=args.step_latents,
+        stochastic=args.stochastic,
+        wm_radius=args.wm_radius,
+    )
+    runner.eeg_wm_gain = float(np.clip(args.eeg_wm_gain, 0.0, 1.0))
+    runner.gamepad_wm_mix = float(np.clip(args.gamepad_wm_mix, 0.0, 1.0))
+
+    if args.init_image and Path(args.init_image).is_file():
+        with open(args.init_image, "rb") as f_img:
+            runner.set_init_image_bytes(f_img.read())
+
+    if args.entity_source and args.entity_source.strip().lower() != "auto":
+        if "=" in args.entity_source:
+            for pair in args.entity_source.split(","):
+                if "=" in pair:
+                    slot_k, src_v = pair.split("=", 1)
+                    runner.set_entity_source(slot_k.strip(), src_v.strip())
+        else:
+            runner.set_all_entities_source(args.entity_source.strip())
+
+    show_win = bool(args.show_window) and not bool(args.headless)
+    pacer = SmoothRealtimeVideoPacer(
+        gateway_port=args.gateway_port,
+        width=runner.width,
+        height=runner.height,
+        monochrome=runner.monochrome,
+        show_window=show_win,
+        hud_mode=eff_hud_mode,
+        manifest=manifest,
+        game_mode=args.game_mode,
+        context_latents=runner.context_lat_frames,
+        runner=runner,
+    )
+    pacer.start()
+
+    router, amodal_engine = start_live_lsl_to_vram_bus_thread(pacer, args.users)
+
+    push_web_telem = start_web_studio_control_bridge(
+        runner=runner,
+        pacer=pacer,
+        video_ctrl_port=args.video_ctrl_port,
+        initial_manifest_path=resolved_manifest,
+        router=router,
+        amodal_engine=amodal_engine,
+    )
+
+    video_writer = None
+    if not args.no_save and save_path:
+        video_writer = cv2.VideoWriter(
+            save_path,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            16.0,
+            (runner.width, runner.height),
+        )
+
+    start_time = time.time()
+    compact_ring: deque[str] = deque(maxlen=200)
 
     try:
-        while True:
-            dt = 0.016
-            if hud:
-                dt, commands = hud.poll_events(16)
-                for cmd, payload in commands:
-                    if cmd == "set_role":
-                        router.set_role(payload[0], payload[1])
-                        if payload[1]:
-                            runtime_state["current_active_role"] = EXTENDED_ROLE_TO_FUNCTIONAL.get(payload[1], payload[1])
-                    elif cmd in ("flush_canvas", "reset_seals"):
-                        runtime_state["force_reset_genesis"] = True
-                        amodal_engine.reset_seals()
-
-            bus, has_live = amodal_engine.step(dt)
-            if not has_live:
-                if hud:
-                    hud.render_waiting()
-                time.sleep(0.01)
-                continue
-
-            wm_tensor_128x4096 = compile_per_region_full_rank_wm_tensor_gpu(bus)
-            meta = bus.meta_64
-            monty_code = int(round(float(meta[27].item())))
-            cur_monty_mode = MONTY_CODE_TO_STR.get(monty_code, runtime_state["monty_mode"])
-
-            active_region_mask = {}
-            for r_idx, r_name in enumerate(REGION_ROLES):
-                is_phys_dev = bool(meta[21 + r_idx].item() > 0.5)
-                if cur_monty_mode == "off":
-                    active_region_mask[r_name] = is_phys_dev
-                else:
-                    active_region_mask[r_name] = True
-
-            if not any(active_region_mask.values()):
-                active_region_mask[runtime_state["current_active_role"]] = True
-
-            primary_active_role = next(
-                (r for r in ["FCz", "AFz", "F3", "F4", "Fpz"] if bool(meta[21 + ROLE_TO_BUS_IDX[r]].item() > 0.5)),
-                runtime_state["current_active_role"]
+        while (time.time() - start_time) < args.hours * 3600.0:
+            clean_frames, traj, gen_ms, fps, tag, telemetry = (
+                runner.execute_turn_step()
             )
-            runtime_state["current_active_role"] = primary_active_role
+            cur_stage = runner.manifest.stages[runner.curr_idx]
 
-            pers_val = float(meta[6].item())
-            surp_val = float(meta[7].item())
-            kuramoto_val = float(meta[11].item())
-
-            effective_gains = {}
-            for r_name in REGION_ROLES:
-                is_phys_here = bool(meta[21 + ROLE_TO_BUS_IDX[r_name]].item() > 0.5)
-                manual_g = float(runtime_state["region_gains"].get(r_name, runtime_state["inactive_base_gain"]))
-                if runtime_state["auto_active_boost"]:
-                    if is_phys_here:
-                        effective_gains[r_name] = float(max(manual_g, runtime_state["active_user_gain"]))
-                    else:
-                        effective_gains[r_name] = float(min(manual_g, max(0.02, runtime_state["inactive_base_gain"])))
-                else:
-                    effective_gains[r_name] = manual_g
-
-            beta_wall_lock = float(
-                torch.clamp(torch.mean(torch.abs(bus.wm_field_5x5x32x120[2, BAND_BETA])) * 2.5, 0.0, 1.0).item()
+            pacer.push_generated_batch(
+                clean_frames,
+                traj,
+                cur_stage,
+                runner.active_entity_parties,
+                runner.maneuver_phase + 1,
+                gen_ms,
+                runner.steps,
             )
-            kin_4d = [
-                float(meta[12].item()),
-                float(meta[13].item()),
-                float(meta[14].item()),
-                float(meta[15].item()),
-            ]
 
-            has_ipc = (bus.is_owner or bus.attached_pid > 0)
+            raw_vid_ms = len(clean_frames) / 16.0 * 1000.0
+            inst_rtf = raw_vid_ms / max(1.0, gen_ms)
+            lag_ms = gen_ms - raw_vid_ms
 
-            req_msg = {
-                "cmd": "step_full_rank",
-                "wm_embeds_128x4096": wm_tensor_128x4096.detach().cpu().numpy(),
-                "wm_5x5x32x120": None if has_ipc else bus.wm_field_5x5x32x120.detach().cpu().numpy(),
-                "lore_sections": lore_reader.get_copy(),
-                "beta_wall_lock": beta_wall_lock,
-                "active_region_mask": active_region_mask,
-                "region_gains": effective_gains,
-                "kin_4d": kin_4d,
-                "persistence": pers_val,
-                "surprise": surp_val,
-                "kuramoto": kuramoto_val,
-                "monty_mode": cur_monty_mode,
-                "stochastic": float(runtime_state["stochastic"]),
-                "unassigned_stochastic": float(runtime_state["unassigned_stochastic"]),
-                "wm_radius": float(runtime_state["wm_radius"]),
-                "seed": int(runtime_state["seed"]),
-                "video_params": {
-                    "cascade_rate": float(runtime_state["cascade_rate"]),
-                    "psi_threshold": float(runtime_state["psi_threshold"]),
-                    "geodesic_lock": float(runtime_state["wm_radius"]),
-                    "num_frames": int(runtime_state["num_frames"]),
-                    "context_ring_len": int(runtime_state["context_ring_len"]),
-                    "steps": int(runtime_state["steps"]),
-                    "genesis_steps": int(runtime_state["genesis_steps"]),
-                    "cfg_scale": float(runtime_state["cfg_scale"]),
-                },
-                "reset_genesis": runtime_state["force_reset_genesis"],
-            }
-            if runtime_state.get("pending_init_image_bytes"):
-                req_msg["init_image_bytes"] = runtime_state.pop("pending_init_image_bytes")
-            if not sent_vram_ipc and bus.is_owner:
-                req_msg["vram_ipc"] = bus.get_cuda_ipc_Payload()
-                sent_vram_ipc = True
-
-            runtime_state["force_reset_genesis"] = False
-
-            vid_conn.send(req_msg)
-            resp = vid_conn.recv()
-
-            frames = resp.get("frames", [])
-            fps = float(resp.get("fps", 12.0))
-            gen_ms = float(resp.get("gen_ms", 80.0))
-            debug_tokens = resp.get("debug_tokens", "VIDEO_WORLD")
-            fpz_charge = float(resp.get("fpz_meta_charge", 0.0))
-            afz_prog = float(resp.get("afz_stage_progress", 0.0))
-            act_c_idx = resp.get("active_concept_idx", {})
-
-            if debug_tokens != last_debug_tag:
-                last_debug_tag = debug_tokens
-                phys_list = [r for i, r in enumerate(REGION_ROLES) if bool(meta[21 + i].item() > 0.5)]
-                print(
-                    f"🎬 [3D-DiT | Stoch:{runtime_state['stochastic']:.2f}(Unass:{runtime_state['unassigned_stochastic']:.2f}) "
-                    f"| Rad:{runtime_state['wm_radius']:.2f} | Monty:{cur_monty_mode} | PhysDevs:{phys_list} | Ψ:{fpz_charge:.2f}] "
-                    f"{debug_tokens}"
-                )
-
-            n_sec = max(2, int(meta[1].item()))
-            p_bus_idx = ROLE_TO_BUS_IDX.get(primary_active_role, 1)
-            telemetry = {
-                "primary_role": primary_active_role,
-                "primary_active": True,
-                "ladder_stage": 1,
-                "monty_mode": cur_monty_mode,
-                "monty_loss": round(float(meta[8].item()), 5),
-                "persistence": round(pers_val, 3),
-                "surprise": round(surp_val, 3),
-                "total_clock_sectors": n_sec,
-                "current_clock_sec": int(meta[2].item()) % n_sec,
-                "slot_names": [f"{primary_active_role}_S{i+1}" for i in range(n_sec)],
-                "slot_indices": list(range(n_sec)),
-                "sealed_mask": [bool(x > 0.5) for x in bus.seals_and_stabs_5x3x16[p_bus_idx, 2, :n_sec].tolist()],
-                "slot_stabilities": bus.seals_and_stabs_5x3x16[p_bus_idx, 0, :n_sec].cpu().numpy(),
-                "causal_flow_np": bus.ripple_dag_5x16x16[p_bus_idx, :n_sec, :n_sec].cpu().numpy(),
-                "dag_log_parts": [debug_tokens, f"Ψ:{fpz_charge:.2f}"],
-                "dl_phase": float(meta[3].item()),
-                "is_delta_tick": bool(meta[4].item() > 0.5),
-                "dyn_strength": float(effective_gains[primary_active_role]),
-                "active_vocab_size": sum(len(v) for v in lore_reader.sections.values()),
-                "fpz_active": active_region_mask.get("Fpz", False),
-                "fpz_tension": fpz_charge,
-                "fpz_concept": f"Ψ:{fpz_charge*100:.0f}%",
-                "f3_active": active_region_mask.get("F3", False),
-                "f3_concept": f"G:{effective_gains['F3']:.2f}",
-                "f3_x_local": float(meta[9].item()),
-                "f3_y_global": float(meta[10].item()),
-                "f3_kuramoto": kuramoto_val,
-                "f4_active": active_region_mask.get("F4", False),
-                "f4_concept": f"G:{effective_gains['F4']:.2f}",
-                "f4_entropy": float(meta[5].item()),
-                "fcz_active": active_region_mask.get("FCz", False),
-                "fcz_concept": debug_tokens[:18],
-                "fcz_lx": kin_4d[0],
-                "fcz_ly": kin_4d[1],
-                "fcz_rx": kin_4d[2],
-                "fcz_ry": kin_4d[3],
+            telemetry["realtime_pacing"] = {
+                "gen_ms": round(gen_ms, 1),
+                "raw_video_ms": round(raw_vid_ms, 1),
+                "inst_rtf": round(inst_rtf, 2),
+                "ema_rtf": round(pacer.ema_rtf, 2),
+                "play_speed": pacer.play_speed,
+                "lag_ms": round(lag_ms, 1),
             }
 
-            now_t = time.time()
-            if now_t - last_telem_push >= 0.20:
-                last_telem_push = now_t
-                with ctrl_lock:
-                    if video_ctrl_conn is not None:
-                        try:
-                            video_ctrl_conn.send({
-                                "cmd": "video_telemetry",
-                                "fps": round(fps, 1),
-                                "gen_ms": round(gen_ms, 1),
-                                "debug_tokens": debug_tokens,
-                                "fpz_meta_charge": round(fpz_charge, 3),
-                                "afz_stage_progress": round(afz_prog, 3),
-                                "monty_loss": telemetry["monty_loss"],
-                                "persistence": telemetry["persistence"],
-                                "surprise": telemetry["surprise"],
-                                "monty_mode": cur_monty_mode,
-                                "stochastic": runtime_state["stochastic"],
-                                "unassigned_stochastic": runtime_state["unassigned_stochastic"],
-                                "wm_radius": runtime_state["wm_radius"],
-                                "active_region_mask": active_region_mask,
-                                "region_gains": {k: round(v, 3) for k, v in effective_gains.items()},
-                                "active_concept_idx": act_c_idx,
-                            })
-                        except Exception:
-                            video_ctrl_conn = None
+            push_web_telem(
+                telemetry, fps=16.0 * pacer.play_speed, gen_ms=gen_ms
+            )
 
-            if frames:
-                if gateway_conn is None:
-                    try:
-                        gateway_conn = Client(("localhost", args.gateway_port), authkey=b"canvas")
-                    except Exception:
-                        gateway_conn = None
+            compact_entry = build_compact_telemetry(telemetry)
+            compact_line = json.dumps(compact_entry, ensure_ascii=False)
+            compact_ring.append(compact_line)
+            with open(compact_log_path, "w", encoding="utf-8") as cf:
+                cf.write("\n".join(compact_ring) + "\n")
 
-                encoded_batch_jpgs = []
-                bgr_frames = []
-                for rgb_frame in frames:
-                    bgr = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
-                    bgr_frames.append(bgr)
-                    if gateway_conn is not None:
-                        _, enc_jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        encoded_batch_jpgs.append(enc_jpg.tobytes())
+            if video_writer is not None:
+                for idx_f, rgb in enumerate(clean_frames):
+                    out_rgb = pacer._render_hud_on_clean_frame(
+                        rgb,
+                        traj[min(idx_f, len(traj) - 1)],
+                        cur_stage,
+                        runner.active_entity_parties,
+                        runner.maneuver_phase + 1,
+                        0.0,
+                    )
+                    video_writer.write(cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR))
 
-                # Отправляем всю пачку кадров видео одним пакетом (без потери промежуточных шагов шарика!)
-                if gateway_conn is not None and encoded_batch_jpgs:
-                    frame_seq_id += len(encoded_batch_jpgs)
-                    try:
-                        gateway_conn.send({
-                            "frame_id": frame_seq_id,
-                            "ts": time.time(),
-                            "gen_ms": gen_ms,
-                            "fps": fps,
-                            "actual_steps": int(runtime_state["steps"]),
-                            "w": frames[0].shape[1],
-                            "h": frames[0].shape[0],
-                            "use_taesd": False,
-                            "use_color": True,
-                            "jpg_frames": encoded_batch_jpgs,
-                            "jpg": encoded_batch_jpgs[-1],
-                        })
-                    except Exception:
-                        gateway_conn = None
-
-                for idx_f, bgr in enumerate(bgr_frames):
-                    if recorder_instance.is_recording:
-                        recorder_instance.push_frame(bgr, telemetry)
-                    if hud:
-                        hud.render(frames[idx_f], telemetry, fps=fps, dt=dt)
+            print(f"⚡ {compact_line}", flush=True)
 
     except KeyboardInterrupt:
-        pass
+        print("\n🛑 Stopped by user.")
     finally:
-        runtime_state["running"] = False
-        recorder_instance.stop_session()
-        amodal_engine.stop()
-        if hud:
-            hud.close()
+        pacer.running = False
+        if amodal_engine is not None:
+            amodal_engine.stop()
+        if video_writer is not None:
+            video_writer.release()
 
 
 if __name__ == "__main__":
     main()
-

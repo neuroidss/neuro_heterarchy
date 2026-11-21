@@ -1,18 +1,6 @@
 #!/usr/bin/env python3
 """
-neuro_solver_stepper.py — Бесшовный 3D-DiT I2V/V2V Stepper (Без возврата прошлых кадров!)
-=========================================================================================
-- УСТРАНЁН КРУГОВОЙ ВОЗВРАТ ШУМА (3-Frame torch.roll bug):
-  Вместо зацикливания 3-кадрового тензора `torch.roll(..., shifts=-1, dims=2)` (где шум
-  якорного кадра `t=0` каждые 3 сек возвращался в `t=2`), каждый блок генерирует свежие
-  независимые временные срезы базисов с плавным фазовым сдвигом S^3.
-- УСТРАНЕНО ПРИЗРАЧНОЕ ДВОЕНИЕ ОПОРНОГО КАДРА:
-  На опорных кадрах `:n_cond` шум НЕ подмешивается при `t_per_token = 0.0` (каноническое
-  поведение `LTXImageToVideoPipeline` + `LTXI2VLongMultiPromptPipeline`).
-- УСТРАНЕНА ТЯГА К КАДРУ #0 ВСЕЙ СЕССИИ:
-  AdaIN привязан к `anchor_latent_0[:, :, -1:]` (непосредственно предыдущий хвост),
-  а не к `genesis_ref_latent_5d` (нулевой кадр начала сессии).
-=========================================================================================
+neuro_solver_stepper.py — 3D-DiT I2V/V2V Stepper (0.9.8-Distilled + Опциональный мягкий CFG + t^2 Jitter)
 """
 
 from __future__ import annotations
@@ -28,7 +16,7 @@ from neuro_ltx_backend import LTXModelBackend, rescale_noise_cfg
 def adain_stabilize_latents(
     curr_latents: torch.Tensor,
     ref_latents: torch.Tensor | None,
-    factor: float = 0.12,
+    factor: float = 0.08,
 ) -> torch.Tensor:
     if ref_latents is None or factor <= 0.0:
         return curr_latents
@@ -74,14 +62,16 @@ class LatentFlowWindowStepper:
         backend: LTXModelBackend,
         referee: Any = None,
         steps: int = 8,
-        cfg_scale: float = 3.2,
+        cfg_scale: float = 1.0,
         guidance_rescale: float = 0.7,
+        image_cond_noise_scale: float = 0.15,
     ):
         self.backend = backend
         self.referee = referee
         self.steps = max(4, int(steps))
         self.cfg_scale = float(cfg_scale)
         self.guidance_rescale = float(guidance_rescale)
+        self.image_cond_noise_scale = float(image_cond_noise_scale)
         self.last_velocity_5d: torch.Tensor | None = None
         self._accum_phase_128xF: torch.Tensor | None = None
         self._window_step_idx: int = 0
@@ -98,11 +88,6 @@ class LatentFlowWindowStepper:
         gen_rand: torch.Generator | None,
         device: torch.device,
     ) -> torch.Tensor:
-        """
-        Когерентное вращение на сфере S^3 без зацикливания 3-кадрового буфера:
-        Каждый новый блок получает монотонно смещённый детерминированный сид (без возврата
-        к шуму якорного кадра t=0 через torch.roll).
-        """
         _, C, F_lat, H_lat, W_lat = shape
         self._window_step_idx += 1
         win_seed = int(base_seed) + self._window_step_idx * 997
@@ -142,7 +127,6 @@ class LatentFlowWindowStepper:
         ):
             self._accum_phase_128xF = wm_3xCxF[0] * (rad * math.pi * 0.5)
         else:
-            # Сдвигаем фазу по времени БЕЗ кругового переброса [0] в [-1]:
             tail_ext = self._accum_phase_128xF[:, :, -1:, :, :] + wm_3xCxF[0][:, :, -1:, :, :] * (rad * 0.65)
             shifted = torch.cat([self._accum_phase_128xF[:, :, 1:, :, :], tail_ext], dim=2)
             self._accum_phase_128xF = torch.remainder(shifted + wm_3xCxF[0] * (rad * 0.55), 2.0 * math.pi)
@@ -153,9 +137,7 @@ class LatentFlowWindowStepper:
             torch.roll(self._accum_phase_128xF, shifts=16, dims=1)
             - wm_3xCxF[1] * scale_ang
         )
-        phi_c = torch.roll(self._accum_phase_128xF, shifts=32, dims=1) * 0.5 + wm_3xCxF[
-            2
-        ] * (scale_ang * 0.5)
+        phi_c = torch.roll(self._accum_phase_128xF, shifts=32, dims=1) * 0.5 + wm_3xCxF[2] * (scale_ang * 0.5)
 
         g12 = torch.cos(phi_a) * b1 + torch.sin(phi_a) * b2
         g34 = torch.cos(phi_b) * b3 + torch.sin(phi_b) * b4
@@ -203,7 +185,13 @@ class LatentFlowWindowStepper:
         in_channels = self.backend.transformer.config.in_channels
         video_seq_len = total_lat_frames * h_lat * w_lat
 
-        timesteps = self.backend.set_scheduler_timesteps(self.steps, video_seq_len)
+        is_distilled = bool(getattr(self.backend, "is_distilled", False))
+        if is_distilled:
+            eff_steps = max(4, min(12, self.steps))
+        else:
+            eff_steps = max(14, self.steps * 2) if (not is_continuation_block) else self.steps
+
+        timesteps = self.backend.set_scheduler_timesteps(eff_steps, video_seq_len)
 
         n_cond = 0
         if is_continuation_block and anchor_latent_0 is not None:
@@ -232,9 +220,7 @@ class LatentFlowWindowStepper:
             latents_5d[:, :, :n_cond] = clean_anchor_prefix_5d
             cond_mask_5d[:, :, :n_cond] = 1.0
 
-        cond_mask_packed = (
-            pipe._pack_latents(cond_mask_5d, 1, 1).squeeze(-1).to(device)
-        )
+        cond_mask_packed = pipe._pack_latents(cond_mask_5d, 1, 1).squeeze(-1).to(device)
         cond_mask_batch2 = torch.cat([cond_mask_packed, cond_mask_packed], dim=0)
 
         rope_scale = (
@@ -243,6 +229,8 @@ class LatentFlowWindowStepper:
             float(self.backend.spatial_ratio),
         )
 
+        # Позволяет явно включать мягкий CFG (напр. --cfg 1.5..2.0) и на distilled,
+        # сохраняя быстрый batch=1 при --cfg 1.0:
         use_cfg_overall = self.cfg_scale > 1.05
         curr_pos_emb = pos_emb
         batch2_prompt_mask = (
@@ -253,15 +241,26 @@ class LatentFlowWindowStepper:
         n_total_steps = len(timesteps)
 
         for i, t in enumerate(timesteps):
-            # Мягкое обновление эмбеддинга без резких скачков посреди окна Эйлера:
             if live_pos_emb_fn is not None and i > 0:
                 fresh_pos = live_pos_emb_fn(i, n_total_steps)
                 if fresh_pos is not None and fresh_pos.shape == curr_pos_emb.shape:
                     curr_pos_emb = (curr_pos_emb.float() * 0.75 + fresh_pos.float() * 0.25).to(dtype)
 
-            # Опорные кадры :n_cond остаются абсолютно чистыми (соответствуют t_per_token = 0.0)!
             if clean_anchor_prefix_5d is not None and n_cond > 0:
-                latents_5d[:, :, :n_cond] = clean_anchor_prefix_5d
+                if self.image_cond_noise_scale > 0.0:
+                    t_norm = float(t.item()) / 1000.0
+                    cond_jit = torch.randn(
+                        clean_anchor_prefix_5d.shape,
+                        generator=gen,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    latents_5d[:, :, :n_cond] = (
+                        clean_anchor_prefix_5d
+                        + self.image_cond_noise_scale * cond_jit * (t_norm ** 2)
+                    )
+                else:
+                    latents_5d[:, :, :n_cond] = clean_anchor_prefix_5d
 
             latents_packed = pipe._pack_latents(latents_5d, 1, 1).to(torch.float32)
 
@@ -292,9 +291,7 @@ class LatentFlowWindowStepper:
 
             if use_cfg_overall:
                 noise_uncond, noise_text = noise_pred_raw.chunk(2)
-                noise_cfg = noise_uncond + self.cfg_scale * (
-                    noise_text - noise_uncond
-                )
+                noise_cfg = noise_uncond + self.cfg_scale * (noise_text - noise_uncond)
                 noise_pred_final = rescale_noise_cfg(
                     noise_cfg, noise_text, guidance_rescale=self.guidance_rescale
                 )
@@ -327,10 +324,9 @@ class LatentFlowWindowStepper:
             ).float()
 
         unpacked_z0 = latents_5d.float()
-        # Мягкий AdaIN к последнему опорному латенту (без притяжения назад к кадру #0 всей сессии!):
         if is_continuation_block and clean_anchor_prefix_5d is not None:
             unpacked_z0[:, :, n_cond:] = adain_stabilize_latents(
-                unpacked_z0[:, :, n_cond:], clean_anchor_prefix_5d[:, :, -1:], factor=0.12
+                unpacked_z0[:, :, n_cond:], clean_anchor_prefix_5d[:, :, -1:], factor=0.08
             )
 
         return unpacked_z0, 1.0
