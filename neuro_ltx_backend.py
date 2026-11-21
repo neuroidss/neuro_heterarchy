@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 neuro_ltx_backend.py — Аппаратный бэкенд LTX-Video (0.9.8-2B-Distilled NF4/INT8/FP8/BF16 + Base 0.9.0)
-С автоматическим взаимоисключением T5 <-> VAE в VRAM (0 OOM при смене концептов на лету).
+С автоматическим взаимоисключением T5 <-> VAE в VRAM и потокобезопасным IPC-локом.
 """
 
 from __future__ import annotations
 import os
 import sys
 import gc
+import threading
 from pathlib import Path
 import numpy as np
 import torch
@@ -610,11 +611,19 @@ class _TransformerConfigProxy:
 
 
 class _RemoteTransformerProxy:
-    def __init__(self, conn, device: torch.device, dtype: torch.dtype, in_channels: int = 128):
+    def __init__(
+        self,
+        conn,
+        device: torch.device,
+        dtype: torch.dtype,
+        in_channels: int = 128,
+        rpc_lock: threading.RLock | None = None,
+    ):
         self.conn = conn
         self.device = device
         self.dtype = dtype
         self.config = _TransformerConfigProxy(in_channels=in_channels)
+        self._rpc_lock = rpc_lock or threading.RLock()
 
     @staticmethod
     def _to_np_f16(t: torch.Tensor) -> np.ndarray:
@@ -633,22 +642,23 @@ class _RemoteTransformerProxy:
         rope_interpolation_scale: tuple[float, float, float],
         return_dict: bool = False,
     ):
-        self.conn.send(
-            {
-                "cmd": "transformer_forward",
-                "hidden_states": self._to_np_f16(hidden_states),
-                "encoder_hidden_states": self._to_np_f16(encoder_hidden_states),
-                "timestep": timestep.detach().float().cpu().numpy(),
-                "encoder_attention_mask": encoder_attention_mask.detach().cpu().numpy(),
-                "num_frames": int(num_frames),
-                "height": int(height),
-                "width": int(width),
-                "rope_interpolation_scale": tuple(float(x) for x in rope_interpolation_scale),
-            }
-        )
-        resp = self.conn.recv()
-        if resp.get("status") != "ok":
-            raise RuntimeError(f"Remote transformer error: {resp.get('error')}")
+        payload = {
+            "cmd": "transformer_forward",
+            "hidden_states": self._to_np_f16(hidden_states),
+            "encoder_hidden_states": self._to_np_f16(encoder_hidden_states),
+            "timestep": timestep.detach().float().cpu().numpy(),
+            "encoder_attention_mask": encoder_attention_mask.detach().cpu().numpy(),
+            "num_frames": int(num_frames),
+            "height": int(height),
+            "width": int(width),
+            "rope_interpolation_scale": tuple(float(x) for x in rope_interpolation_scale),
+        }
+        with self._rpc_lock:
+            self.conn.send(payload)
+            resp = self.conn.recv()
+        if not isinstance(resp, dict) or resp.get("status") != "ok" or "sample" not in resp:
+            err_detail = resp.get("error", list(resp.keys())) if isinstance(resp, dict) else resp
+            raise RuntimeError(f"Remote transformer error: {err_detail}")
         sample = torch.from_numpy(resp["sample"]).to(device=self.device, dtype=self.dtype)
         return (sample,)
 
@@ -676,12 +686,13 @@ class _LocalLatentPackerPipe:
 
 
 class RemoteLTXModelBackend:
-    """Клиентский прокси к серверу весов (neuro_battle_server.py)."""
+    """Потокобезопасный клиентский прокси к серверу весов (video_world_server.py)."""
 
     def __init__(self, conn, ping_info: dict, device: torch.device | None = None):
         from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
         self.conn = conn
+        self._rpc_lock = threading.RLock()
         self.device = device or DEVICE
         self.dtype = (
             torch.bfloat16
@@ -695,7 +706,11 @@ class RemoteLTXModelBackend:
 
         self.pipe = _LocalLatentPackerPipe()
         self.transformer = _RemoteTransformerProxy(
-            conn=self.conn, device=self.device, dtype=self.dtype, in_channels=in_channels
+            conn=self.conn,
+            device=self.device,
+            dtype=self.dtype,
+            in_channels=in_channels,
+            rpc_lock=self._rpc_lock,
         )
         if self.is_distilled:
             self.scheduler = FlowMatchEulerDiscreteScheduler(
@@ -713,6 +728,11 @@ class RemoteLTXModelBackend:
         self._local_prompt_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self._decode_call_idx = 0
 
+    def _rpc(self, payload: dict) -> dict:
+        with self._rpc_lock:
+            self.conn.send(payload)
+            return self.conn.recv()
+
     @property
     def spatial_ratio(self) -> int:
         return self._spatial_ratio
@@ -723,8 +743,7 @@ class RemoteLTXModelBackend:
 
     def offload_t5_to_cpu(self) -> float:
         try:
-            self.conn.send({"cmd": "evict_t5_to_cpu"})
-            resp = self.conn.recv()
+            resp = self._rpc({"cmd": "evict_t5_to_cpu"})
             return float(resp.get("vram_gb", 0.0))
         except Exception:
             return 0.0
@@ -735,8 +754,7 @@ class RemoteLTXModelBackend:
         if key not in self._local_prompt_cache:
             if len(self._local_prompt_cache) > 1024:
                 self._local_prompt_cache.clear()
-            self.conn.send({"cmd": "encode_semantics", "text": str(text), "max_len": int(max_len)})
-            resp = self.conn.recv()
+            resp = self._rpc({"cmd": "encode_semantics", "text": str(text), "max_len": int(max_len)})
             if resp.get("status") != "ok":
                 raise RuntimeError(f"Remote encode_semantics error: {resp.get('error')}")
             emb = torch.from_numpy(resp["embeds"]).to(device=self.device, dtype=self.dtype)
@@ -773,16 +791,14 @@ class RemoteLTXModelBackend:
             arr = frames_rgb
         if arr.shape[0] == 1:
             return self.encode_frame_to_latent(arr[0])
-        self.conn.send({"cmd": "encode_frames", "frames_rgb": np.ascontiguousarray(arr, dtype=np.uint8)})
-        resp = self.conn.recv()
+        resp = self._rpc({"cmd": "encode_frames", "frames_rgb": np.ascontiguousarray(arr, dtype=np.uint8)})
         if resp.get("status") != "ok":
             return self.encode_frame_to_latent(arr[-1])
         return torch.from_numpy(resp["latent_5d"]).to(device=self.device, dtype=torch.float32)
 
     @torch.no_grad()
     def encode_frame_to_latent(self, frame_rgb: np.ndarray) -> torch.Tensor:
-        self.conn.send({"cmd": "encode_frame", "frame_rgb": np.ascontiguousarray(frame_rgb, dtype=np.uint8)})
-        resp = self.conn.recv()
+        resp = self._rpc({"cmd": "encode_frame", "frame_rgb": np.ascontiguousarray(frame_rgb, dtype=np.uint8)})
         if resp.get("status") != "ok":
             raise RuntimeError(f"Remote encode_frame error: {resp.get('error')}")
         return torch.from_numpy(resp["latent_5d"]).to(device=self.device, dtype=torch.float32)
@@ -797,7 +813,7 @@ class RemoteLTXModelBackend:
         last_frame_fix: bool = True,
     ) -> list[np.ndarray]:
         self._decode_call_idx += 1
-        self.conn.send(
+        resp = self._rpc(
             {
                 "cmd": "decode_latents",
                 "latents_5d": latents_5d.detach().to(torch.float16).cpu().numpy(),
@@ -807,7 +823,6 @@ class RemoteLTXModelBackend:
                 "last_frame_fix": bool(last_frame_fix),
             }
         )
-        resp = self.conn.recv()
         if resp.get("status") != "ok":
             raise RuntimeError(f"Remote decode_latents error: {resp.get('error')}")
         return resp["frames"]

@@ -5,6 +5,7 @@ NEUROCANVAS SESSION RECORDER (AUTO-RECONNECTING ZERO-LOSS MULTIMODAL CAPTURE)
 ===================================================================================
 - НЕПРЕРЫВНЫЙ АВТО-ПОИСК LSL (resolve_streams каждые 0.5с):
   Поток ЭЭГ подхватывается на лету, даже если донгл/BLE включили ПОСЛЕ старта записи!
+- ЛЕНИВЫЙ LSL OUTLET: Не создаёт дублирующихся LSL-аутлетов при обычном импорте модуля.
 - БУФЕР 360 СЕКУНД: Ноль потерь пакетов при любой нагрузке GPU.
 - ИСТИННЫЙ 1:1 ХРОНОМЕТРАЖ: Видео и ЭЭГ привязаны к аппаратному local_clock().
 ===================================================================================
@@ -12,6 +13,18 @@ NEUROCANVAS SESSION RECORDER (AUTO-RECONNECTING ZERO-LOSS MULTIMODAL CAPTURE)
 
 from __future__ import annotations
 import os
+import tempfile
+
+if "LSLAPICFG" not in os.environ:
+    _lsl_cfg = os.path.join(tempfile.gettempdir(), "lsl_api.cfg")
+    try:
+        with open(_lsl_cfg, "w", encoding="utf-8") as _f:
+            _f.write("[logging]\nlevel = -2\n")
+        os.environ["LSLAPICFG"] = _lsl_cfg
+    except Exception:
+        pass
+os.environ.setdefault("LIBLSL_LOG_LEVEL", "-2")
+
 import time
 import json
 import csv
@@ -30,21 +43,21 @@ class NeuroSessionRecorder:
     def __init__(self, output_root="sessions", video_fps=30.0):
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
-        
+
         self.is_recording = False
         self.session_dir = None
         self.lock = threading.Lock()
-        
+
         self.eeg_thread = None
         self.stop_eeg_event = threading.Event()
         self.eeg_timestamps = []
         self.eeg_samples = []
-        
+
         self.video_fps = float(video_fps)
         self.video_writer = None
         self.video_path = None
         self.video_dims = None
-        
+
         self.t_session_start = None
         self.last_frame_bgr = None
         self.last_frame_t = None
@@ -52,12 +65,24 @@ class NeuroSessionRecorder:
         self.last_telemetry = None
         self.total_video_ticks = 0
         self.unique_frames_count = 0
-        
+
         self.events_file = None
         self.events_writer = None
-        
-        info = StreamInfo('NeuroCanvas_Markers', 'Markers', 1, 0, 'string', 'neurocanvas_mark_01')
-        self.marker_outlet = StreamOutlet(info)
+
+        # Создаётся лениво только при старте реальной записи, чтобы не спамить LSL при импорте:
+        self.marker_outlet = None
+
+    def _ensure_marker_outlet(self):
+        if self.marker_outlet is None:
+            info = StreamInfo(
+                'NeuroCanvas_Markers',
+                'Markers',
+                1,
+                0,
+                'string',
+                f'neurocanvas_mark_{os.getpid()}'
+            )
+            self.marker_outlet = StreamOutlet(info)
 
     def _eeg_capture_loop(self):
         inlets = []
@@ -72,7 +97,7 @@ class NeuroSessionRecorder:
                 try:
                     all_streams = resolve_streams(wait_time=0.05)
                     live_uids = {s.source_id() for s in all_streams}
-                    
+
                     # Убираем отключенные
                     inlets = [inl for inl in inlets if inl.info().source_id() in live_uids]
                     connected_uids = {inl.info().source_id() for inl in inlets}
@@ -109,13 +134,15 @@ class NeuroSessionRecorder:
         with self.lock:
             if self.is_recording:
                 return str(self.session_dir)
-            
+
+            self._ensure_marker_outlet()
+
             ts_str = time.strftime("%Y%m%d_%H%M%S")
             s_name = f"session_{ts_str}" if not session_name else f"{session_name}_{ts_str}"
             self.session_dir = self.output_root / s_name
             self.session_dir.mkdir(parents=True, exist_ok=True)
             (self.session_dir / "frames").mkdir(exist_ok=True)
-            
+
             csv_path = self.session_dir / "events.csv"
             self.events_file = open(csv_path, mode="w", newline="", encoding="utf-8")
             self.events_writer = csv.writer(self.events_file)
@@ -130,10 +157,10 @@ class NeuroSessionRecorder:
             self.video_path = self.session_dir / "video_timeline.mp4"
             self.video_writer = None
             self.video_dims = None
-            
+
             self.eeg_timestamps.clear()
             self.eeg_samples.clear()
-            
+
             self.t_session_start = local_clock()
             self.last_frame_bgr = None
             self.last_frame_t = None
@@ -141,14 +168,15 @@ class NeuroSessionRecorder:
             self.last_telemetry = None
             self.total_video_ticks = 0
             self.unique_frames_count = 0
-            
+
             self.is_recording = True
             self.stop_eeg_event.clear()
-            
+
             self.eeg_thread = threading.Thread(target=self._eeg_capture_loop, daemon=True)
             self.eeg_thread.start()
 
-            self.marker_outlet.push_sample([f"SESSION_START|{s_name}"], timestamp=self.t_session_start)
+            if self.marker_outlet is not None:
+                self.marker_outlet.push_sample([f"SESSION_START|{s_name}"], timestamp=self.t_session_start)
             print(f"\n🔴 [RECORDER] Сессия запущена: {self.session_dir}")
             return str(self.session_dir)
 
@@ -159,7 +187,7 @@ class NeuroSessionRecorder:
         elapsed_sec = current_t - self.t_session_start
         target_total_ticks = int(round(elapsed_sec * self.video_fps))
         ticks_to_write = max(1, target_total_ticks - self.total_video_ticks)
-        
+
         tick_start = self.total_video_ticks
         for _ in range(ticks_to_write):
             self.video_writer.write(self.last_frame_bgr)
@@ -217,7 +245,8 @@ class NeuroSessionRecorder:
             self.last_telemetry = telemetry.copy() if telemetry else {}
 
             root_c = telemetry.get("dag_log_parts", ["NONE"])[0] if telemetry else "NONE"
-            self.marker_outlet.push_sample([f"FRAME:{f_id}|{root_c}"], timestamp=t_now)
+            if self.marker_outlet is not None:
+                self.marker_outlet.push_sample([f"FRAME:{f_id}|{root_c}"], timestamp=t_now)
 
     def log_custom_event(self, event_name: str, payload_str: str = ""):
         if not self.is_recording:
@@ -230,7 +259,8 @@ class NeuroSessionRecorder:
                 "", "", "", "", "", "", payload_str
             ])
             self.events_file.flush()
-            self.marker_outlet.push_sample([f"EVENT:{event_name}|{payload_str}"], timestamp=t_lsl)
+            if self.marker_outlet is not None:
+                self.marker_outlet.push_sample([f"EVENT:{event_name}|{payload_str}"], timestamp=t_lsl)
 
     def stop_session(self):
         with self.lock:
@@ -243,7 +273,8 @@ class NeuroSessionRecorder:
             if self.last_frame_bgr is not None:
                 self._flush_previous_frame_ticks(t_stop)
 
-            self.marker_outlet.push_sample(["SESSION_STOP"], timestamp=t_stop)
+            if self.marker_outlet is not None:
+                self.marker_outlet.push_sample(["SESSION_STOP"], timestamp=t_stop)
 
             if self.events_file:
                 self.events_file.close()
@@ -268,7 +299,7 @@ class NeuroSessionRecorder:
             else:
                 print(f"⚠️ [RECORDER ПРЕДУПРЕЖДЕНИЕ] За сессию не пришло ни одного сэмпла ЭЭГ! (Проверьте, что LSL-поток был активен)")
                 eeg_arr = np.zeros((0, 16), dtype=np.float32)
-                ts_arr = np.zeros(0, dtype=np.float64)
+                ts_arr = np.zeros((0,), dtype=np.float64)
                 eeg_dur = 0.0
 
             np.savez_compressed(
@@ -332,3 +363,4 @@ class NeuroSessionRecorder:
 
 
 recorder_instance = NeuroSessionRecorder()
+

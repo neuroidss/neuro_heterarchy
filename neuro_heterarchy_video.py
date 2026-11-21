@@ -7,16 +7,30 @@ neuro_heterarchy_video.py — Единый 3D-DiT Видео-Раннер (Ка�
   ТАК И обычные .txt лоры (lore/*.txt) — автоматически отключая Оракул при отсутствии гипотез.
 - Подключается к video_world_server.py на порту 6006 (authkey=b"video_world").
 - Работает с web_cloud_gateway.py (:6002 видео + :6007 управление, геймпад, set_init_image).
+- Тихий LSL (без INFO/WARN спама) + атомарная очередь команд из браузера (0 гонок IPC).
 ===================================================================================
 """
 
 from __future__ import annotations
+import os
+import tempfile
+
+# Подавляем отладочный INFO/WARN спам liblsl ДО любых импортов pylsl:
+if "LSLAPICFG" not in os.environ:
+    _lsl_cfg = os.path.join(tempfile.gettempdir(), "lsl_api.cfg")
+    try:
+        with open(_lsl_cfg, "w", encoding="utf-8") as _f:
+            _f.write("[logging]\nlevel = -2\n")
+        os.environ["LSLAPICFG"] = _lsl_cfg
+    except Exception:
+        pass
+os.environ.setdefault("LIBLSL_LOG_LEVEL", "-2")
+
 import argparse
 from collections import deque
 from copy import copy
 import json
 from multiprocessing.connection import Client
-import os
 from pathlib import Path
 import threading
 import time
@@ -379,6 +393,13 @@ class SmoothRealtimeVideoPacer(threading.Thread):
         self.last_raw_video_ms = 1000.0
         self.actual_steps = 8
         self.gateway_conn = None
+
+    def reset_visual_blend(self):
+        with self.lock:
+            self.frame_queue.clear()
+            self.prev_tail_clean_rgb = None
+            self.prev_quest_pct = 0.0
+            self.hud_traj_history.clear()
 
     def cycle_hud_mode(self):
         order = ["off", "minimal", "full"]
@@ -875,41 +896,37 @@ def start_web_studio_control_bridge(
                     elif cmd == "update_lore_sections":
                         secs = msg.get("sections", {})
                         if isinstance(secs, dict):
-                            apply_web_sections_to_manifest(runner.manifest, secs)
-                            print(
-                                "📝 [WEB LORE EDITOR] Пулы концептов 3D-DiT обновлены на лету из браузера!"
+                            secs_copy = {
+                                k: list(v) for k, v in secs.items() if isinstance(v, list)
+                            }
+                            runner.request_lore_sections_update(
+                                lambda m, s=secs_copy: apply_web_sections_to_manifest(m, s)
                             )
                     elif cmd == "switch_lore":
                         l_file = str(msg.get("lore_file", "")).strip()
                         secs = msg.get("sections")
                         if l_file and Path(l_file).exists():
-                            runner.manifest = load_manifest_or_txt_lore(l_file)
-                            pacer.manifest = runner.manifest
-                            runner.curr_idx = 0
-                            runner.maneuver_phase = 0
-                            runner.need_hard_genesis = True
-                            runner._warmup_manifest_semantics()
-                            print(
-                                f"🌍 [WEB WORLD SWITCH] Загружен мир/лор: {l_file}"
-                            )
+                            new_manifest = load_manifest_or_txt_lore(l_file)
+                            runner.request_manifest_switch(new_manifest, label=l_file)
+                        elif not l_file:
+                            empty_manifest = load_txt_lore_as_manifest("")
+                            runner.request_manifest_switch(empty_manifest, label="FREE_DRIFT")
                         elif isinstance(secs, dict):
-                            apply_web_sections_to_manifest(runner.manifest, secs)
-                            runner.need_hard_genesis = True
-                            print(
-                                f"🌍 [WEB LORE SWITCH] Применен региональный лор: {l_file}"
+                            secs_copy = {
+                                k: list(v) for k, v in secs.items() if isinstance(v, list)
+                            }
+                            runner.request_lore_sections_update(
+                                lambda m, s=secs_copy: apply_web_sections_to_manifest(m, s)
                             )
+                            runner.request_reset_genesis()
                     elif cmd == "set_init_image":
                         raw_bytes = msg.get("image_bytes")
                         if raw_bytes:
-                            runner.set_init_image_bytes(raw_bytes)
+                            runner.request_init_image_bytes(raw_bytes)
                     elif cmd == "reset_genesis":
-                        runner.need_hard_genesis = True
-                        runner.maneuver_phase = 0
+                        runner.request_reset_genesis()
                         if amodal_engine is not None:
                             amodal_engine.reset_seals()
-                        print(
-                            "🔄 [WEB RESET] Сброс генезиса 3D-DiT по кнопке из браузера!"
-                        )
                     elif cmd == "set_device_mapping":
                         s_name = str(msg.get("stream_name", "")).strip()
                         r_val = str(msg.get("role", "FCz")).strip()
@@ -1218,6 +1235,9 @@ def main():
             clean_frames, traj, gen_ms, fps, tag, telemetry = (
                 runner.execute_turn_step()
             )
+            pacer.manifest = runner.manifest
+            if runner.consume_visual_reset_flag():
+                pacer.reset_visual_blend()
             cur_stage = runner.manifest.stages[runner.curr_idx]
 
             pacer.push_generated_batch(
@@ -1279,3 +1299,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

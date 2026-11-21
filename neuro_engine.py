@@ -4,6 +4,7 @@ neuro_engine.py — Универсальный 100%-тензорный движ�
 Автоматически работает как:
   1) Замкнутый каталитический мир с 3D-DiT Оракулом и NPC (если в манифесте есть гипотезы переходов),
   2) Чистый открытый поток 3D-DiT без Оракула (если загружен .txt лор или 1 стадия без completed_hypothesis).
+Все команды смены мира/концептов/картинки из веб-моста применяются атомарно на границе шага (0 гонок IPC).
 """
 
 from __future__ import annotations
@@ -89,6 +90,14 @@ class UniversalLatentAutobattlerEngine:
             k: list(v) for k, v in DEFAULT_REGION_BINDINGS.items()
         }
 
+        # Очередь атомарных команд из веб-интерфейса (применяются строго в начале execute_turn_step):
+        self._cmd_lock = threading.Lock()
+        self._pending_manifest: tuple[GameWorldManifest, str] | None = None
+        self._pending_sections_fn = None
+        self._pending_init_image: bytes | None = None
+        self._pending_reset_genesis: bool = False
+        self._just_reset_visual_stream: bool = False
+
         self.curr_idx = 0
         self.block_idx = 0
         self.total_rendered_frames = 0
@@ -165,6 +174,87 @@ class UniversalLatentAutobattlerEngine:
         )
 
         self._warmup_manifest_semantics()
+
+    def request_manifest_switch(self, new_manifest: GameWorldManifest, label: str = ""):
+        with self._cmd_lock:
+            self._pending_manifest = (new_manifest, label)
+            self._pending_sections_fn = None
+
+    def request_lore_sections_update(self, apply_fn):
+        with self._cmd_lock:
+            self._pending_sections_fn = apply_fn
+
+    def request_init_image_bytes(self, img_bytes: bytes):
+        with self._cmd_lock:
+            self._pending_init_image = img_bytes
+
+    def request_reset_genesis(self):
+        with self._cmd_lock:
+            self._pending_reset_genesis = True
+
+    def consume_visual_reset_flag(self) -> bool:
+        val = self._just_reset_visual_stream
+        self._just_reset_visual_stream = False
+        return val
+
+    @torch.no_grad()
+    def _apply_pending_commands(self):
+        with self._cmd_lock:
+            pend_manifest = self._pending_manifest
+            pend_sec_fn = self._pending_sections_fn
+            pend_img = self._pending_init_image
+            pend_reset = self._pending_reset_genesis
+            self._pending_manifest = None
+            self._pending_sections_fn = None
+            self._pending_init_image = None
+            self._pending_reset_genesis = False
+
+        if pend_manifest is not None:
+            new_m, label = pend_manifest
+            self.manifest = new_m
+            self.curr_idx = 0
+            self.maneuver_phase = 0
+            self.quest_progress_pct = 0.0
+            self.need_hard_genesis = True
+            self.active_entity_parties = []
+            self.persistent_entity_states.clear()
+            self.last_user_driven_slots.clear()
+            self.entity_controllers.clear()
+            self.local_genesis_5d = None
+            self.local_context_latents_5d = None
+            self.recent_clean_frames_rgb.clear()
+            self.stepper._accum_phase_128xF = None
+            self._warmup_manifest_semantics()
+            self._just_reset_visual_stream = True
+            print(
+                f"🌍 [ENGINE WORLD SWITCH] Применён мир/лор: {label or new_m.world_name}",
+                flush=True,
+            )
+
+        if pend_sec_fn is not None:
+            pend_sec_fn(self.manifest)
+            self.active_entity_parties = []
+            self.persistent_entity_states.clear()
+            self._warmup_manifest_semantics()
+            print(
+                "📝 [ENGINE LORE EDITOR] Пулы концептов 3D-DiT обновлены и прогреты!",
+                flush=True,
+            )
+
+        if pend_reset:
+            self.need_hard_genesis = True
+            self.maneuver_phase = 0
+            self.quest_progress_pct = 0.0
+            self.local_genesis_5d = None
+            self.local_context_latents_5d = None
+            self.recent_clean_frames_rgb.clear()
+            self.stepper._accum_phase_128xF = None
+            self._just_reset_visual_stream = True
+            print("🔄 [ENGINE RESET] Сброс генезиса 3D-DiT выполнен!", flush=True)
+
+        if pend_img:
+            self.set_init_image_bytes(pend_img)
+            self._just_reset_visual_stream = True
 
     @torch.no_grad()
     def set_init_image_bytes(self, img_bytes: bytes):
@@ -429,6 +519,10 @@ class UniversalLatentAutobattlerEngine:
         dict,
     ]:
         t0 = time.perf_counter()
+        self._apply_pending_commands()
+        if not self.manifest.stages:
+            raise RuntimeError("Manifest has no stages")
+        self.curr_idx = self.curr_idx % len(self.manifest.stages)
         stage = self.manifest.stages[self.curr_idx]
         n_ents = max(1, len(stage.entities))
 
