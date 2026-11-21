@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-neuro_solver_stepper.py — 3D-DiT I2V/V2V Stepper (0.9.8-Distilled + Опциональный мягкий CFG + t^2 Jitter)
+neuro_solver_stepper.py — 3D-DiT I2V/V2V Stepper (ComfyUI / LTXI2VLongMultiPromptPipeline Parity)
+- Непрерывный стационарный базис на сфере S³ (без сброса win_seed на границах блоков).
+- Чистое удержание латентного контекста :n_cond (image_cond_noise_scale = 0.0 по умолчанию для 0.9.8-distilled).
 """
 
 from __future__ import annotations
@@ -64,17 +66,40 @@ class LatentFlowWindowStepper:
         steps: int = 8,
         cfg_scale: float = 1.0,
         guidance_rescale: float = 0.7,
-        image_cond_noise_scale: float = 0.15,
+        image_cond_noise_scale: float = 0.0,
     ):
         self.backend = backend
         self.referee = referee
-        self.steps = max(4, int(steps))
+        self.steps = max(2, int(steps))
         self.cfg_scale = float(cfg_scale)
         self.guidance_rescale = float(guidance_rescale)
         self.image_cond_noise_scale = float(image_cond_noise_scale)
         self.last_velocity_5d: torch.Tensor | None = None
         self._accum_phase_128xF: torch.Tensor | None = None
-        self._window_step_idx: int = 0
+        self._s3_basis_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+    @torch.no_grad()
+    def _get_stationary_s3_bases(
+        self,
+        shape: tuple[int, int, int, int, int],
+        base_seed: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Стационарный ортогональный гауссов базис на S³: не рвёт фазу между соседними окнами."""
+        key = (shape, int(base_seed), device)
+        if key not in self._s3_basis_cache:
+            if len(self._s3_basis_cache) > 8:
+                self._s3_basis_cache.clear()
+            g1 = torch.Generator(device=device).manual_seed(int(base_seed) + 101)
+            g2 = torch.Generator(device=device).manual_seed(int(base_seed) + 202)
+            g3 = torch.Generator(device=device).manual_seed(int(base_seed) + 303)
+            g4 = torch.Generator(device=device).manual_seed(int(base_seed) + 404)
+            b1 = torch.randn(shape, generator=g1, device=device, dtype=torch.float32)
+            b2 = torch.randn(shape, generator=g2, device=device, dtype=torch.float32)
+            b3 = torch.randn(shape, generator=g3, device=device, dtype=torch.float32)
+            b4 = torch.randn(shape, generator=g4, device=device, dtype=torch.float32)
+            self._s3_basis_cache[key] = (b1, b2, b3, b4)
+        return self._s3_basis_cache[key]
 
     @torch.no_grad()
     def _build_wm_s3_noise(
@@ -87,20 +112,10 @@ class LatentFlowWindowStepper:
         wm_probe_emb: torch.Tensor,
         gen_rand: torch.Generator | None,
         device: torch.device,
+        step_shift_lat: int = 1,
     ) -> torch.Tensor:
-        _, C, F_lat, H_lat, W_lat = shape
-        self._window_step_idx += 1
-        win_seed = int(base_seed) + self._window_step_idx * 997
-
-        g1 = torch.Generator(device=device).manual_seed(win_seed + 101)
-        g2 = torch.Generator(device=device).manual_seed(win_seed + 202)
-        g3 = torch.Generator(device=device).manual_seed(win_seed + 303)
-        g4 = torch.Generator(device=device).manual_seed(win_seed + 404)
-
-        b1 = torch.randn(shape, generator=g1, device=device, dtype=torch.float32)
-        b2 = torch.randn(shape, generator=g2, device=device, dtype=torch.float32)
-        b3 = torch.randn(shape, generator=g3, device=device, dtype=torch.float32)
-        b4 = torch.randn(shape, generator=g4, device=device, dtype=torch.float32)
+        _, C, F_lat, _, _ = shape
+        b1, b2, b3, b4 = self._get_stationary_s3_bases(shape, base_seed, device)
 
         if wm_19200_vec is not None and wm_19200_vec.numel() > 0:
             raw_wm = wm_19200_vec.to(device=device, dtype=torch.float32).reshape(-1)
@@ -127,17 +142,29 @@ class LatentFlowWindowStepper:
         ):
             self._accum_phase_128xF = wm_3xCxF[0] * (rad * math.pi * 0.5)
         else:
-            tail_ext = self._accum_phase_128xF[:, :, -1:, :, :] + wm_3xCxF[0][:, :, -1:, :, :] * (rad * 0.65)
-            shifted = torch.cat([self._accum_phase_128xF[:, :, 1:, :, :], tail_ext], dim=2)
-            self._accum_phase_128xF = torch.remainder(shifted + wm_3xCxF[0] * (rad * 0.55), 2.0 * math.pi)
+            # Сдвигаем фазовое окно ровно на число новых латентных кадров и плавно наращиваем хвост:
+            shift_k = max(1, min(int(step_shift_lat), F_lat - 1))
+            kept = self._accum_phase_128xF[:, :, shift_k:, :, :]
+            tail_last = self._accum_phase_128xF[:, :, -1:, :, :]
+            new_tails = []
+            for s_i in range(shift_k):
+                step_inc = wm_3xCxF[0][:, :, min(F_lat - 1, F_lat - shift_k + s_i) : min(F_lat, F_lat - shift_k + s_i + 1), :, :]
+                tail_last = tail_last + step_inc * (rad * 0.35)
+                new_tails.append(tail_last)
+            self._accum_phase_128xF = torch.remainder(
+                torch.cat([kept] + new_tails, dim=2), 2.0 * math.pi
+            )
 
-        scale_ang = math.pi * 0.85 * rad
-        phi_a = self._accum_phase_128xF + wm_3xCxF[0] * scale_ang
+        scale_ang = math.pi * 0.65 * rad
+        phi_a = self._accum_phase_128xF + wm_3xCxF[0] * (scale_ang * 0.35)
         phi_b = (
             torch.roll(self._accum_phase_128xF, shifts=16, dims=1)
-            - wm_3xCxF[1] * scale_ang
+            - wm_3xCxF[1] * (scale_ang * 0.35)
         )
-        phi_c = torch.roll(self._accum_phase_128xF, shifts=32, dims=1) * 0.5 + wm_3xCxF[2] * (scale_ang * 0.5)
+        phi_c = (
+            torch.roll(self._accum_phase_128xF, shifts=32, dims=1) * 0.5
+            + wm_3xCxF[2] * (scale_ang * 0.25)
+        )
 
         g12 = torch.cos(phi_a) * b1 + torch.sin(phi_a) * b2
         g34 = torch.cos(phi_b) * b3 + torch.sin(phi_b) * b4
@@ -187,7 +214,7 @@ class LatentFlowWindowStepper:
 
         is_distilled = bool(getattr(self.backend, "is_distilled", False))
         if is_distilled:
-            eff_steps = max(4, min(12, self.steps))
+            eff_steps = max(2, min(20, self.steps))
         else:
             eff_steps = max(14, self.steps * 2) if (not is_continuation_block) else self.steps
 
@@ -197,6 +224,7 @@ class LatentFlowWindowStepper:
         if is_continuation_block and anchor_latent_0 is not None:
             n_cond = min(anchor_latent_0.shape[2], total_lat_frames - 1)
 
+        step_shift_lat = max(1, total_lat_frames - n_cond)
         shape = (1, in_channels, total_lat_frames, h_lat, w_lat)
         noise_5d = self._build_wm_s3_noise(
             shape=shape,
@@ -207,6 +235,7 @@ class LatentFlowWindowStepper:
             wm_probe_emb=pos_emb,
             gen_rand=gen,
             device=device,
+            step_shift_lat=step_shift_lat,
         )
 
         latents_5d = noise_5d.clone()
@@ -229,8 +258,6 @@ class LatentFlowWindowStepper:
             float(self.backend.spatial_ratio),
         )
 
-        # Позволяет явно включать мягкий CFG (напр. --cfg 1.5..2.0) и на distilled,
-        # сохраняя быстрый batch=1 при --cfg 1.0:
         use_cfg_overall = self.cfg_scale > 1.05
         curr_pos_emb = pos_emb
         batch2_prompt_mask = (
