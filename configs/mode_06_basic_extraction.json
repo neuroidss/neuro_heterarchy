@@ -1,0 +1,190 @@
+{
+  "world_name": "Mode_06_Four_Peer_WM_Extraction_Theater",
+  "arena_context_desc": "",
+  "static_hold_desc": "strictly flat 2D top-down orthographic view on pure solid black background with completely stationary camera, bright white circle staying still, solid horizontal cyan barrier wall fixed in place, glowing green circular exit portal steady in the upper left",
+  "negative_desc": "camera rotation, camera pan, camera zoom, spinning maze, moving walls, tilted 3D perspective, bowling lane, 3D room, disappearing white circle, morphing barrier, blurry, text, watermark",
+  "archetypes": {
+    "w0_plane_steady": {
+      "element_tag": "FPZ_SPACE",
+      "role_tag": "WM_PEER",
+      "display_name": "w0:2D-Plane",
+      "essence_desc": "strictly flat 2D top-down orthographic view on a pure solid black background",
+      "action_desc": "maintains a completely fixed unmoving camera with zero rotation and zero zoom"
+    },
+    "w0_plane_flash": {
+      "element_tag": "FPZ_CLOSURE",
+      "role_tag": "WM_PEER",
+      "display_name": "w0:Closure-Flash",
+      "essence_desc": "strictly flat 2D top-down orthographic view on a pure solid black background",
+      "action_desc": "emits a clean expanding emerald-white ring pulse marking episode closure"
+    },
+    "w1_hold": {
+      "element_tag": "FCz_HOLD",
+      "role_tag": "WM_PEER",
+      "display_name": "w1:Hold",
+      "essence_desc": "the single bright white circle",
+      "action_desc": "stays completely motionless in its current position on the black 2D plane"
+    },
+    "w1_up": {
+      "element_tag": "FCz_UP",
+      "role_tag": "WM_PEER",
+      "display_name": "w1:UP",
+      "essence_desc": "the single bright white circle",
+      "action_desc": "slides smoothly straight upward on the black 2D plane"
+    },
+    "w1_down": {
+      "element_tag": "FCz_DOWN",
+      "role_tag": "WM_PEER",
+      "display_name": "w1:DOWN",
+      "essence_desc": "the single bright white circle",
+      "action_desc": "slides smoothly straight downward on the black 2D plane"
+    },
+    "w1_left": {
+      "element_tag": "FCz_LEFT",
+      "role_tag": "WM_PEER",
+      "display_name": "w1:LEFT",
+      "essence_desc": "the single bright white circle",
+      "action_desc": "slides smoothly straight leftward on the black 2D plane"
+    },
+    "w1_right": {
+      "element_tag": "FCz_RIGHT",
+      "role_tag": "WM_PEER",
+      "display_name": "w1:RIGHT",
+      "essence_desc": "the single bright white circle",
+      "action_desc": "slides smoothly straight rightward toward the wide open gap on the right"
+    },
+    "w1_merged": {
+      "element_tag": "FCz_MERGED",
+      "role_tag": "WM_PEER",
+      "display_name": "w1:Merged",
+      "essence_desc": "the bright white circle",
+      "action_desc": "merges cleanly into the center of the glowing green exit ring"
+    },
+    "w2_blocking": {
+      "element_tag": "F3_BLOCK",
+      "role_tag": "WM_PEER",
+      "display_name": "w2:Barrier-Front",
+      "essence_desc": "the solid horizontal cyan barrier wall across the left and center with a wide open passage on the right",
+      "action_desc": "remains completely immovable and blocks direct upward movement"
+    },
+    "w2_contact": {
+      "element_tag": "F3_HIT",
+      "role_tag": "WM_PEER",
+      "display_name": "w2:Barrier-Hit",
+      "essence_desc": "the solid horizontal cyan barrier wall",
+      "action_desc": "flashes bright cyan along its lower edge, firmly repelling the white circle from passing through"
+    },
+    "w2_bypassed": {
+      "element_tag": "F3_PASSED",
+      "role_tag": "WM_PEER",
+      "display_name": "w2:Barrier-Behind",
+      "essence_desc": "the solid horizontal cyan barrier wall now below the white circle",
+      "action_desc": "remains completely still in the middle of the screen"
+    },
+    "w3_waiting": {
+      "element_tag": "AFz_WAIT",
+      "role_tag": "WM_PEER",
+      "display_name": "w3:Exit-Beacon",
+      "essence_desc": "the stationary glowing green circular exit portal in the upper left",
+      "action_desc": "shines steadily without moving"
+    },
+    "w3_extracted": {
+      "element_tag": "AFz_DONE",
+      "role_tag": "WM_PEER",
+      "display_name": "w3:Exit-Closure",
+      "essence_desc": "the glowing green circular exit portal in the upper left",
+      "action_desc": "flashes bright emerald-white as the white circle finishes extraction inside it"
+    }
+  },
+  "stages": [
+    {
+      "global_stage": 1,
+      "stage_title": "Constellation_1_Before_Barrier",
+      "entities": [
+        {"slot_id": "w1", "control_binding": "eeg:FCz",       "party_size": 1, "allowed_pool": ["w1_up", "w1_down", "w1_left", "w1_right"], "idle_state_id": "w1_hold"},
+        {"slot_id": "w3", "control_binding": "wm:ripple:AFz", "party_size": 1, "allowed_pool": ["w3_waiting", "w3_extracted"]},
+        {"slot_id": "w2", "control_binding": "wm:ripple:F3",  "party_size": 1, "allowed_pool": ["w2_blocking", "w2_contact", "w2_bypassed"]},
+        {"slot_id": "w0", "control_binding": "wm:ripple:Fpz", "party_size": 1, "allowed_pool": ["w0_plane_steady", "w0_plane_flash"]}
+      ],
+      "quest": {
+        "active_slot_idx": 2,
+        "catalyst_slot_idx": 0,
+        "driver_tag": "BEFORE_BARRIER",
+        "reaction_formula": "w0 ⊗ w1 ⊗ w2[BLOCK] ⊗ w3[WAIT]",
+        "ongoing_hypothesis": "the bright white circle remains in the lower black area below the horizontal cyan barrier wall"
+      },
+      "rules": [
+        {
+          "rule_id": "BYPASS_BARRIER",
+          "hypothesis": "the bright white circle passes through the wide open right gap into the upper black area above the cyan barrier wall",
+          "consensus_confirmations": 2,
+          "min_t_stat": 0.70,
+          "next_stage": 2,
+          "ripple_updates": {"w2": "w2_bypassed"}
+        },
+        {
+          "rule_id": "HIT_BARRIER",
+          "hypothesis": "the bright white circle presses directly against the bottom edge of the solid cyan barrier wall",
+          "consensus_confirmations": 1,
+          "min_t_stat": 0.65,
+          "next_stage": 1,
+          "ripple_updates": {"w2": "w2_contact"}
+        }
+      ]
+    },
+    {
+      "global_stage": 2,
+      "stage_title": "Constellation_2_Beyond_Barrier",
+      "entities": [
+        {"slot_id": "w1", "control_binding": "eeg:FCz",       "party_size": 1, "allowed_pool": ["w1_up", "w1_down", "w1_left", "w1_right"], "idle_state_id": "w1_hold"},
+        {"slot_id": "w3", "control_binding": "wm:ripple:AFz", "party_size": 1, "allowed_pool": ["w3_waiting", "w3_extracted"]},
+        {"slot_id": "w2", "control_binding": "wm:ripple:F3",  "party_size": 1, "allowed_pool": ["w2_bypassed", "w2_blocking"]},
+        {"slot_id": "w0", "control_binding": "wm:ripple:Fpz", "party_size": 1, "allowed_pool": ["w0_plane_steady", "w0_plane_flash"]}
+      ],
+      "quest": {
+        "active_slot_idx": 1,
+        "catalyst_slot_idx": 0,
+        "driver_tag": "APPROACH_EXIT",
+        "reaction_formula": "w0 ⊗ w1 ⊗ w2[PASSED] ⊗ w3[WAIT]",
+        "ongoing_hypothesis": "the bright white circle glides in the upper black corridor toward the glowing green exit portal on the upper left"
+      },
+      "rules": [
+        {
+          "rule_id": "EXTRACTION_LOCK",
+          "hypothesis": "the bright white circle reaches and enters inside the glowing green circular exit portal in the upper left",
+          "consensus_confirmations": 2,
+          "min_t_stat": 0.70,
+          "next_stage": 3,
+          "ripple_updates": {"w1": "w1_merged", "w3": "w3_extracted", "w0": "w0_plane_flash"}
+        },
+        {
+          "rule_id": "BACK_BELOW_WALL",
+          "hypothesis": "the bright white circle moves back down through the right gap into the lower black area below the cyan barrier wall",
+          "consensus_confirmations": 2,
+          "min_t_stat": 0.70,
+          "next_stage": 1,
+          "ripple_updates": {"w2": "w2_blocking"}
+        }
+      ]
+    },
+    {
+      "global_stage": 3,
+      "stage_title": "Constellation_3_Beta_Clearout",
+      "entities": [
+        {"slot_id": "w1", "control_binding": "wm:ripple:FCz", "party_size": 1, "allowed_pool": ["w1_merged"]},
+        {"slot_id": "w3", "control_binding": "wm:ripple:AFz", "party_size": 1, "allowed_pool": ["w3_extracted"]},
+        {"slot_id": "w2", "control_binding": "wm:ripple:F3",  "party_size": 1, "allowed_pool": ["w2_bypassed"]},
+        {"slot_id": "w0", "control_binding": "wm:ripple:Fpz", "party_size": 1, "allowed_pool": ["w0_plane_flash"]}
+      ],
+      "quest": {
+        "active_slot_idx": 1,
+        "catalyst_slot_idx": 0,
+        "driver_tag": "EXTRACTED",
+        "reaction_formula": "CO_RIPPLE_CLOSURE --> BETA_CLEAROUT"
+      },
+      "terminal_hold_steps": 2,
+      "clear_to_stage": 1,
+      "reset_visual_on_clear": true
+    }
+  ]
+}

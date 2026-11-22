@@ -5,8 +5,8 @@ neuro_referee.py — Многоветвевой Rectified-Flow 3D-DiT World-Mode
 - Оценивает условное правдоподобие реального видео-перехода P(z_new | z_prev, H_k)
   для [H_stay, H_branch_1, ..., H_branch_M] на полных [1, 128, 4096] T5-эмбеддингах.
 - Усредняет по n_noise_probes=2 общим шумам eps (Common Random Numbers) и использует
-  корректное эффективное число степеней свободы (без искусственного раздутия sqrt(192)).
-- Чанкинг батча (max_batch=4) защищает от OOM при любом числе конкурирующих веток.
+  корректное эффективное число степеней свободы (n_eff = n_tok / 16.0) без скачков по выбросам.
+================================================================================================
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ class CoordinateFreeHistoryReferee:
         )
         if n_cond_safe > 0:
             cond_mask_5d[:, :, :n_cond_safe] = 1.0
-        cond_packed = _pack_latents_p1(cond_mask_5d).squeeze(-1)  # [1, S]
+        cond_packed = _pack_latents_p1(cond_mask_5d).squeeze(-1)
 
         enc_embeds_all = torch.cat(
             [p[0].to(device=self.device, dtype=self.dtype) for p in hyp_pairs], dim=0
@@ -195,7 +195,6 @@ class CoordinateFreeHistoryReferee:
             [p[1].to(device=self.device, dtype=torch.bool) for p in hyp_pairs], dim=0
         )
 
-        # Маска реального пространственно-временного движения:
         if n_cond_safe > 0:
             ref_anchor = z0_f[:, :, n_cond_safe - 1 : n_cond_safe]
             motion = (z0_f[:, :, n_cond_safe:] - ref_anchor).pow(2).mean(dim=1).sqrt()
@@ -206,7 +205,7 @@ class CoordinateFreeHistoryReferee:
             motion = torch.ones((1, t_lat - n_cond_safe, h_lat, w_lat), device=self.device)
 
         w_raw = 0.25 + 0.75 * (motion / (motion.mean() + 1e-5))
-        w_tok = w_raw / (w_raw.mean() + 1e-6)  # [1, T_gen, H, W]
+        w_tok = w_raw / (w_raw.mean() + 1e-6)
 
         sq_err_accum = torch.zeros(
             (m_hyps, t_lat - n_cond_safe, h_lat, w_lat),
@@ -214,7 +213,6 @@ class CoordinateFreeHistoryReferee:
             dtype=torch.float32,
         )
 
-        # Усредняем по n_noise_probes общим шумам eps (резко снижает дисперсию при 0 лишней VRAM):
         for _ in range(self.n_noise_probes):
             eps_5d = torch.randn(
                 z0_f.shape, generator=gen, device=self.device, dtype=torch.float32
@@ -224,7 +222,6 @@ class CoordinateFreeHistoryReferee:
             z_packed_1 = _pack_latents_p1(z_input_5d).to(self.dtype)
             v_target_gen = (eps_5d - z0_f)[:, :, n_cond_safe:]
 
-            # Безопасный чанкинг по max_batch=4:
             for start_i in range(0, m_hyps, self.max_batch):
                 end_i = min(m_hyps, start_i + self.max_batch)
                 b_cur = end_i - start_i
@@ -253,11 +250,6 @@ class CoordinateFreeHistoryReferee:
     def _paired_t_stat(
         err_a: torch.Tensor, err_b: torch.Tensor, w_tok: torch.Tensor
     ) -> float:
-        """
-        Парная t-статистика с учётом пространственно-временной корреляции токенов
-        (n_eff = n_tok / 16): исключает ложные 95%/2% на неподвижной сцене.
-        > 0 означает, что гипотеза B объясняет видео-переход лучше, чем A.
-        """
         diff = (err_a - err_b) * w_tok[0]
         n_eff = max(1.0, float(diff.numel()) / 16.0)
         se = float(diff.std(unbiased=False).item()) / math.sqrt(n_eff) + 1e-6
@@ -278,7 +270,7 @@ class CoordinateFreeHistoryReferee:
         matchup_tag: str,
         dom_ratio: float,
         gen: torch.Generator,
-        init_entity_coherences: list[float],
+        init_entity_coherences: list[float] | None = None,
         init_quest_progress: float = 0.0,
         completion_gain: float = 3.2,
         entropy_drain: float = 0.2,
@@ -316,7 +308,6 @@ class CoordinateFreeHistoryReferee:
             z0_full = unpacked_latents_5d
             n_cond = 1 if t_lat >= 2 else 0
 
-        # Матрица резонанса сущностей в полном 524,288-D T5-пространстве:
         pas_524k = passive_void_embeds[0][0].float()
         ent_deltas_flat = []
         interaction_mat = torch.zeros((n_ent, n_ent), device=self.device)
@@ -333,8 +324,6 @@ class CoordinateFreeHistoryReferee:
         if 0 <= catalyst_slot_idx < n_ent and 0 <= active_slot_idx < n_ent and catalyst_slot_idx != active_slot_idx:
             cat_resonance = float(interaction_mat[catalyst_slot_idx, active_slot_idx].item()) / 100.0
 
-        # МНОГОВЕТВЕВОЙ 3D-DiT RECTIFIED-FLOW ОРАКУЛ:
-        # Оцениваем [H_stay(passive/ongoing), H_branch_0, H_branch_1, ..., H_branch_{M-1}] (плюс optional failed)
         has_multi_branches = (
             candidate_branch_specs is not None
             and candidate_branch_hyp_pairs is not None
@@ -353,7 +342,6 @@ class CoordinateFreeHistoryReferee:
 
         if self.transformer is not None:
             if has_multi_branches:
-                # 0: H_stay (нейтральная / текущая ongoing), 1..M: гипотезы всех исходящих веток
                 hyp_list = [passive_void_embeds] + list(candidate_branch_hyp_pairs)
                 mse_hyps, sq_err_tok, w_tok = self._score_hypotheses_rectified_flow_3d_dit(
                     z0_full_5d=z0_full,
@@ -366,10 +354,10 @@ class CoordinateFreeHistoryReferee:
                 rf_mse_ong = float(mse_hyps[0].item())
 
                 n_br = len(candidate_branch_specs)
-                branch_t_vals = []
-                for b_i in range(n_br):
-                    t_b = self._paired_t_stat(err_stay, sq_err_tok[1 + b_i], w_tok)
-                    branch_t_vals.append(t_b)
+                branch_t_vals = [
+                    self._paired_t_stat(err_stay, sq_err_tok[1 + b_i], w_tok)
+                    for b_i in range(n_br)
+                ]
 
                 t_tensor = torch.tensor(branch_t_vals, device=self.device, dtype=torch.float32)
                 branch_probs = torch.softmax(t_tensor.clamp(-5.0, 5.0) / 1.0, dim=0)
@@ -383,7 +371,6 @@ class CoordinateFreeHistoryReferee:
                 winning_branch_t_stat = float(branch_t_vals[best_b_idx])
                 chosen_next_stage_idx = winning_branch_stage_idx
 
-                # Сравниваем активную ветку (или победившую ветку) с H_stay И со средней альтернативой:
                 cur_b_pos = next(
                     (i for i, s in enumerate(candidate_branch_specs) if int(s.get("stage_idx", i)) == current_stage_idx),
                     0,
@@ -422,7 +409,7 @@ class CoordinateFreeHistoryReferee:
         probs_hyp = torch.softmax(torch.tensor([0.0, clamped_t / 1.2], device=self.device), dim=0)
         p_ong_pct = float(probs_hyp[0].item()) * 100.0
         p_cmp_pct = float(probs_hyp[1].item()) * 100.0
-        oracle_advantage = (p_cmp_pct - p_ong_pct) / 100.0  # [-1.0, +1.0]
+        oracle_advantage = (p_cmp_pct - p_ong_pct) / 100.0
 
         x_curr = float(np.clip(init_quest_progress / 100.0, 0.0, 1.0))
         gain_scale = 0.14 * float(completion_gain)

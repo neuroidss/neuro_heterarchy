@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 video_world_server.py — Бессмертный сервер весов LTX-Video (порт 6006, 0.9.8-Distilled + Base 0.9.0)
-С автоматическим взаимоисключением T5 <-> VAE в VRAM (0 OOM при смене концептов на лету).
+С автоматическим взаимоисключением T5 <-> VAE в VRAM и предкэшированием конуса Кента T5-XXL.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ class VideoWorldWeightsServer:
     def __init__(
         self,
         quant_mode: str = "nf4",
-        vae_tile_min_px: int = 256,
+        vae_tile_min_px: int = 512,
         allow_t5_offload: bool = True,
         model_variant: str = "distilled",
     ):
@@ -45,6 +45,8 @@ class VideoWorldWeightsServer:
         self.device = self.backend.device
         self.dtype = self.backend.dtype
         self.prompt_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+        # Предвычисляем конус Кента T5-XXL сразу при старте, пока T5 уже на GPU:
+        self.backend.get_t5_output_manifold(max_rank=128)
         dt = time.perf_counter() - t0
         print(
             f"✅ [VIDEO-WORLD-SERVER] Готов за {dt:.1f}с! "
@@ -86,6 +88,24 @@ class VideoWorldWeightsServer:
             "max_image_seq_len": int(sched_cfg.get("max_image_seq_len", 4096)),
             "base_shift": float(sched_cfg.get("base_shift", 0.5)),
             "max_shift": float(sched_cfg.get("max_shift", 1.15)),
+        }
+
+    @torch.no_grad()
+    def handle_get_t5_manifold(self, msg: dict) -> dict:
+        max_rank = int(msg.get("max_rank", 128))
+        try:
+            m = self.backend.get_t5_output_manifold(max_rank=max_rank)
+        except torch.cuda.OutOfMemoryError:
+            self.backend._move_vae_to_cpu()
+            gc.collect()
+            torch.cuda.empty_cache()
+            m = self.backend.get_t5_output_manifold(max_rank=max_rank)
+        return {
+            "status": "ok",
+            "mu": m["mu"].detach().float().cpu().numpy(),
+            "V": m["V"].detach().float().cpu().numpy(),
+            "sigma": m["sigma"].detach().float().cpu().numpy(),
+            "mean_norm": m["mean_norm"].detach().float().cpu().numpy(),
         }
 
     @torch.no_grad()
@@ -191,8 +211,7 @@ class VideoWorldWeightsServer:
         latents_5d = self._to_device_tensor(msg["latents_5d"], dtype=torch.float32)
         seed = int(msg.get("seed", 42))
         decode_t = float(msg.get("decode_t", 0.05))
-        default_dns = 0.025 if self.backend.is_distilled else 0.0
-        decode_noise_scale = float(msg.get("decode_noise_scale", default_dns))
+        decode_noise_scale = float(msg.get("decode_noise_scale", 0.0))
         last_frame_fix = bool(msg.get("last_frame_fix", True))
         gen = torch.Generator(device=self.device).manual_seed(seed)
         try:
@@ -252,7 +271,7 @@ def main():
     parser.add_argument(
         "--vae-tile-min",
         type=int,
-        default=256,
+        default=512,
         help="Порог включения тайлинга 3D-VAE в пикселях",
     )
     parser.add_argument(
@@ -300,6 +319,8 @@ def main():
                 try:
                     if cmd == "ping":
                         conn.send(server.handle_ping())
+                    elif cmd == "get_t5_manifold":
+                        conn.send(server.handle_get_t5_manifold(msg))
                     elif cmd == "encode_semantics":
                         conn.send(server.handle_encode_semantics(msg))
                     elif cmd == "evict_t5_to_cpu":

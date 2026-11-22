@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 neuro_ltx_backend.py — Аппаратный бэкенд LTX-Video (0.9.8-2B-Distilled NF4/INT8/FP8/BF16 + Base 0.9.0)
-С автоматическим взаимоисключением T5 <-> VAE в VRAM и потокобезопасным IPC-локом.
+С автоматическим взаимоисключением T5 <-> VAE в VRAM, безопасным тайлингом VAE и
+извлечением эмпирического конуса Кента T5-XXL без хардкода слов.
 """
 
 from __future__ import annotations
 import os
 import sys
 import gc
+import math
 import threading
 from pathlib import Path
 import numpy as np
@@ -184,7 +186,7 @@ class LTXModelBackend:
         self,
         device: torch.device | None = None,
         quant_mode: str = "fp8",
-        vae_tile_min_px: int = 384,
+        vae_tile_min_px: int = 512,
         allow_t5_offload: bool = False,
         model_variant: str = "distilled",
     ):
@@ -351,7 +353,6 @@ class LTXModelBackend:
         self.pipe.transformer.eval()
         self.pipe.vae.eval()
 
-        # Если разрешён T5 offload: пока T5 на GPU, держим VAE на CPU (~1.7 ГБ экономии VRAM!).
         if self.allow_t5_offload:
             self.pipe.vae.to("cpu")
             self.vae_on_gpu = False
@@ -359,11 +360,10 @@ class LTXModelBackend:
             self.pipe.vae.to(self.device)
             self.vae_on_gpu = True
 
-        eff_tile_px = int(vae_tile_min_px)
-        if self.is_distilled and vram_gb <= 16.5:
-            eff_tile_px = min(eff_tile_px, 256)
-        tile_min = max(192, eff_tile_px)
-        tile_stride = max(128, tile_min - 64)
+        # Не режем 384x256 / 512x384 на 256px тайлы, чтобы исключить швы в авторегрессии:
+        eff_tile_px = max(512, int(vae_tile_min_px)) if vram_gb > 10.0 else max(256, int(vae_tile_min_px))
+        tile_min = max(256, eff_tile_px)
+        tile_stride = max(192, tile_min - 64)
         if hasattr(self.pipe.vae, "enable_tiling"):
             self.pipe.vae.enable_tiling(
                 tile_sample_min_height=tile_min,
@@ -375,6 +375,8 @@ class LTXModelBackend:
             self.pipe.vae.enable_slicing()
 
         self._local_prompt_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._t5_manifold_cache: dict[int, dict[str, torch.Tensor]] = {}
+
         gc.collect()
         torch.cuda.empty_cache()
         if torch.cuda.is_available():
@@ -412,7 +414,6 @@ class LTXModelBackend:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-        # После выгрузки T5 сразу возвращаем VAE в VRAM (готовы к генерации видео):
         self._move_vae_to_gpu()
         used_gb = torch.cuda.memory_allocated(0) / (1024**3) if torch.cuda.is_available() else 0.0
         print(f"🧹 [T5 -> VAE SWAP] T5 выгружен, VAE на CUDA -> занято {used_gb:.2f} GB.", flush=True)
@@ -420,7 +421,6 @@ class LTXModelBackend:
 
     @torch.no_grad()
     def prepare_for_video_generation(self):
-        """Гарантирует, что перед шагом DiT/VAE T5 выгружен (если allow_t5_offload) и VAE на CUDA."""
         if self.allow_t5_offload and self.text_encoder is not None:
             self.offload_t5_to_cpu(force=False)
         elif not self.vae_on_gpu:
@@ -431,7 +431,6 @@ class LTXModelBackend:
         if self.text_encoder is None:
             from transformers import T5EncoderModel
 
-            # Освобождаем ~1.7 ГБ под T5, временно перенося VAE на CPU (~0.1с):
             if self.allow_t5_offload:
                 self._move_vae_to_cpu()
                 used_before = torch.cuda.memory_allocated(0) / (1024**3) if torch.cuda.is_available() else 0.0
@@ -471,6 +470,59 @@ class LTXModelBackend:
     @property
     def temporal_ratio(self) -> int:
         return int(self.pipe.vae_temporal_compression_ratio)
+
+    @torch.no_grad()
+    def get_t5_output_manifold(self, max_rank: int = 128) -> dict[str, torch.Tensor]:
+        """
+        Извлекает истинный анизотропный конус Кента (mu, V, sigma, mean_norm) из выходов
+        T5-XXL по реальным SentencePiece ID словаря модели (0 слов в коде и конфигах).
+        """
+        r_req = int(max_rank)
+        if r_req in self._t5_manifold_cache:
+            return self._t5_manifold_cache[r_req]
+
+        cache_file = QUANT_T5_DIR / f"t5_output_manifold_{r_req}x4096.pt"
+        if cache_file.exists():
+            raw = torch.load(str(cache_file), map_location="cpu")
+            out = {
+                k: (v if isinstance(v, torch.Tensor) else torch.tensor(v)).to(device=self.device, dtype=torch.float32)
+                for k, v in raw.items()
+            }
+            self._t5_manifold_cache[r_req] = out
+            return out
+
+        self._ensure_t5_loaded()
+        vocab_sz = int(getattr(self.tokenizer, "vocab_size", 32100))
+        hi_id = min(vocab_sz - 100, 31900)
+        g = torch.Generator(device="cpu").manual_seed(2026)
+        rand_ids = torch.randint(100, hi_id, (96, 11), generator=g, dtype=torch.long)
+        eos_id = int(self.tokenizer.eos_token_id) if self.tokenizer.eos_token_id is not None else 1
+        eos_col = torch.full((96, 1), eos_id, dtype=torch.long)
+        input_ids = torch.cat([rand_ids, eos_col], dim=1).to(self.device)
+        attn_mask = torch.ones_like(input_ids, dtype=torch.bool, device=self.device)
+
+        hidden = self.text_encoder(input_ids, attention_mask=attn_mask)[0][:, :-1, :].float()
+        X = hidden.reshape(-1, hidden.shape[-1])
+        mean_norm = float(torch.norm(X, p=2, dim=-1).mean().item())
+        mu = X.mean(dim=0)
+        X_c = X - mu.unsqueeze(0)
+        _, S, Vh = torch.linalg.svd(X_c, full_matrices=False)
+        R = min(r_req, int(Vh.shape[0]))
+        sigma_R = S[:R] / math.sqrt(max(1, X_c.shape[0] - 1))
+
+        cpu_payload = {
+            "mu": mu.detach().cpu(),
+            "V": Vh[:R].contiguous().detach().cpu(),
+            "sigma": sigma_R.contiguous().detach().cpu(),
+            "mean_norm": torch.tensor([mean_norm], dtype=torch.float32),
+        }
+        QUANT_T5_DIR.mkdir(parents=True, exist_ok=True)
+        torch.save(cpu_payload, str(cache_file))
+
+        out = {k: v.to(device=self.device, dtype=torch.float32) for k, v in cpu_payload.items()}
+        self._t5_manifold_cache[r_req] = out
+        print(f"🧭 [T5-XXL MANIFOLD] Извлечён истинный выходной конус T5-XXL (R={R}, norm={mean_norm:.2f}).", flush=True)
+        return out
 
     @torch.no_grad()
     def encode_semantics(
@@ -559,7 +611,7 @@ class LTXModelBackend:
         latents_5d: torch.Tensor,
         generator: torch.Generator | None = None,
         decode_t: float = 0.05,
-        decode_noise_scale: float = 0.025,
+        decode_noise_scale: float = 0.0,
         last_frame_fix: bool = True,
     ) -> list[np.ndarray]:
         self.prepare_for_video_generation()
@@ -726,6 +778,7 @@ class RemoteLTXModelBackend:
                 shift_terminal=None,
             )
         self._local_prompt_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._t5_manifold_cache: dict[int, dict[str, torch.Tensor]] = {}
         self._decode_call_idx = 0
 
     def _rpc(self, payload: dict) -> dict:
@@ -747,6 +800,32 @@ class RemoteLTXModelBackend:
             return float(resp.get("vram_gb", 0.0))
         except Exception:
             return 0.0
+
+    @torch.no_grad()
+    def get_t5_output_manifold(self, max_rank: int = 128) -> dict[str, torch.Tensor]:
+        r_req = int(max_rank)
+        if r_req in self._t5_manifold_cache:
+            return self._t5_manifold_cache[r_req]
+
+        cache_file = QUANT_T5_DIR / f"t5_output_manifold_{r_req}x4096.pt"
+        if cache_file.exists():
+            raw = torch.load(str(cache_file), map_location="cpu")
+            out = {
+                k: (v if isinstance(v, torch.Tensor) else torch.tensor(v)).to(device=self.device, dtype=torch.float32)
+                for k, v in raw.items()
+            }
+            self._t5_manifold_cache[r_req] = out
+            return out
+
+        resp = self._rpc({"cmd": "get_t5_manifold", "max_rank": r_req})
+        if resp.get("status") != "ok":
+            raise RuntimeError(f"Remote get_t5_manifold error: {resp.get('error')}")
+        out = {
+            k: torch.from_numpy(resp[k]).to(device=self.device, dtype=torch.float32)
+            for k in ("mu", "V", "sigma", "mean_norm")
+        }
+        self._t5_manifold_cache[r_req] = out
+        return out
 
     @torch.no_grad()
     def encode_semantics(self, text: str, max_len: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
@@ -809,7 +888,7 @@ class RemoteLTXModelBackend:
         latents_5d: torch.Tensor,
         generator: torch.Generator | None = None,
         decode_t: float = 0.05,
-        decode_noise_scale: float = 0.025,
+        decode_noise_scale: float = 0.0,
         last_frame_fix: bool = True,
     ) -> list[np.ndarray]:
         self._decode_call_idx += 1

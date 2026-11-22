@@ -1,0 +1,104 @@
+{
+  "world_name": "Mode_06_Black_Smoker_Autocatalytic_Boundary_Ecosphere",
+  "arena_context_desc": "static close-up underwater camera view of a dark volcanic hydrothermal chimney on the deep ocean floor, high contrast realistic documentary footage",
+  "static_hold_desc": "dormant dark volcanic rock chimney in cold still deep blue ocean water without plumes",
+  "negative_desc": "blurry, distorted, neon blob, cartoon, flat circles, text, watermark, human, diver, surface sky, camera shake",
+  "archetypes": {
+    "e0_plume": {
+      "element_tag": "VENT_PLUME",
+      "role_tag": "WM_AGENT",
+      "display_name": "e0:Hot-Plume",
+      "essence_desc": "a roaring jet of superheated black-and-amber mineral smoke erupting from the volcanic chimney",
+      "action_desc": "pumps billowy hot mineral-rich clouds and glowing orange heat shimmer into the freezing dark water"
+    },
+    "e0_flare": {
+      "element_tag": "VENT_FLARE",
+      "role_tag": "WM_AGENT",
+      "display_name": "e0:Magma-Pulse",
+      "essence_desc": "blazing orange lava cracks along the volcanic chimney rim",
+      "action_desc": "surge with intense golden thermal waves and rising sparkling gas bubbles"
+    },
+    "e0_cold": {
+      "element_tag": "VENT_COLD",
+      "role_tag": "WM_AGENT",
+      "display_name": "e0:Cold-Dormant",
+      "essence_desc": "a cold unlit dark basalt chimney with zero smoke",
+      "action_desc": "stands completely still in freezing pitch-black abyssal water"
+    },
+    "e1_bare": {
+      "element_tag": "MAT_BARE",
+      "role_tag": "WM_AGENT",
+      "display_name": "e1:Bare-Basalt",
+      "essence_desc": "clean dark wet basalt rock around the chimney opening",
+      "action_desc": "absorbs the first warm mineral wisps from the vent"
+    },
+    "e1_bloom": {
+      "element_tag": "MAT_BLOOM",
+      "role_tag": "WM_AGENT",
+      "display_name": "e1:White-Mat-Bloom",
+      "essence_desc": "lush glowing ivory-white and golden chemosynthetic bacterial mats and coral fans",
+      "action_desc": "bloom densely along the boundary of the hot dark plume"
+    },
+    "e1_crust": {
+      "element_tag": "MAT_CRUST",
+      "role_tag": "WM_AGENT",
+      "display_name": "e1:Choking-Crust",
+      "essence_desc": "an overgrown thick calcified white mineral dome",
+      "action_desc": "seals and chokes the chimney mouth, trapping the dark smoke beneath"
+    },
+    "e2_sparse": {
+      "element_tag": "WORMS_SPARSE",
+      "role_tag": "WM_AGENT",
+      "display_name": "e2:Resting-Fauna",
+      "essence_desc": "a few retracted dark-red tube worms at the base of the rock",
+      "action_desc": "wait quietly in the cold water shadow"
+    },
+    "e2_feast": {
+      "element_tag": "WORMS_FEAST",
+      "role_tag": "WM_AGENT",
+      "display_name": "e2:Crimson-Swarm",
+      "essence_desc": "a vibrant forest of bright crimson-plumed giant tube worms and white vent crabs",
+      "action_desc": "swarm over the white mineral crust, grazing and cracking the dome open"
+    },
+    "e2_detritus": {
+      "element_tag": "WORMS_DETRITUS",
+      "role_tag": "WM_AGENT",
+      "display_name": "e2:Organic-Cloud",
+      "essence_desc": "a dense swirling cloud of brown organic flakes and broken shells",
+      "action_desc": "drifts heavily across the crowded tube worm colony, clouding the water"
+    },
+    "e3_still": {
+      "element_tag": "ABYSS_STILL",
+      "role_tag": "WM_AGENT",
+      "display_name": "e3:Calm-Abyss",
+      "essence_desc": "calm deep indigo ocean water surrounding the thermal boundary",
+      "action_desc": "holds a sharp temperature interface around the chimney"
+    },
+    "e3_flush": {
+      "element_tag": "ABYSS_FLUSH",
+      "role_tag": "WM_AGENT",
+      "display_name": "e3:Abyssal-Current",
+      "essence_desc": "a sweeping cold sapphire-blue deep-ocean current",
+      "action_desc": "washes away the murky brown organic cloud and clears the dark basalt rock"
+    },
+    "e3_freeze": {
+      "element_tag": "ABYSS_FREEZE",
+      "role_tag": "WM_AGENT",
+      "display_name": "e3:Crystal-Clear",
+      "essence_desc": "crystal-clear icy blue abyssal water with settling silver mineral dust",
+      "action_desc": "exposes the clean volcanic chimney rim for a new cycle"
+    }
+  },
+  "stages": [
+    {
+      "global_stage": 1,
+      "stage_title": "Autocatalytic_Boundary_Heterarchy",
+      "entities": [
+        {"slot_id": "e0", "control_binding": "eeg:FCz", "party_size": 1, "allowed_pool": ["e0_plume", "e0_flare", "e0_cold"]},
+        {"slot_id": "e1", "control_binding": "npc:AFz", "party_size": 1, "allowed_pool": ["e1_bloom", "e1_crust", "e1_bare"]},
+        {"slot_id": "e2", "control_binding": "npc:F3",  "party_size": 1, "allowed_pool": ["e2_sparse", "e2_feast", "e2_detritus"]},
+        {"slot_id": "e3", "control_binding": "npc:F4",  "party_size": 1, "allowed_pool": ["e3_still", "e3_flush", "e3_freeze"]}
+      ]
+    }
+  ]
+}

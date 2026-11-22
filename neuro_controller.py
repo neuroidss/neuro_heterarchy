@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-neuro_controller.py — 96,000-D Контроллер Рабочей Памяти (Аконцептуальный: ЭЭГ × Геймпад × NPC-Агенты)
-С Тета-Гамма мультиплексированием нескольких концептов в ортогональные токен-слоты [1, 128, 4096].
+neuro_controller.py — 96,000-D Контроллер Рабочей Памяти для 3D-DiT (LTX-Video)
+=================================================================================
+- Никаких случайных 4096-D поворотов, уводящих T5-XXL за пределы конуса смыслов.
+- При пустом промпте: навигация строго внутри эмпирического анизотропного эллипсоида Кента
+  самой T5-XXL (mu, V, sigma, mean_norm).
+- При K >= 2 концептах: RichSpace-навигация внутри активных (не-PAD) токенов пула +
+  тета-гамма мультиплексирование всех активных регионов (e0..e4) в [1, 128, 4096].
+- При stochastic = 1.0: 0° искажения T5-эмбеддингов (идеальное качество коробки).
+=================================================================================
 """
 
 from __future__ import annotations
@@ -12,12 +19,15 @@ import torch.nn.functional as F
 from neuro_world import ArchetypeSpec, StageEntitySlot
 from neuro_vram_bus import HardwareVRAMBus
 
-CORTICAL_REGION_REGISTRY = {
-    "FCZ": (1, "FCz", 0.020, 0.22),
-    "F3":  (2, "F3",  0.180, 0.55),
-    "F4":  (3, "F4",  0.180, 0.55),
-    "AFZ": (0, "AFz", 0.650, 0.68),
-    "FPZ": (4, "Fpz", 2.500, 0.78),
+CORTICAL_REGION_REGISTRY: dict[str, tuple[int, str, float, float]] = {
+    "FCZ": (1, "FCz", 0.080, 0.25),
+    "F3":  (2, "F3",  0.350, 0.55),
+    "F4":  (3, "F4",  0.350, 0.55),
+    "AFZ": (0, "AFz", 0.850, 0.70),
+    "FPZ": (4, "Fpz", 2.500, 0.82),
+    "CZ":  (1, "Cz",  0.045, 0.18),
+    "PZ":  (2, "Pz",  0.022, 0.10),
+    "OZ":  (3, "Oz",  0.010, 0.05),
 }
 
 ALL_GAMEPAD_CHANNELS = (
@@ -48,10 +58,10 @@ def multiplex_t5_concept_slots(
     max_len: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Тета-гамма мультиплексирование M концептов в непересекающиеся слоты [1, 128, 4096].
-    В LTX-Video attn2 кросс-внимание не использует позиционный RoPE для текста (image_rotary_emb=None),
-    поэтому упаковка активных токенов каждого концепта в отдельные слоты сохраняет 100% резкость
-    и позволяет 3D-DiT органично соединять несколько концептов в одной сцене без размытия в муть.
+    Тета-гамма мультиплексирование M концептов/регионов в непересекающиеся слоты [1, 128, 4096].
+    В LTX-Video attn2 не использует позиционный RoPE для текста (image_rotary_emb=None),
+    поэтому упаковка активных токенов каждого региона/агента в отдельные слоты сохраняет 100%
+    резкость без размытия и позволяет всем активным агентам (e0..e4) совместно строить сцену.
     """
     if not embeds_list:
         raise ValueError("multiplex_t5_concept_slots requires at least one embedding")
@@ -74,7 +84,7 @@ def multiplex_t5_concept_slots(
         masks_list = inferred_masks
 
     if len(embeds_list) == 1:
-        return embeds_list[0], masks_list[0]
+        return embeds_list[0], masks_list[0].to(device=dev, dtype=torch.bool)
 
     w_vals = (
         [float(w) for w in weights]
@@ -96,14 +106,13 @@ def multiplex_t5_concept_slots(
             continue
         if eos_token_vec is None:
             eos_token_vec = e_2d[active_idx[-1] : active_idx[-1] + 1].clone()
-        # Отделяем хвостовой </s>, оставляя чистые контентные токены концепта:
         n_content = max(0, n_act - 1)
         if n_content > 0:
             c_idx = active_idx[:n_content]
             content_slices.append((e_2d[c_idx], w_i))
 
     if not content_slices:
-        return embeds_list[0], masks_list[0]
+        return embeds_list[0], masks_list[0].to(device=dev, dtype=torch.bool)
 
     m_cnt = len(content_slices)
     usable_len = max(1, seq_len - 1)
@@ -125,9 +134,9 @@ def multiplex_t5_concept_slots(
         if take <= 0:
             continue
 
-        # Мягкая иерархическая модуляция Value (0.72..1.0), сохраняющая все токены на многообразии T5:
+        # Иерархический gain-гейтинг (0.72..1.05): сохраняет T5 на многообразии
         rel_w = float(max(0.0, min(1.0, w_i / w_max)))
-        gain = 0.72 + 0.28 * rel_w
+        gain = 0.72 + 0.30 * rel_w
         out_emb[cursor : cursor + take] = tok_mat[:take] * gain
         out_msk[cursor : cursor + take] = True
         cursor += take
@@ -137,6 +146,134 @@ def multiplex_t5_concept_slots(
         out_msk[cursor] = True
 
     return out_emb.unsqueeze(0).to(orig_dtype), out_msk.unsqueeze(0)
+
+
+@torch.no_grad()
+def synthesize_empty_t5_from_kent_manifold(
+    empty_pair: tuple[torch.Tensor, torch.Tensor],
+    t5_manifold: dict[str, torch.Tensor] | None,
+    wm_reg_5x32x120: torch.Tensor,
+    wm_radius: float,
+    stochastic: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    При пустом промпте ("") строит токены СТРОГО внутри эмпирического анизотропного
+    эллипсоида Кента (mu, V, sigma, mean_norm), извлечённого из самой T5-XXL.
+    При любом wm_radius вектор остаётся на реальном многообразии выходов T5-XXL.
+    """
+    empty_emb, empty_msk = empty_pair
+    dev = empty_emb.device
+    if (
+        t5_manifold is None
+        or stochastic >= 0.999
+        or wm_radius <= 0.001
+        or float(wm_reg_5x32x120.abs().max().item()) < 1e-4
+    ):
+        return empty_emb, empty_msk
+
+    mu = t5_manifold["mu"].to(dev, dtype=torch.float32)
+    V = t5_manifold["V"].to(dev, dtype=torch.float32)
+    sigma = t5_manifold["sigma"].to(dev, dtype=torch.float32)
+    mean_norm = float(t5_manifold["mean_norm"].item())
+
+    L_free, R = 16, V.shape[0]
+    wm_flat = wm_reg_5x32x120.to(dev, dtype=torch.float32).reshape(-1)
+    wm_w = (wm_flat - wm_flat.mean()) / wm_flat.std(unbiased=False).clamp(min=1e-5)
+
+    coords = F.adaptive_avg_pool1d(wm_w.view(1, 1, -1), L_free * R).view(L_free, R)
+    coords = (coords - coords.mean(dim=0, keepdim=True)) / coords.std(dim=0, keepdim=True, unbiased=False).clamp(min=1e-5)
+
+    scale = float(wm_radius) * (1.0 - float(stochastic)) * 1.15
+    delta = torch.matmul(coords * (sigma.unsqueeze(0) * scale), V)
+    raw_toks = mu.unsqueeze(0) + delta
+    toks_on_cone = F.normalize(raw_toks, p=2, dim=-1) * mean_norm
+
+    out_emb = empty_emb[0].float().clone()
+    out_msk = torch.zeros((out_emb.shape[0],), device=dev, dtype=torch.bool)
+    out_emb[:L_free] = toks_on_cone
+    out_emb[L_free] = empty_emb[0, 0].float()
+    out_msk[: L_free + 1] = True
+    return out_emb.unsqueeze(0).to(empty_emb.dtype), out_msk.unsqueeze(0)
+
+
+@torch.no_grad()
+def steer_pool_t5_within_manifold(
+    anchor_emb_1x128x4096: torch.Tensor,
+    anchor_msk_1x128: torch.Tensor,
+    bank_Kx128x4096: torch.Tensor,
+    masks_Kx128: torch.Tensor,
+    wm_reg_5x32x120: torch.Tensor,
+    t5_manifold: dict[str, torch.Tensor] | None,
+    wm_radius: float,
+    stochastic: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Внутри-многообразная навигация T5-XXL (0 PAD-токенов в SVD, 0 случайных 4096-D осей):
+    Сдвиг идёт строго вдоль реальных семантических осей пула V_pool (с добором
+    только из анизотропного спектра T5-XXL при малом K) в безопасном конусе <= 14°.
+    """
+    dev = anchor_emb_1x128x4096.device
+    anchor_msk = anchor_msk_1x128.to(dev, dtype=torch.bool)
+    if (
+        stochastic >= 0.999
+        or wm_radius <= 0.001
+        or float(wm_reg_5x32x120.abs().max().item()) < 1e-4
+    ):
+        return anchor_emb_1x128x4096, anchor_msk
+
+    act_idx = torch.nonzero(anchor_msk[0], as_tuple=False).squeeze(-1)
+    if act_idx.numel() < 3:
+        return anchor_emb_1x128x4096, anchor_msk
+    content_idx = act_idx[1:-1]
+
+    active_vecs = []
+    K = bank_Kx128x4096.shape[0]
+    for k_i in range(K):
+        m_i = masks_Kx128[k_i].to(dev, dtype=torch.bool)
+        idx_i = torch.nonzero(m_i, as_tuple=False).squeeze(-1)
+        if idx_i.numel() > 2:
+            active_vecs.append(bank_Kx128x4096[k_i, idx_i[1:-1]].float())
+    if not active_vecs:
+        return anchor_emb_1x128x4096, anchor_msk
+
+    sem_mat = torch.cat(active_vecs, dim=0)
+    sem_c = sem_mat - sem_mat.mean(dim=0, keepdim=True)
+    _, S, Vh = torch.linalg.svd(sem_c, full_matrices=False)
+    valid_r = max(1, int((S > S[0] * 1e-3).sum().item())) if S.numel() > 0 else 1
+    V_pool = Vh[: min(valid_r, 48)]
+    sigma_pool = S[: V_pool.shape[0]] / math.sqrt(max(1, sem_c.shape[0] - 1))
+
+    if t5_manifold is not None and V_pool.shape[0] < 32:
+        V_t5 = t5_manifold["V"].to(dev, dtype=torch.float32)[:32]
+        sig_t5 = t5_manifold["sigma"].to(dev, dtype=torch.float32)[:32] * 0.35
+        V_basis = torch.cat([V_pool, V_t5], dim=0)
+        sig_basis = torch.cat([sigma_pool, sig_t5], dim=0)
+    else:
+        V_basis, sig_basis = V_pool, sigma_pool
+
+    wm_flat = wm_reg_5x32x120.to(dev, dtype=torch.float32).reshape(-1)
+    wm_w = (wm_flat - wm_flat.mean()) / wm_flat.std(unbiased=False).clamp(min=1e-5)
+    L_c, R_b = content_idx.numel(), V_basis.shape[0]
+    coords = F.adaptive_avg_pool1d(wm_w.view(1, 1, -1), L_c * R_b).view(L_c, R_b)
+    coords = (coords - coords.mean(dim=0, keepdim=True)) / coords.std(dim=0, keepdim=True, unbiased=False).clamp(min=1e-5)
+
+    wm_sem = torch.matmul(coords * sig_basis.unsqueeze(0), V_basis)
+
+    tok_c = anchor_emb_1x128x4096[0, content_idx].float()
+    ref_norms = torch.norm(tok_c, p=2, dim=-1, keepdim=True).clamp(min=1e-4)
+    dot_p = torch.sum(wm_sem * tok_c, dim=-1, keepdim=True) / (ref_norms ** 2 + 1e-6)
+    tangent = wm_sem - dot_p * tok_c
+    t_norms = torch.norm(tangent, p=2, dim=-1, keepdim=True)
+    tangent_unit = torch.where(
+        t_norms > 1e-5, (tangent / (t_norms + 1e-6)) * ref_norms, torch.zeros_like(tok_c)
+    )
+
+    theta = float(wm_radius) * (1.0 - float(stochastic)) * (math.pi * 0.08)
+    steered_c = F.normalize(math.cos(theta) * tok_c + math.sin(theta) * tangent_unit, p=2, dim=-1) * ref_norms
+
+    out = anchor_emb_1x128x4096[0].float().clone()
+    out[content_idx] = steered_c
+    return out.unsqueeze(0).to(anchor_emb_1x128x4096.dtype), anchor_msk
 
 
 @torch.no_grad()
@@ -250,20 +387,19 @@ class SymmetricBotController:
         self.concept_bindings_by_region: dict[str, list[str]] = {
             k: list(v) for k, v in DEFAULT_REGION_BINDINGS.items()
         }
+        self.t5_manifold: dict[str, torch.Tensor] | None = None
 
         self.vram_bus = HardwareVRAMBus()
         self.attempt_num: int = 1
         self.last_stage_id: int = -1
 
         self.phase_clock_5x32x120: torch.Tensor | None = None
-        self.proj_120_to_64: torch.Tensor | None = None
-        self.proj_600_to_64: torch.Tensor | None = None
-        self.baseline_wm_128x64: torch.Tensor | None = None
+        self.autonomous_wm_field_5x32x120: torch.Tensor | None = None
+        self.latest_full_wm_5x5x32x120: torch.Tensor | None = None
         self.latest_region_wm_19200: torch.Tensor | None = None
         self.latest_region_wm_5x32x120: torch.Tensor | None = None
         self.latest_source_tag: str = "WM"
 
-        # Состояние автономного NPC-агента (чистая репликаторная политика на собственных модах WM):
         self.npc_logits_K: torch.Tensor | None = None
         self.last_chosen_idx: int = -1
 
@@ -290,6 +426,29 @@ class SymmetricBotController:
             self.npc_logits_K.clamp_(-3.5, 3.5)
 
     @torch.no_grad()
+    def inject_dit_velocity_feedback(self, dit_velocity_5d: torch.Tensor | None):
+        if dit_velocity_5d is None or self.latest_region_wm_5x32x120 is None:
+            return
+        if not self.is_npc_binding():
+            return
+        dev = self.latest_region_wm_5x32x120.device
+        _, _, _, inertia = self._get_region_specs()
+        v_flat = dit_velocity_5d.to(device=dev, dtype=torch.float32).reshape(1, 1, -1)
+        v_19200 = F.adaptive_avg_pool1d(v_flat, 19200).view(5, 32, 120)
+        v_norm = (v_19200 - v_19200.mean()) / v_19200.std(unbiased=False).clamp(min=1e-5)
+
+        cur_w = (
+            self.autonomous_wm_field_5x32x120
+            if self.autonomous_wm_field_5x32x120 is not None
+            else self.latest_region_wm_5x32x120
+        )
+        rot_angle = 0.28 * (1.0 - inertia * 0.5)
+        phase_torque = torch.sin(v_norm * (math.pi * 0.65) - cur_w * 0.5)
+        self.autonomous_wm_field_5x32x120 = (
+            math.cos(rot_angle) * cur_w + math.sin(rot_angle) * phase_torque * 2.2
+        ).contiguous()
+
+    @torch.no_grad()
     def sample_working_memory_5x5x32x120(
         self,
         device: torch.device,
@@ -299,7 +458,7 @@ class SymmetricBotController:
         reg_key_up = reg_name.upper()
         eff_t = float(self.attempt_num) + float(sub_step_frac)
 
-        # 1. Автономный NPC-агент
+        # 1. Автономный NPC-агент (репликаторная + нелинейная динамика на собственных модах)
         if self.is_npc_binding():
             K_safe = max(1, int(self.pool_size_hint))
             if (
@@ -322,16 +481,22 @@ class SymmetricBotController:
                 basis_Kx5x32x120 * probs_npc.view(K_safe, 1, 1, 1), dim=0
             ) * 3.0
 
+            if self.autonomous_wm_field_5x32x120 is not None and self.autonomous_wm_field_5x32x120.device == device:
+                npc_wave = npc_wave * 0.70 + self.autonomous_wm_field_5x32x120 * 0.30
+            else:
+                self.autonomous_wm_field_5x32x120 = npc_wave.clone()
+
             out_wm = torch.zeros((5, 5, 32, 120), device=device, dtype=torch.float32)
             out_wm[reg_idx] = npc_wave
             top_k = int(torch.argmax(probs_npc).item())
             src_tag = f"NPC_WM:{reg_name}(#{top_k+1}:{probs_npc[top_k].item()*100:.0f}%)"
+            self.latest_full_wm_5x5x32x120 = out_wm
             self.latest_region_wm_5x32x120 = out_wm[reg_idx].clone()
             self.latest_region_wm_19200 = out_wm[reg_idx].reshape(-1).clone()
             self.latest_source_tag = src_tag
             return out_wm, inertia, src_tag
 
-        # 2. Человеческий / биосигнальный агент (FreeEEG16 + Gamepad Synthesizer)
+        # 2. Биологическая ЭЭГ / Синтезатор от Геймпада
         base_wm_5x5x32x120 = None
         src_tag = f"SYNTH_WM:{reg_name}"
 
@@ -383,7 +548,7 @@ class SymmetricBotController:
         gp_mix = float(max(0.0, min(1.0, self.gamepad_wm_mix)))
         if gp_mix > 0.001 and self.gamepad_channels:
             gp_wave_5x32x120, max_act, act_parts = synthesize_region_gamepad_wm_5x32x120(
-                reg_key=reg_key_up,
+                reg_key=reg_key_up if reg_key_up in DEFAULT_REGION_BINDINGS else "FCZ",
                 reg_idx=reg_idx,
                 K_reg=self.pool_size_hint,
                 gamepad_channels=self.gamepad_channels,
@@ -392,71 +557,18 @@ class SymmetricBotController:
                 device=device,
             )
             if gp_wave_5x32x120 is not None and max_act > 0.05:
-                w_gp = gp_mix * min(1.0, max_act)
-                w_eeg = eeg_gain * max(0.0, 1.0 - 0.96 * gp_mix)
+                theta_gp = gp_mix * min(1.0, max_act) * (0.5 * math.pi)
                 out_wm[reg_idx] = (
-                    base_wm_5x5x32x120[reg_idx] * w_eeg + gp_wave_5x32x120 * (w_gp * 3.0)
+                    math.cos(theta_gp) * out_wm[reg_idx]
+                    + math.sin(theta_gp) * gp_wave_5x32x120 * 3.0
                 )
-                src_tag = f"GP_WM({w_gp*100:.0f}%):{'+'.join(act_parts[:2])}"
+                src_tag = f"GP_WM:{'+'.join(act_parts[:2])}"
 
+        self.latest_full_wm_5x5x32x120 = out_wm
         self.latest_region_wm_5x32x120 = out_wm[reg_idx].clone()
         self.latest_region_wm_19200 = out_wm[reg_idx].reshape(-1).clone()
         self.latest_source_tag = src_tag
         return out_wm, inertia, src_tag
-
-    @torch.no_grad()
-    def extract_whitened_wm_modes_128x64(
-        self,
-        device: torch.device,
-        sub_step_frac: float = 0.0,
-    ) -> tuple[torch.Tensor, float, str]:
-        wm_5x5x32x120, inertia, src_tag = self.sample_working_memory_5x5x32x120(
-            device, sub_step_frac=sub_step_frac
-        )
-        reg_idx, _, _, _ = self._get_region_specs()
-
-        if float(wm_5x5x32x120[reg_idx].abs().max().item()) < 1e-5:
-            return torch.zeros((128, 64), device=device, dtype=torch.float32), inertia, src_tag
-
-        if self.proj_120_to_64 is None or self.proj_120_to_64.device != device:
-            g_proj = torch.Generator(device=device).manual_seed(999 + reg_idx * 137)
-            q_120, _ = torch.linalg.qr(
-                torch.randn((120, 64), generator=g_proj, device=device, dtype=torch.float32)
-            )
-            self.proj_120_to_64 = q_120.contiguous()
-
-        if self.proj_600_to_64 is None or self.proj_600_to_64.device != device:
-            g_proj_all = torch.Generator(device=device).manual_seed(7777 + reg_idx * 251)
-            q_600, _ = torch.linalg.qr(
-                torch.randn((600, 64), generator=g_proj_all, device=device, dtype=torch.float32)
-            )
-            self.proj_600_to_64 = q_600.contiguous()
-
-        reg_160x120 = wm_5x5x32x120[reg_idx].reshape(160, 120)
-        reg_160x64 = torch.matmul(reg_160x120, self.proj_120_to_64)
-
-        all_96k_160x600 = wm_5x5x32x120.permute(1, 2, 0, 3).reshape(160, 600)
-        all_96k_160x64 = torch.matmul(all_96k_160x600, self.proj_600_to_64)
-
-        full_160x64 = reg_160x64 * 0.80 + all_96k_160x64 * 0.20
-
-        wm_128x64 = (
-            F.interpolate(
-                full_160x64.T.unsqueeze(0), size=128, mode="linear", align_corners=False
-            )
-            .squeeze(0)
-            .T.contiguous()
-        )
-
-        if self.baseline_wm_128x64 is None or self.baseline_wm_128x64.shape != wm_128x64.shape:
-            self.baseline_wm_128x64 = wm_128x64.clone()
-        else:
-            self.baseline_wm_128x64.lerp_(wm_128x64, 0.04)
-
-        dyn_128x64 = wm_128x64 - self.baseline_wm_128x64 * 0.50
-        std_val = dyn_128x64.std(dim=-1, keepdim=True).clamp(min=1e-5)
-        whitened_128x64 = (dyn_128x64 - dyn_128x64.mean(dim=-1, keepdim=True)) / std_val
-        return whitened_128x64, inertia, src_tag
 
     @torch.no_grad()
     def select_concept_full_rank_524288d(
@@ -484,17 +596,31 @@ class SymmetricBotController:
             return "", "", candidate_embeds_Kx128x4096[:1], fallback_m[:1], {}, []
 
         reg_idx, _, _, _ = self._get_region_specs()
-        self.extract_whitened_wm_modes_128x64(device, sub_step_frac=0.0)
+        self.sample_working_memory_5x5x32x120(device, sub_step_frac=0.0)
         bank_float = candidate_embeds_Kx128x4096.to(device=device, dtype=torch.float32)
 
-        wm_reg_19200 = (
-            self.latest_region_wm_5x32x120.reshape(1, 19200)
+        reg_wm_5x32x120 = (
+            self.latest_region_wm_5x32x120
             if self.latest_region_wm_5x32x120 is not None
-            else torch.zeros((1, 19200), device=device, dtype=torch.float32)
+            else torch.zeros((5, 32, 120), device=device, dtype=torch.float32)
         )
 
-        # Нулевой сигнал рабочей памяти -> равновесное состояние (обрабатывается движком без рывка к строке #0)
-        if float(wm_reg_19200.abs().max().item()) < 1e-4:
+        # При stochastic == 1.0 (режим "из коробки"): чистый промпт без искажения T5!
+        if self.stochastic >= 0.999:
+            self.last_chosen_idx = 0
+            probs_dict = {pool_ids[i]: round(100.0 / float(K), 1) for i in range(K)}
+            if K == 1:
+                return pool_ids[0], pool_ids[0], bank_float[0:1], fallback_m[0:1], {pool_ids[0]: 100.0}, [0]
+            comp_emb, comp_msk = multiplex_t5_concept_slots(
+                embeds_list=[bank_float[i : i + 1] for i in range(min(K, 4))],
+                masks_list=[fallback_m[i : i + 1] for i in range(min(K, 4))],
+                weights=[1.0] * min(K, 4),
+                max_len=bank_float.shape[1],
+            )
+            return pool_ids[0], pool_ids[0], comp_emb, comp_msk, probs_dict, list(range(min(K, 4)))
+
+        # Нулевой сигнал рабочей памяти -> равновесие
+        if float(reg_wm_5x32x120.abs().max().item()) < 1e-4:
             self.last_chosen_idx = -1
             eq_pct = round(100.0 / float(K), 1)
             probs_dict = {pool_ids[i]: eq_pct for i in range(K)}
@@ -503,15 +629,22 @@ class SymmetricBotController:
         if K == 1:
             self.last_chosen_idx = 0
             only_id = pool_ids[0]
-            steered = self.steer_semantic_probe_full_rank(
-                bank_float[0:1], device=device, attention_mask_1x128=fallback_m[0:1]
+            steered_emb, steered_msk = steer_pool_t5_within_manifold(
+                anchor_emb_1x128x4096=bank_float[0:1],
+                anchor_msk_1x128=fallback_m[0:1],
+                bank_Kx128x4096=bank_float,
+                masks_Kx128=fallback_m,
+                wm_reg_5x32x120=reg_wm_5x32x120,
+                t5_manifold=self.t5_manifold,
+                wm_radius=self.wm_radius,
+                stochastic=self.stochastic,
             )
-            return only_id, only_id, steered, fallback_m[0:1], {only_id: 100.0}, [0]
+            return only_id, only_id, steered_emb, steered_msk, {only_id: 100.0}, [0]
 
         basis_Kx19200 = get_canonical_concept_wm_basis_Kx5x32x120(
             K, reg_idx, device
         ).reshape(K, 19200)
-
+        wm_reg_19200 = reg_wm_5x32x120.reshape(1, 19200)
         wm_resonances_K = torch.mm(wm_reg_19200, basis_Kx19200.T).squeeze(0) / 19200.0
 
         pos_res = torch.relu(wm_resonances_K - 0.10)
@@ -528,10 +661,10 @@ class SymmetricBotController:
             for idx in range(K)
         }
 
-        # Разрешаем до 6 одновременно активных концептов (гамма-субциклы внутри тета-цикла региона):
+        # Тета-гамма мультиплексирование совместно активных концептов (порог >= 15%)
         active_indices = [
-            idx for idx in choice_order if float(probs_K[idx].item()) >= 0.12
-        ][:6]
+            idx for idx in choice_order if float(probs_K[idx].item()) >= 0.15
+        ][:4]
         if not active_indices:
             active_indices = [choice_order[0]]
 
@@ -543,7 +676,6 @@ class SymmetricBotController:
             composed_mask = fallback_m[top_idx : top_idx + 1]
             composite_target_id = pool_ids[top_idx]
         else:
-            # ТЕТА-ГАММА МУЛЬТИПЛЕКСИРОВАНИЕ В ОРТОГОНАЛЬНЫЕ СЛОТЫ (0 размытия в муть!):
             embeds_act = [bank_float[i : i + 1] for i in active_indices]
             masks_act = [fallback_m[i : i + 1] for i in active_indices]
             weights_act = [float(probs_K[i].item()) for i in active_indices]
@@ -555,20 +687,27 @@ class SymmetricBotController:
             )
             composite_target_id = "+".join([pool_ids[i] for i in active_indices[:3]])
 
+        steered_emb, steered_msk = steer_pool_t5_within_manifold(
+            anchor_emb_1x128x4096=composed_base,
+            anchor_msk_1x128=composed_mask,
+            bank_Kx128x4096=bank_float,
+            masks_Kx128=fallback_m,
+            wm_reg_5x32x120=reg_wm_5x32x120,
+            t5_manifold=self.t5_manifold,
+            wm_radius=self.wm_radius,
+            stochastic=self.stochastic,
+        )
+
         start_id = (
             current_state_id
             if (current_state_id and current_state_id in pool_ids)
             else pool_ids[active_indices[0]]
         )
-
-        steered_target = self.steer_semantic_probe_full_rank(
-            composed_base, device=device, attention_mask_1x128=composed_mask
-        )
         return (
             start_id,
             composite_target_id,
-            steered_target,
-            composed_mask,
+            steered_emb,
+            steered_msk,
             choice_probs_dict,
             active_indices,
         )
@@ -587,62 +726,40 @@ class SymmetricBotController:
         if (
             self.wm_radius <= 0.001
             or self.stochastic >= 0.999
-            or (self.eeg_wm_gain <= 0.001 and not self.is_npc_binding())
+            or (self.eeg_wm_gain <= 0.001 and not self.is_npc_binding() and not self.gamepad_channels)
         ):
             return base_probe_1x128x4096
 
-        wm_128x64, inertia, _ = self.extract_whitened_wm_modes_128x64(
-            device, sub_step_frac=sub_step_frac
-        )
-        if float(wm_128x64.abs().max().item()) < 1e-5:
+        self.sample_working_memory_5x5x32x120(device, sub_step_frac=sub_step_frac)
+        if self.latest_region_wm_5x32x120 is None or float(self.latest_region_wm_5x32x120.abs().max().item()) < 1e-4:
             return base_probe_1x128x4096
 
-        base_tokens = base_probe_1x128x4096[0].float()
-        ref_norms = torch.norm(base_tokens, p=2, dim=-1, keepdim=True).clamp(min=1e-4)
-
-        if attention_mask_1x128 is not None:
-            active_mask = attention_mask_1x128[0].to(device=device, dtype=torch.float32).unsqueeze(-1)
-        else:
-            pad_ref = base_tokens[-1:]
-            tok_diff = torch.norm(base_tokens - pad_ref, p=2, dim=-1)
-            active_mask = (tok_diff > 1e-3).unsqueeze(-1).float()
-        active_mask[0] = 0.0
-
-        if float(active_mask.sum().item()) < 1.0:
-            return base_probe_1x128x4096
-
-        tok_centered = base_tokens - base_tokens.mean(dim=0, keepdim=True)
-        q_mat, _ = torch.linalg.qr(tok_centered[:64].T, mode="reduced")
-        q_basis = q_mat.T
-        M = q_basis.shape[0]
-
-        wm_sem_128x4096 = torch.matmul(wm_128x64[:, :M], q_basis)
-
-        dot_proj = torch.sum(wm_sem_128x4096 * base_tokens, dim=-1, keepdim=True) / (
-            ref_norms**2 + 1e-6
+        msk = (
+            attention_mask_1x128.to(device=device, dtype=torch.bool)
+            if attention_mask_1x128 is not None
+            else torch.ones((1, base_probe_1x128x4096.shape[1]), device=device, dtype=torch.bool)
         )
-        tangent_raw = (wm_sem_128x4096 - dot_proj * base_tokens) * active_mask
-        t_norms = torch.norm(tangent_raw, p=2, dim=-1, keepdim=True)
-        tangent_unit = torch.where(
-            t_norms > 1e-5,
-            (tangent_raw / (t_norms + 1e-6)) * ref_norms,
-            torch.zeros_like(base_tokens),
+        bank = (
+            all_candidates_Kx128x4096.to(device=device, dtype=torch.float32)
+            if all_candidates_Kx128x4096 is not None
+            else base_probe_1x128x4096.to(device=device, dtype=torch.float32)
         )
-
-        theta_rad = (
-            (1.0 - inertia * 0.4)
-            * (math.pi * 0.08)
-            * float(self.wm_radius)
-            * (1.0 - float(self.stochastic))
-            * float(self.eeg_wm_gain if not self.is_npc_binding() else 0.35)
+        b_masks = (
+            msk.expand(bank.shape[0], -1)
+            if bank.shape[0] > 1
+            else msk
         )
-        steered_tokens = (
-            torch.cos(theta_rad * active_mask) * base_tokens
-            + torch.sin(theta_rad * active_mask) * tangent_unit
+        steered, _ = steer_pool_t5_within_manifold(
+            anchor_emb_1x128x4096=base_probe_1x128x4096,
+            anchor_msk_1x128=msk,
+            bank_Kx128x4096=bank,
+            masks_Kx128=b_masks,
+            wm_reg_5x32x120=self.latest_region_wm_5x32x120,
+            t5_manifold=self.t5_manifold,
+            wm_radius=self.wm_radius * 0.5,
+            stochastic=self.stochastic,
         )
-        steered_normalized = F.normalize(steered_tokens, p=2, dim=-1) * ref_norms
-
-        return steered_normalized.unsqueeze(0).to(base_probe_1x128x4096.dtype)
+        return steered
 
     def select_party(
         self,
@@ -657,6 +774,4 @@ class SymmetricBotController:
             if my_cfg.allowed_pool
             else list(self.archetypes.keys())
         )
-        if not pool:
-            return []
-        return list(pool)
+        return list(pool) if pool else []
