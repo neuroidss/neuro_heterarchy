@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-neuro_heterarchy_video.py — Единый 3D-DiT Видео-Раннер (Каталитический & Чистый WM)
+neuro_heterarchy_video.py — Единый 3D-DiT Видео-Раннер (Менеджер Агентов & Чистый WM)
 ===================================================================================
-- Поддерживает КАК JSON-манифесты с катализаторами/NPC (configs/*.json),
-  ТАК И обычные .txt лоры (lore/*.txt) — автоматически отключая Оракул при отсутствии гипотез.
+- Поддерживает КАК JSON-манифесты с произвольным числом агентов (configs/*.json),
+  ТАК И .txt лоры (lore/*.txt) с общим пулом на все 5 регионов (при monty_mode=='off'
+  работают только реально активные регионы юзера!).
 - Подключается к video_world_server.py на порту 6006 (authkey=b"video_world").
-- Работает с web_cloud_gateway.py (:6002 видео + :6007 управление, геймпад, set_init_image).
-- Тихий LSL (без INFO/WARN спама) + атомарная очередь команд из браузера (0 гонок IPC).
+- Работает с web_cloud_gateway.py (:6002 видео + :6007 Менеджер Агентов, геймпад, init_image).
 ===================================================================================
 """
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import tempfile
 
-# Подавляем отладочный INFO/WARN спам liblsl ДО любых импортов pylsl:
 if "LSLAPICFG" not in os.environ:
     _lsl_cfg = os.path.join(tempfile.gettempdir(), "lsl_api.cfg")
     try:
@@ -88,7 +87,7 @@ ROLE_TO_ENTITY_SLOT = {
     "AFz": "e1",
     "F3":  "e2",
     "F4":  "e3",
-    "Fpz": "e0",
+    "Fpz": "e4",
 }
 
 
@@ -116,11 +115,17 @@ def resolve_lore_or_manifest_path(
 
 
 def load_txt_lore_as_manifest(txt_path: str) -> GameWorldManifest:
-    """Превращает обычный .txt лор (lore/*.txt) в 1-стадийный манифест без Оракула (чистый WM-поток)."""
+    """
+    Превращает .txt лор в 1-стадийный манифест со всеми 5 слотами (FCz..Fpz).
+    Если в .txt нет заголовков [РЕГИОН] (например world_lore.txt), общий пул доступен
+    всем 5 регионам (как в Diffusion/MusicGen), а флаг is_shared_flat=True позволяет
+    Менеджеру Агентов редактировать/удалять концепты сразу во всём общем пуле.
+    """
     secs: dict[str, list[str]] = {
         "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
     }
     unassigned: list[str] = []
+    has_explicit_headers = False
     if txt_path and Path(txt_path).is_file():
         cur = None
         with open(txt_path, "r", encoding="utf-8") as f:
@@ -130,6 +135,7 @@ def load_txt_lore_as_manifest(txt_path: str) -> GameWorldManifest:
                     continue
                 if s.startswith("[") and s.endswith("]"):
                     cur = s[1:-1].strip().upper()
+                    has_explicit_headers = True
                     if cur not in secs:
                         secs[cur] = []
                 else:
@@ -138,11 +144,12 @@ def load_txt_lore_as_manifest(txt_path: str) -> GameWorldManifest:
                     else:
                         secs[cur].append(s)
 
-    if unassigned and not secs["FCZ"]:
-        secs["FCZ"] = list(unassigned)
+    is_shared_flat = bool(unassigned) and (not has_explicit_headers)
+    if unassigned:
+        for r_k in ("FCZ", "AFZ", "F3", "F4", "FPZ"):
+            if not secs[r_k]:
+                secs[r_k] = list(unassigned)
 
-    fpz_ctx = secs["FPZ"][0].rstrip(".") if secs["FPZ"] else ""
-    fcz_first = secs["FCZ"][0] if secs["FCZ"] else fpz_ctx
     neg_str = ", ".join(secs["NEGATIVE"]) if secs["NEGATIVE"] else ""
 
     archetypes: dict[str, ArchetypeSpec] = {}
@@ -152,6 +159,7 @@ def load_txt_lore_as_manifest(txt_path: str) -> GameWorldManifest:
         (1, "AFZ", "eeg:AFz"),
         (2, "F3",  "eeg:F3"),
         (3, "F4",  "eeg:F4"),
+        (4, "FPZ", "eeg:Fpz"),
     ]
     for idx_s, r_key, binding in reg_bindings:
         lines = secs.get(r_key, [])
@@ -191,19 +199,23 @@ def load_txt_lore_as_manifest(txt_path: str) -> GameWorldManifest:
         ),
     )
 
-    return GameWorldManifest(
+    m = GameWorldManifest(
         world_name=Path(txt_path).stem if txt_path else "Pure_WM_World",
-        arena_context_desc=fpz_ctx if fpz_ctx != fcz_first else "",
+        arena_context_desc="",
         static_hold_desc="",
         negative_desc=neg_str,
         archetypes=archetypes,
         stages=[stage0],
     )
+    m.is_shared_flat = is_shared_flat
+    return m
 
 
 def load_manifest_or_txt_lore(path_str: str) -> GameWorldManifest:
     if path_str.endswith(".json"):
-        return load_game_manifest(path_str)
+        m = load_game_manifest(path_str)
+        m.is_shared_flat = False
+        return m
     return load_txt_lore_as_manifest(path_str)
 
 
@@ -213,8 +225,6 @@ def manifest_to_web_sections(manifest: GameWorldManifest) -> dict[str, list[str]
     }
     if manifest.negative_desc:
         secs["NEGATIVE"] = [manifest.negative_desc]
-    if manifest.arena_context_desc:
-        secs["FPZ"].append(manifest.arena_context_desc)
 
     if manifest.stages:
         st0 = manifest.stages[0]
@@ -231,6 +241,9 @@ def manifest_to_web_sections(manifest: GameWorldManifest) -> dict[str, list[str]
                     full_s = f"{arch.essence_desc} {arch.action_desc}".strip()
                     if full_s and full_s not in secs[reg_key]:
                         secs[reg_key].append(full_s)
+
+    if manifest.arena_context_desc and not secs["FPZ"]:
+        secs["FPZ"].append(manifest.arena_context_desc)
     return secs
 
 
@@ -241,17 +254,37 @@ def apply_web_sections_to_manifest(
         neg_list = [s.strip() for s in sections.get("NEGATIVE", []) if s.strip()]
         manifest.negative_desc = ", ".join(neg_list) if neg_list else ""
 
-    if "FPZ" in sections:
-        fpz_list = [s.strip() for s in sections.get("FPZ", []) if s.strip()]
-        fcz_list = [s.strip() for s in sections.get("FCZ", []) if s.strip()]
-        if not fpz_list or (fpz_list == fcz_list):
-            manifest.arena_context_desc = ""
-        else:
-            manifest.arena_context_desc = fpz_list[0].rstrip(".")
+    manifest.arena_context_desc = ""
 
-    for idx_s, reg_key in [(0, "FCZ"), (1, "AFZ"), (2, "F3"), (3, "F4")]:
+    reg_specs = [
+        (0, "FCZ", "eeg:FCz"),
+        (1, "AFZ", "eeg:AFz"),
+        (2, "F3",  "eeg:F3"),
+        (3, "F4",  "eeg:F4"),
+        (4, "FPZ", "eeg:Fpz"),
+    ]
+
+    for st in manifest.stages:
+        while len(st.entities) < 5:
+            next_i = len(st.entities)
+            _, _, def_bind = reg_specs[next_i]
+            st.entities.append(
+                StageEntitySlot(
+                    slot_id=f"e{next_i}",
+                    control_binding=def_bind,
+                    party_size=1,
+                    allowed_pool=[],
+                )
+            )
+
+    total_remaining = 0
+    for idx_s, reg_key, _ in reg_specs:
         if reg_key not in sections:
             continue
+        prefix_key = f"e{idx_s}_s"
+        for old_k in [k for k in list(manifest.archetypes.keys()) if k.startswith(prefix_key)]:
+            manifest.archetypes.pop(old_k, None)
+
         lines = [s.strip() for s in sections.get(reg_key, []) if s.strip()]
         new_pool_ids = []
         for l_idx, line_txt in enumerate(lines):
@@ -265,9 +298,181 @@ def apply_web_sections_to_manifest(
                 essence_desc=line_txt,
                 action_desc="",
             )
+        total_remaining += len(new_pool_ids)
         for st in manifest.stages:
-            if idx_s < len(st.entities):
-                st.entities[idx_s].allowed_pool = list(new_pool_ids)
+            st.entities[idx_s].allowed_pool = list(new_pool_ids)
+
+    if total_remaining == 0:
+        manifest.static_hold_desc = ""
+
+
+def build_agents_snapshot(
+    runner: UniversalLatentAutobattlerEngine,
+    manifest_obj: GameWorldManifest | None = None,
+) -> list[dict]:
+    m = manifest_obj or runner.manifest
+    if not m.stages:
+        return []
+    st0 = m.stages[0]
+    live_by_id = {a["slot_id"]: a for a in getattr(runner, "latest_agents_state", [])}
+    out = []
+    for idx, slot in enumerate(st0.entities):
+        sid = slot.slot_id or f"e{idx}"
+        eff_bind = runner._get_effective_binding(slot, idx)
+        concepts = []
+        for aid in slot.allowed_pool:
+            arch = m.archetypes.get(aid)
+            if arch:
+                txt = f"{arch.essence_desc} {arch.action_desc}".strip()
+                if txt:
+                    concepts.append(txt)
+        prev = live_by_id.get(sid, {})
+        out.append(
+            {
+                "slot_id": sid,
+                "binding": eff_bind,
+                "region": prev.get("region", eff_bind.split(":")[-1] if ":" in eff_bind else "FCz"),
+                "active": bool(prev.get("active", False)),
+                "source_tag": str(prev.get("source_tag", eff_bind)),
+                "concepts": concepts,
+                "probs": list(prev.get("probs", [])),
+                "active_indices": list(prev.get("active_indices", [])),
+            }
+        )
+    return out
+
+
+def apply_agent_manage(runner: UniversalLatentAutobattlerEngine, payload: dict):
+    action = str(payload.get("action", "")).strip().lower()
+    slot_id = str(payload.get("slot_id", "")).strip()
+    binding = str(payload.get("binding", "eeg:FCz")).strip()
+    m = runner.manifest
+    if not m.stages:
+        return
+
+    if action == "set_binding" and slot_id:
+        for st in m.stages:
+            for sl in st.entities:
+                if sl.slot_id == slot_id:
+                    sl.control_binding = binding
+        runner.source_mode_overrides.pop(slot_id, None)
+        if slot_id in runner.entity_controllers:
+            runner.entity_controllers[slot_id].source_mode = binding
+        print(f"🤖 [AGENT MANAGER] {slot_id} -> binding={binding}", flush=True)
+
+    elif action == "add_agent":
+        existing_ids = {sl.slot_id for sl in m.stages[0].entities}
+        idx = len(m.stages[0].entities)
+        while f"e{idx}" in existing_ids:
+            idx += 1
+        new_id = f"e{idx}"
+        init_pool = []
+        if runner.is_shared_flat_lore and m.stages[0].entities:
+            for l_i, aid0 in enumerate(m.stages[0].entities[0].allowed_pool):
+                a0 = m.archetypes.get(aid0)
+                if a0:
+                    new_aid = f"{new_id}_s{l_i}"
+                    init_pool.append(new_aid)
+                    m.archetypes[new_aid] = ArchetypeSpec(
+                        archetype_id=new_aid,
+                        element_tag=f"{new_id}_{l_i}",
+                        role_tag="WM_AGENT",
+                        display_name=f"{new_id}:{a0.essence_desc[:18]}",
+                        essence_desc=a0.essence_desc,
+                        action_desc=a0.action_desc,
+                    )
+        for st in m.stages:
+            st.entities.append(
+                StageEntitySlot(
+                    slot_id=new_id,
+                    control_binding=binding or "npc:AFz",
+                    party_size=1,
+                    allowed_pool=list(init_pool),
+                )
+            )
+        print(f"➕ [AGENT MANAGER] Добавлен агент {new_id} ({binding or 'npc:AFz'})", flush=True)
+
+    elif action == "remove_agent" and slot_id:
+        if len(m.stages[0].entities) <= 1:
+            return
+        for st in m.stages:
+            st.entities = [sl for sl in st.entities if sl.slot_id != slot_id]
+        runner.entity_controllers.pop(slot_id, None)
+        runner.source_mode_overrides.pop(slot_id, None)
+        for k in [k for k in list(m.archetypes.keys()) if k.startswith(f"{slot_id}_")]:
+            m.archetypes.pop(k, None)
+        print(f"🗑️ [AGENT MANAGER] Удалён агент {slot_id}", flush=True)
+
+
+def apply_agent_concepts(runner: UniversalLatentAutobattlerEngine, payload: dict):
+    slot_id = str(payload.get("slot_id", "e0")).strip()
+    action = str(payload.get("action", "add")).strip().lower()
+    concept = str(payload.get("concept", "")).strip()
+    apply_all = bool(payload.get("apply_all", False))
+    m = runner.manifest
+    if not m.stages:
+        return
+
+    if slot_id.upper() == "NEGATIVE":
+        cur_neg = [x.strip() for x in m.negative_desc.split(",") if x.strip()]
+        if action == "add" and concept and concept not in cur_neg:
+            cur_neg.append(concept)
+        elif action == "remove" and concept in cur_neg:
+            cur_neg.remove(concept)
+        elif action == "clear":
+            cur_neg = []
+        m.negative_desc = ", ".join(cur_neg)
+        return
+
+    m.arena_context_desc = ""
+
+    target_slot_ids = (
+        [sl.slot_id for sl in m.stages[0].entities]
+        if apply_all
+        else [slot_id]
+    )
+
+    for sid in target_slot_ids:
+        cur_texts = []
+        target_slot_obj = next((sl for sl in m.stages[0].entities if sl.slot_id == sid), None)
+        if target_slot_obj is None:
+            continue
+        for aid in target_slot_obj.allowed_pool:
+            arch = m.archetypes.get(aid)
+            if arch:
+                txt = f"{arch.essence_desc} {arch.action_desc}".strip()
+                if txt:
+                    cur_texts.append(txt)
+
+        if action == "add" and concept and concept not in cur_texts:
+            cur_texts.append(concept)
+        elif action == "remove" and concept in cur_texts:
+            cur_texts.remove(concept)
+        elif action == "clear":
+            cur_texts = []
+
+        for old_k in [k for k in list(m.archetypes.keys()) if k.startswith(f"{sid}_s")]:
+            m.archetypes.pop(old_k, None)
+
+        new_pool_ids = []
+        for l_i, txt in enumerate(cur_texts):
+            aid = f"{sid}_s{l_i}"
+            new_pool_ids.append(aid)
+            m.archetypes[aid] = ArchetypeSpec(
+                archetype_id=aid,
+                element_tag=f"{sid}_{l_i}",
+                role_tag="WM_AGENT",
+                display_name=f"{sid}:{txt[:18]}",
+                essence_desc=txt,
+                action_desc="",
+            )
+        for st in m.stages:
+            for sl in st.entities:
+                if sl.slot_id == sid:
+                    sl.allowed_pool = list(new_pool_ids)
+
+    if all(len(sl.allowed_pool) == 0 for sl in m.stages[0].entities):
+        m.static_hold_desc = ""
 
 
 def build_compact_telemetry(telem: dict) -> dict:
@@ -622,7 +827,7 @@ class SmoothRealtimeVideoPacer(threading.Thread):
                         ax0 = float(joystick.get_axis(0))
                         ax1 = float(joystick.get_axis(1))
                         ax2 = float(joystick.get_axis(2)) if joystick.get_numaxes() > 2 else 0.0
-                        ax3 = float(joystick.get_axis(3)) if joystick.get_numaxes() > 3 else 0.0
+                        ax3 = float(joystick.get_axis(3)) if joystick.get_numaxes() > 2 else 0.0
                         joy_ch = dict(local_keys_held)
                         if ax1 < -dz:
                             joy_ch["LS_UP"] = min(1.0, (-ax1 - dz) / (1.0 - dz))
@@ -727,7 +932,7 @@ class SmoothRealtimeVideoPacer(threading.Thread):
 
 
 def start_live_lsl_to_vram_bus_thread(
-    pacer: SmoothRealtimeVideoPacer, users_arg: str = ""
+    pacer: SmoothRealtimeVideoPacer, users_arg: str = "", monty_mode: str = "off"
 ):
     if not HAS_AMODAL_LSL_ENGINE:
         return None, None
@@ -739,7 +944,7 @@ def start_live_lsl_to_vram_bus_thread(
         strength_low=0.06,
         strength_high=0.92,
         cross_region_bleed=0.65,
-        monty_mode="off",
+        monty_mode=monty_mode,
     )
 
     def _lsl_loop():
@@ -752,7 +957,7 @@ def start_live_lsl_to_vram_bus_thread(
 
     threading.Thread(target=_lsl_loop, daemon=True).start()
     print(
-        "🧠 [LIVE BLE/LSL -> VRAM BUS] 60 Гц конвейер рабочей памяти запущен! Любая BLE-плата из браузера сразу управляет 3D-DiT."
+        f"🧠 [LIVE BLE/LSL -> VRAM BUS] 60 Гц конвейер рабочей памяти запущен (monty_mode={monty_mode})!"
     )
     return router, amodal_engine
 
@@ -767,9 +972,38 @@ def start_web_studio_control_bridge(
 ):
     ctrl_lock = threading.Lock()
     ctrl_conn = None
+    active_lore_path = initial_manifest_path
+
+    def _send_sync_locked(lore_label: str, manifest_obj: GameWorldManifest):
+        if ctrl_conn is None:
+            return
+        try:
+            ctrl_conn.send(
+                {
+                    "cmd": "sync_from_video_runner",
+                    "lore_file": lore_label,
+                    "sections": manifest_to_web_sections(manifest_obj),
+                    "agents": build_agents_snapshot(runner, manifest_obj),
+                    "is_shared_flat_lore": bool(getattr(manifest_obj, "is_shared_flat", False)),
+                    "concept_bindings": dict(runner.concept_bindings_by_region),
+                    "eeg_wm_gain": runner.eeg_wm_gain,
+                    "gamepad_wm_mix": runner.gamepad_wm_mix,
+                    "monty_mode": runner.monty_mode,
+                    "stochastic": runner.stochastic,
+                    "unassigned_stochastic": runner.unassigned_stochastic,
+                    "wm_radius": runner.wm_radius,
+                    "hud_mode": pacer.hud_mode,
+                    "context_latents": runner.context_lat_frames,
+                    "step_latents": runner.step_lat_frames,
+                    "steps": runner.steps,
+                    "cfg_scale": runner.cfg_scale,
+                }
+            )
+        except Exception:
+            pass
 
     def _listener_loop():
-        nonlocal ctrl_conn
+        nonlocal ctrl_conn, active_lore_path
         while pacer.running:
             try:
                 if ctrl_conn is None and video_ctrl_port > 0:
@@ -778,30 +1012,9 @@ def start_web_studio_control_bridge(
                     )
                     with ctrl_lock:
                         ctrl_conn = c
-                        ctrl_conn.send(
-                            {
-                                "cmd": "sync_from_video_runner",
-                                "lore_file": initial_manifest_path,
-                                "sections": manifest_to_web_sections(
-                                    runner.manifest
-                                ),
-                                "concept_bindings": dict(
-                                    runner.concept_bindings_by_region
-                                ),
-                                "eeg_wm_gain": runner.eeg_wm_gain,
-                                "gamepad_wm_mix": runner.gamepad_wm_mix,
-                                "monty_mode": "off",
-                                "stochastic": runner.stochastic,
-                                "wm_radius": runner.wm_radius,
-                                "hud_mode": pacer.hud_mode,
-                                "context_latents": runner.context_lat_frames,
-                                "step_latents": runner.step_lat_frames,
-                                "steps": runner.steps,
-                                "cfg_scale": runner.cfg_scale,
-                            }
-                        )
+                        _send_sync_locked(active_lore_path, runner.manifest)
                     print(
-                        f"🌐 [WEB STUDIO BRIDGE] Подключено к web_cloud_gateway (порт {video_ctrl_port})! Управление из браузера :8080 активно."
+                        f"🌐 [WEB STUDIO BRIDGE] Подключено к web_cloud_gateway (порт {video_ctrl_port})! Менеджер Агентов активен."
                     )
 
                 has_msg = False
@@ -815,11 +1028,18 @@ def start_web_studio_control_bridge(
                     cmd = msg.get("cmd")
                     if cmd == "update_video_config":
                         cfg = msg.get("config", {})
-                        if "monty_mode" in cfg and amodal_engine is not None:
-                            amodal_engine.set_monty_mode(str(cfg["monty_mode"]))
+                        if "monty_mode" in cfg:
+                            m_str = str(cfg["monty_mode"]).strip().lower()
+                            runner.monty_mode = m_str
+                            if amodal_engine is not None:
+                                amodal_engine.set_monty_mode(m_str)
                         if "stochastic" in cfg:
                             runner.stochastic = float(
                                 np.clip(float(cfg["stochastic"]), 0.0, 1.0)
+                            )
+                        if "unassigned_stochastic" in cfg:
+                            runner.unassigned_stochastic = float(
+                                np.clip(float(cfg["unassigned_stochastic"]), 0.0, 1.0)
                             )
                         if "wm_radius" in cfg:
                             runner.wm_radius = float(
@@ -862,10 +1082,10 @@ def start_web_studio_control_bridge(
                                 np.clip(float(cfg["cfg_scale"]), 1.0, 6.0)
                             )
                         print(
-                            f"🎛️ [WEB CONFIG] Из браузера: wm_radius={runner.wm_radius:.2f}, stoch={runner.stochastic:.2f}, "
+                            f"🎛️ [WEB CONFIG] monty={runner.monty_mode}, wm_radius={runner.wm_radius:.2f}, "
+                            f"stoch={runner.stochastic:.2f}, unass_stoch={runner.unassigned_stochastic:.2f}, "
                             f"eeg_gain={runner.eeg_wm_gain:.2f}, gp_mix={runner.gamepad_wm_mix:.2f}, "
-                            f"hud={pacer.hud_mode}, ctx={runner.context_lat_frames}, step={runner.step_lat_frames}, "
-                            f"steps={runner.steps}, cfg={runner.cfg_scale:.1f}"
+                            f"ctx={runner.context_lat_frames}, step={runner.step_lat_frames}, steps={runner.steps}"
                         )
                     elif cmd == "set_gamepad_input":
                         if "eeg_wm_gain" in msg:
@@ -893,6 +1113,16 @@ def start_web_studio_control_bridge(
                                 manual_idx=int(msg.get("manual_idx", -1)),
                                 target_slot=str(msg.get("target_slot", "*")),
                             )
+                    elif cmd == "manage_agent":
+                        p_copy = dict(msg)
+                        runner.request_agent_manage(
+                            lambda r, p=p_copy: apply_agent_manage(r, p)
+                        )
+                    elif cmd == "update_agent_concepts":
+                        p_copy = dict(msg)
+                        runner.request_agent_manage(
+                            lambda r, p=p_copy: apply_agent_concepts(r, p)
+                        )
                     elif cmd == "update_lore_sections":
                         secs = msg.get("sections", {})
                         if isinstance(secs, dict):
@@ -907,10 +1137,16 @@ def start_web_studio_control_bridge(
                         secs = msg.get("sections")
                         if l_file and Path(l_file).exists():
                             new_manifest = load_manifest_or_txt_lore(l_file)
+                            active_lore_path = l_file
                             runner.request_manifest_switch(new_manifest, label=l_file)
+                            with ctrl_lock:
+                                _send_sync_locked(active_lore_path, new_manifest)
                         elif not l_file:
                             empty_manifest = load_txt_lore_as_manifest("")
+                            active_lore_path = ""
                             runner.request_manifest_switch(empty_manifest, label="FREE_DRIFT")
+                            with ctrl_lock:
+                                _send_sync_locked("", empty_manifest)
                         elif isinstance(secs, dict):
                             secs_copy = {
                                 k: list(v) for k, v in secs.items() if isinstance(v, list)
@@ -947,6 +1183,12 @@ def start_web_studio_control_bridge(
                             runner.set_entity_source(
                                 target_slot, f"eeg:{func_r}"
                             )
+                            if runner.eeg_wm_gain < 0.05:
+                                runner.eeg_wm_gain = 1.0
+                                print(
+                                    "🧠 [AUTO-EEG] Живая плата назначена -> автоматически включён eeg_wm_gain=1.0",
+                                    flush=True,
+                                )
                             print(
                                 f"📡 [BLE DEVICE MAPPED] Плата '{s_name}' (Субъект: {u_val}) -> Зона: {r_val} ({target_slot}=eeg:{func_r})"
                             )
@@ -1019,9 +1261,9 @@ def start_web_studio_control_bridge(
                                 ),
                                 2,
                             ),
-                            "monty_mode": "off",
+                            "monty_mode": runner.monty_mode,
                             "stochastic": runner.stochastic,
-                            "unassigned_stochastic": runner.stochastic,
+                            "unassigned_stochastic": runner.unassigned_stochastic,
                             "wm_radius": runner.wm_radius,
                             "eeg_wm_gain": runner.eeg_wm_gain,
                             "gamepad_wm_mix": runner.gamepad_wm_mix,
@@ -1030,13 +1272,9 @@ def start_web_studio_control_bridge(
                             "step_latents": runner.step_lat_frames,
                             "steps": runner.steps,
                             "cfg_scale": runner.cfg_scale,
-                            "active_region_mask": {
-                                "Fpz": True,
-                                "AFz": True,
-                                "F3": True,
-                                "F4": True,
-                                "FCz": True,
-                            },
+                            "sections": manifest_to_web_sections(runner.manifest),
+                            "agents": telem.get("agents", build_agents_snapshot(runner)),
+                            "is_shared_flat_lore": bool(runner.is_shared_flat_lore),
                             "active_concept_idx": telem.get(
                                 "active_concept_idx",
                                 runner.active_concept_idx_by_region,
@@ -1090,7 +1328,7 @@ def main():
         "--init-image",
         type=str,
         default="",
-        help="Опциональный путь к стартовой PNG/JPG картинке (напр. карта лабиринта)",
+        help="Опциональный путь к стартовой PNG/JPG картинке",
     )
     parser.add_argument(
         "--users",
@@ -1104,9 +1342,11 @@ def main():
         dest="entity_source",
         type=str,
         default="auto",
-        help="Источник рабочей памяти ('auto' = из JSON-манифеста, или 'e0=eeg:FCz,e1=npc:AFz')",
+        help="Источник рабочей памяти ('auto' = из манифеста, или 'e0=eeg:FCz,e1=npc:AFz')",
     )
+    parser.add_argument("--monty-mode", type=str, default="off", choices=["off", "missing_only", "full"])
     parser.add_argument("--stochastic", type=float, default=0.0)
+    parser.add_argument("--unassigned-stochastic", type=float, default=0.0)
     parser.add_argument("--wm-radius", type=float, default=0.35)
     parser.add_argument("--eeg-wm-gain", type=float, default=1.0)
     parser.add_argument("--gamepad-wm-mix", type=float, default=1.0)
@@ -1176,6 +1416,9 @@ def main():
         stochastic=args.stochastic,
         wm_radius=args.wm_radius,
     )
+    runner.monty_mode = str(args.monty_mode).strip().lower()
+    runner.unassigned_stochastic = float(np.clip(args.unassigned_stochastic, 0.0, 1.0))
+    runner.is_shared_flat_lore = bool(getattr(manifest, "is_shared_flat", False))
     runner.eeg_wm_gain = float(np.clip(args.eeg_wm_gain, 0.0, 1.0))
     runner.gamepad_wm_mix = float(np.clip(args.gamepad_wm_mix, 0.0, 1.0))
 
@@ -1207,7 +1450,9 @@ def main():
     )
     pacer.start()
 
-    router, amodal_engine = start_live_lsl_to_vram_bus_thread(pacer, args.users)
+    router, amodal_engine = start_live_lsl_to_vram_bus_thread(
+        pacer, args.users, monty_mode=runner.monty_mode
+    )
 
     push_web_telem = start_web_studio_control_bridge(
         runner=runner,
@@ -1299,4 +1544,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -45,7 +45,6 @@ class VideoWorldWeightsServer:
         self.device = self.backend.device
         self.dtype = self.backend.dtype
         self.prompt_cache: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
-        # Предвычисляем конус Кента T5-XXL сразу при старте, пока T5 уже на GPU:
         self.backend.get_t5_output_manifold(max_rank=128)
         dt = time.perf_counter() - t0
         print(
@@ -92,21 +91,29 @@ class VideoWorldWeightsServer:
 
     @torch.no_grad()
     def handle_get_t5_manifold(self, msg: dict) -> dict:
-        max_rank = int(msg.get("max_rank", 128))
+        max_rank = int(msg.get("max_rank", 512))
+        num_attractors = int(msg.get("num_attractors", 512))
         try:
-            m = self.backend.get_t5_output_manifold(max_rank=max_rank)
+            m = self.backend.get_t5_output_manifold(
+                max_rank=max_rank, num_attractors=num_attractors
+            )
         except torch.cuda.OutOfMemoryError:
             self.backend._move_vae_to_cpu()
             gc.collect()
             torch.cuda.empty_cache()
-            m = self.backend.get_t5_output_manifold(max_rank=max_rank)
-        return {
+            m = self.backend.get_t5_output_manifold(
+                max_rank=max_rank, num_attractors=num_attractors
+            )
+        resp = {
             "status": "ok",
             "mu": m["mu"].detach().float().cpu().numpy(),
-            "V": m["V"].detach().float().cpu().numpy(),
+            "V": m["V"].detach().to(torch.float16).cpu().numpy(),
             "sigma": m["sigma"].detach().float().cpu().numpy(),
             "mean_norm": m["mean_norm"].detach().float().cpu().numpy(),
         }
+        if "attractors" in m:
+            resp["attractors"] = m["attractors"].detach().to(torch.float16).cpu().numpy()
+        return resp
 
     @torch.no_grad()
     def handle_encode_semantics(self, msg: dict) -> dict:

@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v11.2 (GRADUAL WM MIXER & 24-CH GAMEPAD)
-===================================================================================
-- Поддерживает градуальное смешивание Рабочей Памяти ЭЭГ (`eeg_wm_gain`) и
-  Синтезатора Рабочей Памяти от Геймпада/ИИ-Агента (`gamepad_wm_mix`).
-- Хранит и синхронизирует порегионные привязки концептов к 24 полуосям/кнопкам
-  геймпада (`concept_bindings`), живые вероятности выбора (`region_choice_probs`)
-  и список совместно активных концептов (`active_concept_indices`).
+NEUROCANVAS UNIFIED CLOUD WEB & LSL GATEWAY v11.3 (AGENT MANAGER & 24-CH GAMEPAD)
 ===================================================================================
 """
 
@@ -159,8 +153,6 @@ def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
         try:
             with open(full_p, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            if raw.get("arena_context_desc"):
-                sections["FPZ"].append(str(raw["arena_context_desc"]))
             if raw.get("negative_desc"):
                 sections["NEGATIVE"].append(str(raw["negative_desc"]))
             archetypes = raw.get("archetypes", {})
@@ -178,6 +170,8 @@ def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
                         desc = f"{arch.get('essence_desc', '')} {arch.get('action_desc', '')}".strip()
                         if desc and desc not in sections[reg_k]:
                             sections[reg_k].append(desc)
+            if raw.get("arena_context_desc") and not sections["FPZ"]:
+                sections["FPZ"].append(str(raw["arena_context_desc"]))
             return sections
         except Exception:
             return sections
@@ -202,11 +196,6 @@ def parse_regional_lore_file(lore_path: str) -> dict[str, list[str]]:
         for r_k in ("FPZ", "AFZ", "F3", "F4", "FCZ"):
             if not sections[r_k]:
                 sections[r_k] = list(unassigned)
-    non_empty = next((sections[r] for r in ("FPZ", "AFZ", "F3", "F4", "FCZ") if sections[r]), [])
-    if non_empty:
-        for r_k in ("FPZ", "AFZ", "F3", "F4", "FCZ"):
-            if not sections[r_k]:
-                sections[r_k] = list(non_empty)
     return sections
 
 
@@ -233,6 +222,8 @@ video_state = {
     "sections": {
         "FPZ": [], "AFZ": [], "F3": [], "F4": [], "FCZ": [], "NEGATIVE": []
     },
+    "agents": [],
+    "is_shared_flat_lore": False,
     "concept_bindings": {
         "FCZ": ["LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT", "BTN_A", "BTN_B"],
         "AFZ": ["RS_UP", "RS_DOWN", "RS_LEFT", "RS_RIGHT", "BTN_X", "BTN_Y"],
@@ -252,9 +243,9 @@ video_state = {
     "step_latents": 2,
     "num_frames": 17,
     "context_ring_len": 9,
-    "steps": 6,
+    "steps": 8,
     "genesis_steps": 12,
-    "cfg_scale": 3.2,
+    "cfg_scale": 1.0,
     "region_gains": {
         "Fpz": 0.06,
         "AFz": 0.08,
@@ -681,6 +672,25 @@ class UnifiedCloudHandler(BaseHTTPRequestHandler):
             broadcast_full_state()
             self._send_json(200, {"status": "ok", "video": cfg_copy})
 
+        elif clean_path == '/api/video/agent_manage':
+            send_video_ipc({
+                "cmd": "manage_agent",
+                "action": str(data.get("action", "")).strip(),
+                "slot_id": str(data.get("slot_id", "")).strip(),
+                "binding": str(data.get("binding", "eeg:FCz")).strip(),
+            })
+            self._send_json(200, {"status": "ok"})
+
+        elif clean_path == '/api/video/agent_concepts':
+            send_video_ipc({
+                "cmd": "update_agent_concepts",
+                "slot_id": str(data.get("slot_id", "e0")).strip(),
+                "action": str(data.get("action", "add")).strip(),
+                "concept": str(data.get("concept", "")).strip(),
+                "apply_all": bool(data.get("apply_all", False)),
+            })
+            self._send_json(200, {"status": "ok"})
+
         elif clean_path == '/api/video/gamepad':
             with video_state_lock:
                 if "eeg_wm_gain" in data:
@@ -1087,15 +1097,18 @@ def ipc_video_control_listener():
                     if cmd == "sync_from_video_runner":
                         with video_state_lock:
                             video_state["connected"] = True
-                            if msg.get("lore_file"):
-                                video_state["lore_file"] = msg["lore_file"]
-                            runner_secs = msg.get("sections")
-                            if isinstance(runner_secs, dict) and any(len(v) > 0 for v in runner_secs.values()):
-                                video_state["sections"] = runner_secs
+                            if "lore_file" in msg:
+                                video_state["lore_file"] = str(msg["lore_file"] or "")
+                            if isinstance(msg.get("sections"), dict):
+                                video_state["sections"] = msg["sections"]
+                            if isinstance(msg.get("agents"), list):
+                                video_state["agents"] = msg["agents"]
+                            if "is_shared_flat_lore" in msg:
+                                video_state["is_shared_flat_lore"] = bool(msg["is_shared_flat_lore"])
                             for k in (
-                                "stochastic", "wm_radius", "hud_mode", "context_latents",
-                                "step_latents", "steps", "cfg_scale", "eeg_wm_gain",
-                                "gamepad_wm_mix", "concept_bindings"
+                                "monty_mode", "stochastic", "unassigned_stochastic", "wm_radius",
+                                "hud_mode", "context_latents", "step_latents", "steps",
+                                "cfg_scale", "eeg_wm_gain", "gamepad_wm_mix", "concept_bindings"
                             ):
                                 if k in msg:
                                     video_state[k] = msg[k]
@@ -1114,6 +1127,12 @@ def ipc_video_control_listener():
                             video_state["debug_tokens"] = msg.get("debug_tokens", "")
                             video_state["fpz_meta_charge"] = msg.get("fpz_meta_charge", 0.0)
                             video_state["afz_stage_progress"] = msg.get("afz_stage_progress", 0.0)
+                            if isinstance(msg.get("sections"), dict):
+                                video_state["sections"] = msg["sections"]
+                            if isinstance(msg.get("agents"), list):
+                                video_state["agents"] = msg["agents"]
+                            if "is_shared_flat_lore" in msg:
+                                video_state["is_shared_flat_lore"] = bool(msg["is_shared_flat_lore"])
                             for k in (
                                 "monty_mode", "stochastic", "unassigned_stochastic", "wm_radius",
                                 "eeg_wm_gain", "gamepad_wm_mix",

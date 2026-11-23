@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -472,56 +473,110 @@ class LTXModelBackend:
         return int(self.pipe.vae_temporal_compression_ratio)
 
     @torch.no_grad()
-    def get_t5_output_manifold(self, max_rank: int = 128) -> dict[str, torch.Tensor]:
+    def get_t5_output_manifold(
+        self, max_rank: int = 128, num_attractors: int = 0
+    ) -> dict[str, torch.Tensor]:
         """
-        Извлекает истинный анизотропный конус Кента (mu, V, sigma, mean_norm) из выходов
-        T5-XXL по реальным SentencePiece ID словаря модели (0 слов в коде и конфигах).
+        Извлекает истинный касательный конус EOS-токена T5-XXL (mu, V, sigma, mean_norm)
+        по целым строчным ASCII-словам из словаря токенизатора (0 хардкода слов).
+        Используется строго для безопасной геодезической навигации вокруг empty_emb[0, 0]
+        без вылета за пределы распределения caption_projection.
         """
         r_req = int(max_rank)
-        if r_req in self._t5_manifold_cache:
-            return self._t5_manifold_cache[r_req]
+        cache_key = r_req
+        if cache_key in self._t5_manifold_cache:
+            return self._t5_manifold_cache[cache_key]
 
-        cache_file = QUANT_T5_DIR / f"t5_output_manifold_{r_req}x4096.pt"
+        cache_file = QUANT_T5_DIR / f"t5_eos_manifold_{r_req}x4096.pt"
         if cache_file.exists():
             raw = torch.load(str(cache_file), map_location="cpu")
-            out = {
-                k: (v if isinstance(v, torch.Tensor) else torch.tensor(v)).to(device=self.device, dtype=torch.float32)
-                for k, v in raw.items()
-            }
-            self._t5_manifold_cache[r_req] = out
-            return out
+            if isinstance(raw, dict) and "V" in raw and "sigma" in raw:
+                out = {
+                    k: (v if isinstance(v, torch.Tensor) else torch.tensor(v)).to(
+                        device=self.device, dtype=torch.float32
+                    )
+                    for k, v in raw.items()
+                }
+                self._t5_manifold_cache[cache_key] = out
+                return out
 
         self._ensure_t5_loaded()
-        vocab_sz = int(getattr(self.tokenizer, "vocab_size", 32100))
-        hi_id = min(vocab_sz - 100, 31900)
-        g = torch.Generator(device="cpu").manual_seed(2026)
-        rand_ids = torch.randint(100, hi_id, (96, 11), generator=g, dtype=torch.long)
-        eos_id = int(self.tokenizer.eos_token_id) if self.tokenizer.eos_token_id is not None else 1
-        eos_col = torch.full((96, 1), eos_id, dtype=torch.long)
-        input_ids = torch.cat([rand_ids, eos_col], dim=1).to(self.device)
-        attn_mask = torch.ones_like(input_ids, dtype=torch.bool, device=self.device)
+        vocab = self.tokenizer.get_vocab()
+        clean_ids = sorted(
+            int(tid)
+            for tok, tid in vocab.items()
+            if isinstance(tok, str)
+            and tok.startswith("\u2581")
+            and 3 <= (len(tok) - 1) <= 12
+            and tok[1:].isascii()
+            and tok[1:].isalpha()
+            and tok[1:].islower()
+        )
+        if len(clean_ids) < 256:
+            clean_ids = list(range(100, min(4096, int(getattr(self.tokenizer, "vocab_size", 32100)))))
 
-        hidden = self.text_encoder(input_ids, attention_mask=attn_mask)[0][:, :-1, :].float()
-        X = hidden.reshape(-1, hidden.shape[-1])
-        mean_norm = float(torch.norm(X, p=2, dim=-1).mean().item())
-        mu = X.mean(dim=0)
-        X_c = X - mu.unsqueeze(0)
-        _, S, Vh = torch.linalg.svd(X_c, full_matrices=False)
-        R = min(r_req, int(Vh.shape[0]))
-        sigma_R = S[:R] / math.sqrt(max(1, X_c.shape[0] - 1))
+        # Берём равномерную выборку до 4096 реальных слов (~1 сек на RTX 3060)
+        stride = max(1, len(clean_ids) // 4096)
+        sample_ids = clean_ids[::stride][:4096]
+        eos_id = (
+            int(self.tokenizer.eos_token_id)
+            if self.tokenizer.eos_token_id is not None
+            else 1
+        )
+        ids_t = torch.tensor(sample_ids, dtype=torch.long)
+        all_pairs = torch.stack([ids_t, torch.full_like(ids_t, eos_id)], dim=1)  # [N, 2]
+
+        chunks: list[torch.Tensor] = []
+        for start in range(0, all_pairs.shape[0], 256):
+            b_ids = all_pairs[start : start + 256].to(self.device)
+            b_msk = torch.ones_like(b_ids, dtype=torch.bool, device=self.device)
+            # Берём именно EOS-токен [:, 1, :] — он совпадает по роли с empty_emb[0, 0]:
+            h_eos = self.text_encoder(b_ids, attention_mask=b_msk)[0][:, 1, :].float()
+            chunks.append(h_eos.detach().cpu())
+        E_eos = torch.cat(chunks, dim=0)  # [N, 4096]
+
+        n_c, dim = E_eos.shape
+        mean_norm = float(torch.norm(E_eos, p=2, dim=-1).mean().item())
+        mu_cpu = E_eos.mean(dim=0)
+        mu_gpu = mu_cpu.to(device=self.device, dtype=torch.float32)
+
+        cov = torch.zeros((dim, dim), device=self.device, dtype=torch.float32)
+        for start in range(0, n_c, 1024):
+            xb = E_eos[start : start + 1024].to(device=self.device, dtype=torch.float32) - mu_gpu.unsqueeze(0)
+            cov.addmm_(xb.T, xb)
+        cov.div_(float(max(1, n_c - 1)))
+
+        eigvals, eigvecs = torch.linalg.eigh(cov)
+        eigvals = eigvals.flip(0).clamp(min=1e-8)
+        V_all = eigvecs.flip(1).T
+        R = min(r_req, dim, max(1, n_c - 1))
+        V_R = V_all[:R].contiguous()
+        max_idx = torch.argmax(V_R.abs(), dim=-1)
+        signs = torch.where(
+            V_R[torch.arange(R, device=self.device), max_idx] >= 0.0, 1.0, -1.0
+        )
+        V_R = (V_R * signs.unsqueeze(-1)).contiguous()
+        sigma_R = torch.sqrt(eigvals[:R]).contiguous()
+        del cov, eigvals, eigvecs, V_all
 
         cpu_payload = {
-            "mu": mu.detach().cpu(),
-            "V": Vh[:R].contiguous().detach().cpu(),
-            "sigma": sigma_R.contiguous().detach().cpu(),
+            "mu": mu_cpu.to(torch.float32),
+            "V": V_R.detach().to(device="cpu", dtype=torch.float16),
+            "sigma": sigma_R.detach().to(device="cpu", dtype=torch.float32),
             "mean_norm": torch.tensor([mean_norm], dtype=torch.float32),
         }
         QUANT_T5_DIR.mkdir(parents=True, exist_ok=True)
         torch.save(cpu_payload, str(cache_file))
 
-        out = {k: v.to(device=self.device, dtype=torch.float32) for k, v in cpu_payload.items()}
-        self._t5_manifold_cache[r_req] = out
-        print(f"🧭 [T5-XXL MANIFOLD] Извлечён истинный выходной конус T5-XXL (R={R}, norm={mean_norm:.2f}).", flush=True)
+        out = {
+            k: v.to(device=self.device, dtype=torch.float32)
+            for k, v in cpu_payload.items()
+        }
+        self._t5_manifold_cache[cache_key] = out
+        print(
+            f"🧭 [T5-XXL EOS MANIFOLD] Собрано по {n_c} реальным словам: R={R}, norm={mean_norm:.2f} -> {cache_file.name}",
+            flush=True,
+        )
         return out
 
     @torch.no_grad()
@@ -802,20 +857,25 @@ class RemoteLTXModelBackend:
             return 0.0
 
     @torch.no_grad()
-    def get_t5_output_manifold(self, max_rank: int = 128) -> dict[str, torch.Tensor]:
+    def get_t5_output_manifold(
+        self, max_rank: int = 128, num_attractors: int = 0
+    ) -> dict[str, torch.Tensor]:
         r_req = int(max_rank)
         if r_req in self._t5_manifold_cache:
             return self._t5_manifold_cache[r_req]
 
-        cache_file = QUANT_T5_DIR / f"t5_output_manifold_{r_req}x4096.pt"
+        cache_file = QUANT_T5_DIR / f"t5_eos_manifold_{r_req}x4096.pt"
         if cache_file.exists():
             raw = torch.load(str(cache_file), map_location="cpu")
-            out = {
-                k: (v if isinstance(v, torch.Tensor) else torch.tensor(v)).to(device=self.device, dtype=torch.float32)
-                for k, v in raw.items()
-            }
-            self._t5_manifold_cache[r_req] = out
-            return out
+            if isinstance(raw, dict) and "V" in raw and "sigma" in raw:
+                out = {
+                    k: (v if isinstance(v, torch.Tensor) else torch.tensor(v)).to(
+                        device=self.device, dtype=torch.float32
+                    )
+                    for k, v in raw.items()
+                }
+                self._t5_manifold_cache[r_req] = out
+                return out
 
         resp = self._rpc({"cmd": "get_t5_manifold", "max_rank": r_req})
         if resp.get("status") != "ok":
@@ -823,6 +883,7 @@ class RemoteLTXModelBackend:
         out = {
             k: torch.from_numpy(resp[k]).to(device=self.device, dtype=torch.float32)
             for k in ("mu", "V", "sigma", "mean_norm")
+            if k in resp
         }
         self._t5_manifold_cache[r_req] = out
         return out

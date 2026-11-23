@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-neuro_engine.py — Полноранговый 96,000-D 3D-DiT Движок (RichSpace + Kent-T5 + Spectral S^3)
-=============================================================================================
-- Мультиплексирует ВСЕ активные сущности (e0..e4) через multiplex_t5_concept_slots.
-- При пустом промпте использует конус Кента T5-XXL (synthesize_empty_t5_from_kent_manifold).
-- На лету внутри 8 шагов денойзинга обновляет T5-эмбеддинги от 60 Гц шины рабочей памяти и геймпада.
-- Убирает 300-кратное мыло авторегрессии: чистый декод якоря (decode_noise_scale=0.0)
-  и сохранение импульса при context_latents > 1.
-=============================================================================================
+neuro_engine.py — Полноранговый 96,000-D 3D-DiT Движок (Менеджер Агентов + Хронологический Контекст ctx=1..3)
+=============================================================================================================
+- Активные-только агенты: неактивные слоты (IDLE / OFF / NPC при monty_mode=='off') не шлют концепты.
+- Менеджер Агентов: динамическое изменение привязок, добавление/удаление агентов, 100% синхронизация с WebUI.
+- Безопасный пустой промпт через EOS-конус T5-XXL (0 цветной ряби).
+- Хронологическое каузальное кодирование префикса для context_latents = 1 (1 кадр), 2 (9 кадров), 3 (17 кадров).
+=============================================================================================================
 """
 
 from __future__ import annotations
@@ -86,7 +85,11 @@ class UniversalLatentAutobattlerEngine:
         self.context_lat_frames = max(1, int(context_lat_frames))
         self.step_lat_frames = max(1, int(step_lat_frames))
         self.stochastic = float(np.clip(stochastic, 0.0, 1.0))
+        self.unassigned_stochastic: float = 0.0
+        self.monty_mode: str = "off"
         self.wm_radius = float(np.clip(wm_radius, 0.0, 1.0))
+        self.is_shared_flat_lore: bool = bool(getattr(manifest, "is_shared_flat", False))
+        self.latest_agents_state: list[dict] = []
 
         self.eeg_wm_gain: float = 1.0
         self.gamepad_wm_mix: float = 1.0
@@ -100,6 +103,7 @@ class UniversalLatentAutobattlerEngine:
         self._cmd_lock = threading.Lock()
         self._pending_manifest: tuple[GameWorldManifest, str] | None = None
         self._pending_sections_fn = None
+        self._pending_agent_fn = None
         self._pending_init_image: bytes | None = None
         self._pending_reset_genesis: bool = False
         self._just_reset_visual_stream: bool = False
@@ -132,7 +136,7 @@ class UniversalLatentAutobattlerEngine:
 
         self.local_genesis_5d: torch.Tensor | None = None
         self.local_context_latents_5d: torch.Tensor | None = None
-        self.recent_clean_frames_rgb: deque[np.ndarray] = deque(maxlen=33)
+        self.recent_clean_frames_rgb: deque[np.ndarray] = deque(maxlen=41)
 
         self.backend = None
         if not self.force_local and self.video_server_port > 0:
@@ -149,7 +153,7 @@ class UniversalLatentAutobattlerEngine:
                     print(
                         f"⚡ [ENGINE] Подключено к video_world_server (localhost:{self.video_server_port}, "
                         f"distilled={self.backend.is_distilled}). "
-                        f"Конус Кента T5-XXL + 96,000-D Spectral S^3 активны!"
+                        f"EOS-конус + Многомерная семантика + Хронологический ctx=1..3 активны!"
                     )
             except Exception:
                 self.backend = None
@@ -186,10 +190,15 @@ class UniversalLatentAutobattlerEngine:
         with self._cmd_lock:
             self._pending_manifest = (new_manifest, label)
             self._pending_sections_fn = None
+            self._pending_agent_fn = None
 
     def request_lore_sections_update(self, apply_fn):
         with self._cmd_lock:
             self._pending_sections_fn = apply_fn
+
+    def request_agent_manage(self, apply_fn):
+        with self._cmd_lock:
+            self._pending_agent_fn = apply_fn
 
     def request_init_image_bytes(self, img_bytes: bytes):
         with self._cmd_lock:
@@ -209,16 +218,19 @@ class UniversalLatentAutobattlerEngine:
         with self._cmd_lock:
             pend_manifest = self._pending_manifest
             pend_sec_fn = self._pending_sections_fn
+            pend_agent_fn = self._pending_agent_fn
             pend_img = self._pending_init_image
             pend_reset = self._pending_reset_genesis
             self._pending_manifest = None
             self._pending_sections_fn = None
+            self._pending_agent_fn = None
             self._pending_init_image = None
             self._pending_reset_genesis = False
 
         if pend_manifest is not None:
             new_m, label = pend_manifest
             self.manifest = new_m
+            self.is_shared_flat_lore = bool(getattr(new_m, "is_shared_flat", False))
             self.curr_idx = 0
             self.maneuver_phase = 0
             self.quest_progress_pct = 0.0
@@ -227,6 +239,7 @@ class UniversalLatentAutobattlerEngine:
             self.persistent_entity_states.clear()
             self.last_active_pos_pair = None
             self.entity_controllers.clear()
+            self.source_mode_overrides.clear()
             self.local_genesis_5d = None
             self.local_context_latents_5d = None
             self.recent_clean_frames_rgb.clear()
@@ -246,6 +259,17 @@ class UniversalLatentAutobattlerEngine:
             self._warmup_manifest_semantics()
             print(
                 "📝 [ENGINE LORE EDITOR] Пулы концептов 3D-DiT обновлены!",
+                flush=True,
+            )
+
+        if pend_agent_fn is not None:
+            pend_agent_fn(self)
+            self.active_entity_parties = []
+            self.persistent_entity_states.clear()
+            self.last_active_pos_pair = None
+            self._warmup_manifest_semantics()
+            print(
+                "🤖 [AGENT MANAGER] Конфигурация агентов 3D-DiT обновлена!",
                 flush=True,
             )
 
@@ -355,15 +379,26 @@ class UniversalLatentAutobattlerEngine:
     @torch.no_grad()
     def _warmup_manifest_semantics(self):
         t0 = time.perf_counter()
-        prompts_to_warm = set()
-        prompts_to_warm.add("")
-        prompts_to_warm.add(self.manifest.negative_desc)
+
+        self.backend.encode_semantics("", max_len=128)
+        if self.manifest.negative_desc:
+            self.backend.encode_semantics(self.manifest.negative_desc, max_len=128)
+
+        active_arch_ids: set[str] = set()
+        for st in self.manifest.stages:
+            for slot in st.entities:
+                active_arch_ids.update(slot.allowed_pool)
+
+        prompts_to_warm: set[str] = set()
         if self.manifest.static_hold_desc:
             prompts_to_warm.add(self.manifest.static_hold_desc)
         if self.manifest.arena_context_desc:
             prompts_to_warm.add(self.manifest.arena_context_desc)
 
-        for _, arch in self.manifest.archetypes.items():
+        for aid in active_arch_ids:
+            arch = self.manifest.archetypes.get(aid)
+            if not arch:
+                continue
             sentence = f"{arch.essence_desc} {arch.action_desc}".strip()
             if sentence and not sentence.endswith("."):
                 sentence += "."
@@ -372,7 +407,8 @@ class UniversalLatentAutobattlerEngine:
                 if self.manifest.arena_context_desc
                 else sentence
             )
-            prompts_to_warm.add(probe_p)
+            if probe_p:
+                prompts_to_warm.add(probe_p)
 
         for st in self.manifest.stages:
             prefix = f"{self.manifest.arena_context_desc}. " if self.manifest.arena_context_desc else ""
@@ -383,14 +419,17 @@ class UniversalLatentAutobattlerEngine:
             if st.quest.failed_hypothesis:
                 prompts_to_warm.add(f"{prefix}{st.quest.failed_hypothesis}".strip())
 
-        print(
-            f"🔥 [T5 WARMUP] Предвычисление {len(prompts_to_warm)} тензоров эмбеддингов...",
-            flush=True,
-        )
-        for p in prompts_to_warm:
-            self.backend.encode_semantics(p, max_len=128)
-        dt = time.perf_counter() - t0
-        print(f"✅ [T5 WARMUP] Готово за {dt:.1f}с!", flush=True)
+        if prompts_to_warm:
+            print(
+                f"🔥 [T5 WARMUP] Предвычисление {len(prompts_to_warm)} тензоров эмбеддингов...",
+                flush=True,
+            )
+            for p in prompts_to_warm:
+                self.backend.encode_semantics(p, max_len=128)
+            dt = time.perf_counter() - t0
+            print(f"✅ [T5 WARMUP] Готово за {dt:.1f}с!", flush=True)
+        else:
+            print("🔥 [T5 WARMUP] Пул концептов пуст -> режим безусловного EOS-конуса.", flush=True)
 
         vram_after = self.backend.offload_t5_to_cpu()
         if vram_after:
@@ -446,6 +485,8 @@ class UniversalLatentAutobattlerEngine:
         ctrl = self.entity_controllers[slot_key]
         ctrl.source_mode = binding
         ctrl.stochastic = self.stochastic
+        ctrl.unassigned_stochastic = self.unassigned_stochastic
+        ctrl.monty_mode = self.monty_mode
         ctrl.wm_radius = self.wm_radius
         ctrl.eeg_wm_gain = self.eeg_wm_gain
         ctrl.gamepad_wm_mix = self.gamepad_wm_mix
@@ -483,7 +524,8 @@ class UniversalLatentAutobattlerEngine:
             for aid in pool_ids:
                 arch = self.manifest.archetypes.get(aid)
                 if arch:
-                    sentence = f"{arch.essence_desc} {arch.action_desc}".strip()
+                    raw_text = f"{arch.essence_desc} {arch.action_desc}".strip()
+                    sentence = raw_text
                     if sentence and not sentence.endswith("."):
                         sentence += "."
                     probe_p = (
@@ -495,6 +537,7 @@ class UniversalLatentAutobattlerEngine:
                         {
                             "state_id": aid,
                             "display_name": arch.display_name,
+                            "raw_text": raw_text,
                             "probe_prompt": probe_p,
                         }
                     )
@@ -545,11 +588,10 @@ class UniversalLatentAutobattlerEngine:
         )
         if not ordered_slots:
             if not has_any_pool_items and not self.manifest.static_hold_desc.strip():
-                # Полностью пустой промпт -> свободная навигация внутри конуса Кента T5-XXL!
                 return synthesize_empty_t5_from_kent_manifold(
                     empty_pair=empty_pair,
                     t5_manifold=self.t5_manifold,
-                    wm_reg_5x32x120=full_wm_5x5x32x120.mean(dim=0),
+                    wm_reg_5x32x120=full_wm_5x5x32x120,
                     wm_radius=self.wm_radius,
                     stochastic=self.stochastic,
                 )
@@ -570,6 +612,202 @@ class UniversalLatentAutobattlerEngine:
             )
         self.last_active_pos_pair = (pos_emb.detach().clone(), pos_mask.detach().clone())
         return pos_emb, pos_mask
+
+    @torch.no_grad()
+    def _detect_any_live_eeg_on_bus(self, stage) -> bool:
+        if not stage.entities:
+            return False
+        ctrl0 = self._get_controller(stage.entities[0], 0)
+        ctrl0.vram_bus.try_attach_to_existing_vram()
+        if ctrl0.vram_bus.attached_pid <= 0:
+            return False
+        meta = ctrl0.vram_bus.meta_64
+        wm = ctrl0.vram_bus.wm_field_5x5x32x120
+        for r_i in range(5):
+            if float(meta[21 + r_i].item()) > 0.5 and float(wm[r_i].abs().max().item()) > 1e-4:
+                return True
+        return False
+
+    @torch.no_grad()
+    def _evaluate_agents_for_step(
+        self,
+        stage,
+        entity_pool_candidates: list[list[dict]],
+        entity_current_states: list[str],
+        step_gp_channels: dict[str, float],
+        empty_pair: tuple[torch.Tensor, torch.Tensor],
+    ):
+        n_ents = len(stage.entities)
+        has_any_live_eeg = self._detect_any_live_eeg_on_bus(stage)
+        first_nonempty_idx = next(
+            (i for i, p in enumerate(entity_pool_candidates) if len(p) > 0), 0
+        )
+
+        steered_probe_pairs: list[tuple[torch.Tensor, torch.Tensor]] = [
+            empty_pair for _ in range(n_ents)
+        ]
+        entity_choice_distributions: list[dict[str, float]] = [
+            {} for _ in range(n_ents)
+        ]
+        dynamic_state_labels: list[str] = ["" for _ in range(n_ents)]
+        slot_weights: list[float] = [1.0 for _ in range(n_ents)]
+        active_driven_slots: list[int] = []
+        full_wm_5x5x32x120 = torch.zeros((5, 5, 32, 120), device=self.device, dtype=torch.float32)
+        active_region_flags = [0.0, 0.0, 0.0, 0.0, 0.0]
+        cached_slot_banks: list[tuple[list[str], torch.Tensor, torch.Tensor] | None] = []
+        agents_snapshot: list[dict] = []
+
+        for rk in ("Fpz", "AFz", "F3", "F4", "FCz"):
+            self.active_concept_idx_by_region[rk] = -1
+            self.active_concept_indices_by_region[rk] = []
+            self.region_choice_probs[rk] = []
+
+        for idx_e in range(n_ents):
+            slot = stage.entities[idx_e]
+            s_key = slot.slot_id or f"e{idx_e}"
+            ctrl = self._get_controller(slot, idx_e, step_gp_channels)
+            pool_items = entity_pool_candidates[idx_e]
+            cur_st_id = entity_current_states[idx_e]
+            reg_bus_idx, reg_ui_name, _, _ = ctrl._get_region_specs()
+            ctrl.pool_size_hint = max(1, len(pool_items))
+
+            concept_texts = [item["raw_text"] for item in pool_items]
+            is_slot_active, act_tag = ctrl.is_slot_active_for_concepts(
+                has_any_live_eeg=has_any_live_eeg,
+                is_primary_fallback=(idx_e == first_nonempty_idx),
+                device=self.device,
+            )
+
+            if not is_slot_active:
+                cached_slot_banks.append(None)
+                steered_probe_pairs[idx_e] = empty_pair
+                entity_choice_distributions[idx_e] = {}
+                dynamic_state_labels[idx_e] = f"{s_key}:IDLE"
+                agents_snapshot.append(
+                    {
+                        "slot_id": s_key,
+                        "binding": ctrl.source_mode,
+                        "region": reg_ui_name,
+                        "active": False,
+                        "source_tag": act_tag,
+                        "concepts": concept_texts,
+                        "probs": [],
+                        "active_indices": [],
+                    }
+                )
+                continue
+
+            if not pool_items:
+                cached_slot_banks.append(None)
+                ctrl.sample_working_memory_5x5x32x120(self.device, sub_step_frac=0.0)
+                if ctrl.latest_region_wm_5x32x120 is not None:
+                    full_wm_5x5x32x120[reg_bus_idx] = ctrl.latest_region_wm_5x32x120
+                    if float(ctrl.latest_region_wm_5x32x120.abs().max().item()) > 1e-4:
+                        active_region_flags[reg_bus_idx] = 1.0
+                steered_probe_pairs[idx_e] = empty_pair
+                entity_choice_distributions[idx_e] = {}
+                dynamic_state_labels[idx_e] = f"{s_key}:FREE"
+                agents_snapshot.append(
+                    {
+                        "slot_id": s_key,
+                        "binding": ctrl.source_mode,
+                        "region": reg_ui_name,
+                        "active": True,
+                        "source_tag": ctrl.latest_source_tag,
+                        "concepts": [],
+                        "probs": [],
+                        "active_indices": [],
+                    }
+                )
+                continue
+
+            pool_ids = [item["state_id"] for item in pool_items]
+            pool_prompts = [item["probe_prompt"] for item in pool_items]
+
+            enc_pairs = [
+                self.backend.encode_semantics(p, max_len=128) for p in pool_prompts
+            ]
+            bank_K = torch.cat([ep[0] for ep in enc_pairs], dim=0)
+            masks_K = torch.cat([ep[1] for ep in enc_pairs], dim=0)
+            cached_slot_banks.append((pool_ids, bank_K, masks_K))
+
+            start_id, target_id, steered_emb, steered_mask, probs_dict, active_indices = (
+                ctrl.select_concept_full_rank_524288d(
+                    pool_ids=pool_ids,
+                    candidate_embeds_Kx128x4096=bank_K,
+                    device=self.device,
+                    current_state_id=cur_st_id,
+                    catalyst_field_128x4096=None,
+                    candidate_masks_Kx128=masks_K,
+                )
+            )
+
+            probs_ordered = [probs_dict.get(pid, 0.0) for pid in pool_ids]
+
+            if ctrl.latest_region_wm_5x32x120 is not None:
+                full_wm_5x5x32x120[reg_bus_idx] = ctrl.latest_region_wm_5x32x120
+                slot_weights[idx_e] = 0.75 + 0.25 * math.tanh(
+                    float(torch.norm(ctrl.latest_region_wm_5x32x120).item()) * 0.05
+                )
+
+            if not active_indices:
+                steered_probe_pairs[idx_e] = (steered_emb.to(self.dtype), steered_mask)
+                entity_choice_distributions[idx_e] = probs_dict
+                self.region_choice_probs[reg_ui_name] = probs_ordered
+                dynamic_state_labels[idx_e] = f"{s_key}:0"
+                agents_snapshot.append(
+                    {
+                        "slot_id": s_key,
+                        "binding": ctrl.source_mode,
+                        "region": reg_ui_name,
+                        "active": False,
+                        "source_tag": ctrl.latest_source_tag,
+                        "concepts": concept_texts,
+                        "probs": probs_ordered,
+                        "active_indices": [],
+                    }
+                )
+                continue
+
+            top_idx = active_indices[0]
+            steered_probe_pairs[idx_e] = (steered_emb.to(self.dtype), steered_mask)
+            entity_choice_distributions[idx_e] = probs_dict
+            self.active_concept_idx_by_region[reg_ui_name] = int(top_idx)
+            self.active_concept_indices_by_region[reg_ui_name] = [int(i) for i in active_indices]
+            self.region_choice_probs[reg_ui_name] = probs_ordered
+            self.persistent_entity_states[s_key] = pool_ids[top_idx]
+            active_driven_slots.append(idx_e)
+            active_region_flags[reg_bus_idx] = 1.0
+
+            if idx_e == stage.quest.active_slot_idx and start_id and start_id != target_id:
+                dynamic_state_labels[idx_e] = f"{s_key}:{start_id}->{target_id}"
+            else:
+                dynamic_state_labels[idx_e] = f"{s_key}:{target_id}"
+
+            agents_snapshot.append(
+                {
+                    "slot_id": s_key,
+                    "binding": ctrl.source_mode,
+                    "region": reg_ui_name,
+                    "active": True,
+                    "source_tag": ctrl.latest_source_tag,
+                    "concepts": concept_texts,
+                    "probs": probs_ordered,
+                    "active_indices": [int(i) for i in active_indices],
+                }
+            )
+
+        self.latest_agents_state = agents_snapshot
+        return (
+            steered_probe_pairs,
+            entity_choice_distributions,
+            dynamic_state_labels,
+            slot_weights,
+            active_driven_slots,
+            full_wm_5x5x32x120,
+            active_region_flags,
+            cached_slot_banks,
+        )
 
     @torch.no_grad()
     def execute_turn_step(
@@ -631,7 +869,7 @@ class UniversalLatentAutobattlerEngine:
             else ""
         )
 
-        if self.stochastic <= 0.001:
+        if self.stochastic <= 0.001 and self.unassigned_stochastic <= 0.001:
             step_seed = (self.base_seed + stage.global_stage * 1009) % 2147483647
         else:
             step_seed = (
@@ -665,105 +903,22 @@ class UniversalLatentAutobattlerEngine:
             )
         )
 
-        steered_probe_pairs: list[tuple[torch.Tensor, torch.Tensor]] = [
-            empty_pair for _ in range(n_ents)
-        ]
-        entity_choice_distributions: list[dict[str, float]] = [
-            {} for _ in range(n_ents)
-        ]
-        dynamic_state_labels: list[str] = ["" for _ in range(n_ents)]
-        slot_weights: list[float] = [1.0 for _ in range(n_ents)]
-
-        slot_to_reg_name = {0: "FCz", 1: "AFz", 2: "F3", 3: "F4", 4: "Fpz"}
-        active_driven_slots: list[int] = []
-        full_wm_5x5x32x120 = torch.zeros((5, 5, 32, 120), device=self.device, dtype=torch.float32)
-        active_region_flags = [0.0, 0.0, 0.0, 0.0, 0.0]
-        cached_slot_banks: list[tuple[list[str], torch.Tensor, torch.Tensor] | None] = []
-
-        for idx_e in range(n_ents):
-            slot = stage.entities[idx_e]
-            s_key = slot.slot_id or f"e{idx_e}"
-            ctrl = self._get_controller(slot, idx_e, step_gp_channels)
-            pool_items = entity_pool_candidates[idx_e]
-            cur_st_id = entity_current_states[idx_e]
-            reg_ui_name = slot_to_reg_name.get(idx_e, "FCz")
-            reg_bus_idx, _, _, _ = ctrl._get_region_specs()
-            ctrl.pool_size_hint = max(1, len(pool_items))
-
-            if not pool_items:
-                cached_slot_banks.append(None)
-                ctrl.sample_working_memory_5x5x32x120(self.device, sub_step_frac=0.0)
-                if ctrl.latest_region_wm_5x32x120 is not None:
-                    full_wm_5x5x32x120[reg_bus_idx] = ctrl.latest_region_wm_5x32x120
-                    if float(ctrl.latest_region_wm_5x32x120.abs().max().item()) > 1e-4:
-                        active_region_flags[reg_bus_idx] = 1.0
-                steered_probe_pairs[idx_e] = empty_pair
-                entity_choice_distributions[idx_e] = {}
-                dynamic_state_labels[idx_e] = f"e{idx_e}:0"
-                self.active_concept_idx_by_region[reg_ui_name] = -1
-                self.active_concept_indices_by_region[reg_ui_name] = []
-                self.region_choice_probs[reg_ui_name] = []
-                continue
-
-            pool_ids = [item["state_id"] for item in pool_items]
-            pool_prompts = [item["probe_prompt"] for item in pool_items]
-
-            enc_pairs = [
-                self.backend.encode_semantics(p, max_len=128) for p in pool_prompts
-            ]
-            bank_K = torch.cat([ep[0] for ep in enc_pairs], dim=0)
-            masks_K = torch.cat([ep[1] for ep in enc_pairs], dim=0)
-            cached_slot_banks.append((pool_ids, bank_K, masks_K))
-
-            start_id, target_id, steered_emb, steered_mask, probs_dict, active_indices = (
-                ctrl.select_concept_full_rank_524288d(
-                    pool_ids=pool_ids,
-                    candidate_embeds_Kx128x4096=bank_K,
-                    device=self.device,
-                    current_state_id=cur_st_id,
-                    catalyst_field_128x4096=None,
-                    candidate_masks_Kx128=masks_K,
-                )
-            )
-
-            if ctrl.latest_region_wm_5x32x120 is not None:
-                full_wm_5x5x32x120[reg_bus_idx] = ctrl.latest_region_wm_5x32x120
-                slot_weights[idx_e] = 0.75 + 0.25 * math.tanh(
-                    float(torch.norm(ctrl.latest_region_wm_5x32x120).item()) * 0.05
-                )
-
-            if not active_indices:
-                steered_probe_pairs[idx_e] = (steered_emb.to(self.dtype), steered_mask)
-                entity_choice_distributions[idx_e] = probs_dict
-                self.active_concept_idx_by_region[reg_ui_name] = -1
-                self.active_concept_indices_by_region[reg_ui_name] = []
-                self.region_choice_probs[reg_ui_name] = [
-                    probs_dict.get(pid, 0.0) for pid in pool_ids
-                ]
-                dynamic_state_labels[idx_e] = f"e{idx_e}:0"
-                continue
-
-            top_idx = active_indices[0]
-            steered_probe_pairs[idx_e] = (
-                steered_emb.to(self.dtype),
-                steered_mask,
-            )
-            entity_choice_distributions[idx_e] = probs_dict
-            self.active_concept_idx_by_region[reg_ui_name] = int(top_idx)
-            self.active_concept_indices_by_region[reg_ui_name] = [
-                int(i) for i in active_indices
-            ]
-            self.region_choice_probs[reg_ui_name] = [
-                probs_dict.get(pid, 0.0) for pid in pool_ids
-            ]
-
-            self.persistent_entity_states[s_key] = pool_ids[top_idx]
-            active_driven_slots.append(idx_e)
-            active_region_flags[reg_bus_idx] = 1.0
-            if idx_e == stage.quest.active_slot_idx and start_id and start_id != target_id:
-                dynamic_state_labels[idx_e] = f"e{idx_e}:{start_id}->{target_id}"
-            else:
-                dynamic_state_labels[idx_e] = f"e{idx_e}:{target_id}"
+        (
+            steered_probe_pairs,
+            entity_choice_distributions,
+            dynamic_state_labels,
+            slot_weights,
+            active_driven_slots,
+            full_wm_5x5x32x120,
+            active_region_flags,
+            cached_slot_banks,
+        ) = self._evaluate_agents_for_step(
+            stage=stage,
+            entity_pool_candidates=entity_pool_candidates,
+            entity_current_states=entity_current_states,
+            step_gp_channels=step_gp_channels,
+            empty_pair=empty_pair,
+        )
 
         pos_emb, pos_mask = self._compose_active_pos_pair(
             active_slots=active_driven_slots,
@@ -777,9 +932,10 @@ class UniversalLatentAutobattlerEngine:
 
         matchup_tag = " | ".join(dynamic_state_labels)
         walk_in_emb, walk_in_mask = pos_emb, pos_mask
+        active_set_step = set(active_driven_slots)
 
         def _live_wm_step_fn(step_i: int, total_steps: int):
-            if self.stochastic >= 0.999:
+            if self.stochastic >= 0.999 or not active_set_step:
                 return None
             frac = float(step_i) / float(max(1, total_steps))
             live_gp = self._peek_live_gamepad_channels()
@@ -789,7 +945,7 @@ class UniversalLatentAutobattlerEngine:
             live_pairs = list(steered_probe_pairs)
             live_weights = list(slot_weights)
 
-            for idx_e in range(n_ents):
+            for idx_e in active_driven_slots:
                 slot_e = stage.entities[idx_e]
                 ctrl_e = self._get_controller(slot_e, idx_e, live_gp)
                 r_bus_idx, _, _, _ = ctrl_e._get_region_specs()
@@ -860,6 +1016,7 @@ class UniversalLatentAutobattlerEngine:
             gen=gen,
             is_continuation_block=is_cont,
             stochastic=self.stochastic,
+            unassigned_stochastic=self.unassigned_stochastic,
             wm_radius=self.wm_radius,
             base_seed=spin_seed,
             wm_5x5x32x120=full_wm_5x5x32x120,
@@ -873,7 +1030,6 @@ class UniversalLatentAutobattlerEngine:
                 ctrl_s.inject_dit_velocity_feedback(self.stepper.last_velocity_5d)
 
         tsf = int(self.backend.temporal_ratio)
-        # Чистый decode (decode_noise_scale=0.0) предотвращает накопление мыла за 300+ шагов:
         if not is_cont:
             self.local_genesis_5d = unpacked_z0[:, :, :1].detach().clone()
             clean_video_frames = self.backend.decode_latents_chunk(
@@ -902,17 +1058,25 @@ class UniversalLatentAutobattlerEngine:
             for fr in clean_video_frames:
                 self.recent_clean_frames_rgb.append(fr)
 
-            try:
-                frame0_lat = self.backend.encode_frame_to_latent(clean_video_frames[-1])
-            except Exception:
-                frame0_lat = unpacked_z0[:, :, -1:].detach().clone()
-
-            if self.context_lat_frames <= 1:
-                self.local_context_latents_5d = frame0_lat
+            req_ctx_px = 1 + max(0, self.context_lat_frames - 1) * tsf
+            avail_px = len(self.recent_clean_frames_rgb)
+            if self.context_lat_frames <= 1 or avail_px < (1 + tsf):
+                try:
+                    self.local_context_latents_5d = self.backend.encode_frame_to_latent(
+                        clean_video_frames[-1]
+                    )
+                except Exception:
+                    self.local_context_latents_5d = unpacked_z0[:, :, -1:].detach().clone()
             else:
-                # Кадр 0 — чистая causal-проекция последнего кадра, далее чистый латентный импульс:
-                extra_tail = unpacked_z0[:, :, -(self.context_lat_frames - 1) :].detach().clone()
-                self.local_context_latents_5d = torch.cat([frame0_lat, extra_tail], dim=2)
+                # Строго хронологический хвост последних 9 (ctx=2) или 17 (ctx=3) кадров через каузальный 3D-VAE:
+                use_px = min(req_ctx_px, ((avail_px - 1) // tsf) * tsf + 1)
+                ctx_frames_chron = list(self.recent_clean_frames_rgb)[-use_px:]
+                try:
+                    self.local_context_latents_5d = self.backend.encode_frames_to_latent(
+                        ctx_frames_chron
+                    )
+                except Exception:
+                    self.local_context_latents_5d = unpacked_z0[:, :, -self.context_lat_frames :].detach().clone()
         else:
             self.local_context_latents_5d = unpacked_z0[:, :, -self.context_lat_frames :].detach().clone()
 
@@ -962,7 +1126,7 @@ class UniversalLatentAutobattlerEngine:
                 "rf_t_stat": 0.0,
                 "entity_coherence_end": [100.0] * n_ents,
                 "entity_work_done": [0.0] * n_ents,
-                "transformer_physics_explanation": "SPECTRAL_96000D_S3 + KENT_T5_MANIFOLD",
+                "transformer_physics_explanation": "SPECTRAL_96000D_S3 + MULTIDIM_T5 + CAUSAL_CTX",
                 "entity_state_labels": dynamic_state_labels,
                 "entity_choice_distributions": entity_choice_distributions,
             }
@@ -1021,7 +1185,7 @@ class UniversalLatentAutobattlerEngine:
             )
             for idx_s, slot_s in enumerate(stage.entities):
                 ctrl_s = self._get_controller(slot_s, idx_s, step_gp_channels)
-                if ctrl_s.is_npc_binding():
+                if ctrl_s.is_npc_binding() and self.monty_mode != "off":
                     if idx_s == win_stage_obj.quest.catalyst_slot_idx:
                         ctrl_s.observe_oracle_feedback(abs(high_dim_ctx.oracle_advantage) + 0.25)
                     else:
@@ -1069,7 +1233,7 @@ class UniversalLatentAutobattlerEngine:
                             self.persistent_entity_states[s_key] = lbl.split("->", 1)[1].strip()
                         elif ":" in lbl:
                             val_s = lbl.split(":", 1)[1].strip()
-                            if val_s and val_s != "0":
+                            if val_s and val_s not in ("0", "IDLE", "FREE"):
                                 self.persistent_entity_states[s_key] = val_s
 
                 if (
@@ -1132,6 +1296,10 @@ class UniversalLatentAutobattlerEngine:
             "reaction_formula": stage.quest.reaction_formula,
             "driver_tag": stage.quest.driver_tag,
             "active_entities": matchup_tag,
+            "agents": list(self.latest_agents_state),
+            "is_shared_flat_lore": bool(self.is_shared_flat_lore),
+            "monty_mode": self.monty_mode,
+            "unassigned_stochastic": self.unassigned_stochastic,
             "entity_state_transitions_pct": dict(
                 zip(high_dim_ctx_dict["entity_state_labels"], self.entity_transitions)
             ),

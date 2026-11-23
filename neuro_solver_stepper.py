@@ -2,12 +2,11 @@
 """
 neuro_solver_stepper.py — Спектрально-когерентный 3D-DiT Шагатель (LTX-Video 0.9.8-Distilled + Base)
 ====================================================================================================
-- При stochastic = 1.0: 100% чистый torch.randn() без вмешательства WM (идеальная коробка из демок).
-- При stochastic = 0.0: 100% замена стохастики всеми 96,000 модами рабочей памяти через
-  128 каналов x F_lat кадров x гладкие 2D-DCT пространственные гармоники (без разрыва 32x32 патчей)
-  и детерминированно сдвигаемый индекс окна (без стоячих полос).
-- Чистый шаг по pipeline_ltx_image2video.py без 725.0-заморозки при context_latents > 1
-  и без 0.18 * delta_noise инъекций при sigma > 0.94.
+- Поддержка живого многокадрового контекста context_latents = 1, 2, 3 по канону LTXConditionPipeline:
+  хронологический префикс 0..n_cond-1 (закодированный каузальным 3D-VAE из последних 1/9/17 кадров)
+  несёт реальный импульс движения, а scheduler.step идёт строго по свободным кадрам [n_cond:].
+- Раздельная стохастика: `stochastic` для активных регионов/агентов и `unassigned_stochastic`
+  для пустых/неактивных регионов при сохранении точного N(0, I) в каждом вокселе.
 ====================================================================================================
 """
 
@@ -117,10 +116,17 @@ class LatentFlowWindowStepper:
         wm_radius: float,
         gen_rand: torch.Generator | None,
         device: torch.device,
+        unassigned_stochastic: float | None = None,
     ) -> torch.Tensor:
-        stoch = float(max(0.0, min(1.0, stochastic)))
-        # При stochastic == 1.0: 100% чистый нативный torch.randn из коробки LTX-Video!
-        if stoch >= 0.999:
+        stoch_act = float(max(0.0, min(1.0, stochastic)))
+        stoch_unass = (
+            stoch_act
+            if unassigned_stochastic is None
+            else float(max(0.0, min(1.0, unassigned_stochastic)))
+        )
+
+        # Полный режим "из коробки": чистый torch.randn()
+        if stoch_act >= 0.999 and stoch_unass >= 0.999:
             return torch.randn(shape_5d, generator=gen_rand, device=device, dtype=torch.float32)
 
         _, C, F_lat, H_lat, W_lat = shape_5d
@@ -152,7 +158,6 @@ class LatentFlowWindowStepper:
         dyn_wm = wm - self.smooth_wm_drift_5x5x32x120 * 0.85
         sig_gate = math.tanh(float(torch.norm(dyn_wm).item()) * 5.0)
 
-        # Все 96,000 мод -> 128 каналов x F_lat кадров x плавные 2D-DCT пространственные гармоники:
         dyn_5x32x600 = dyn_wm.permute(0, 2, 1, 3).reshape(5, 32, 600)
         chrono_5xFx600 = F.interpolate(
             dyn_5x32x600.transpose(1, 2), size=F_lat, mode="linear", align_corners=False
@@ -194,13 +199,15 @@ class LatentFlowWindowStepper:
         )
         l2_w5 = (raw_w / torch.norm(raw_w, p=2)).view(5, 1, 1, 1, 1)
 
-        g_wm = torch.sum(G_wm_5 * l2_w5, dim=0, keepdim=True)
-        if stoch <= 0.001:
-            return g_wm.contiguous()
+        if stoch_act <= 0.001 and stoch_unass <= 0.001:
+            return torch.sum(G_wm_5 * l2_w5, dim=0, keepdim=True).contiguous()
 
-        g_rand = torch.randn(shape_5d, generator=gen_rand, device=device, dtype=torch.float32)
-        mix_ang = stoch * (math.pi * 0.5)
-        return (math.cos(mix_ang) * g_wm + math.sin(mix_ang) * g_rand).contiguous()
+        # Раздельная стохастика для активных и пустых регионов (сохраняет точное N(0, I)):
+        reg_stoch_5 = (active_mask_t * stoch_act + (1.0 - active_mask_t) * stoch_unass).view(5, 1, 1, 1, 1)
+        angle_s_5 = reg_stoch_5 * (math.pi * 0.5)
+        G_rand_5 = torch.randn((5, C, F_lat, H_lat, W_lat), generator=gen_rand, device=device, dtype=torch.float32)
+        reg_noise_5 = torch.cos(angle_s_5) * G_wm_5 + torch.sin(angle_s_5) * G_rand_5
+        return torch.sum(reg_noise_5 * l2_w5, dim=0, keepdim=True).contiguous()
 
     @torch.no_grad()
     def run_window(
@@ -223,6 +230,7 @@ class LatentFlowWindowStepper:
         gen: torch.Generator | None = None,
         is_continuation_block: bool = False,
         stochastic: float = 0.0,
+        unassigned_stochastic: float | None = None,
         wm_radius: float = 0.35,
         base_seed: int = 42,
         wm_19200_vec: torch.Tensor | None = None,
@@ -262,26 +270,20 @@ class LatentFlowWindowStepper:
             wm_radius=wm_radius,
             gen_rand=gen,
             device=device,
+            unassigned_stochastic=unassigned_stochastic,
         )
 
         latents_5d = noise_5d.clone()
-        # Кадр 0 закреплён (conditioning_mask = 1.0), промежуточные кадры 1..n_cond-1
-        # не замораживаются на t=0 (чтобы context_latents=2 не парализовал движение!).
+        # Хронологический каузальный префикс 0..n_cond-1 закреплён как чистый видео-контекст (t_per_token = 0),
+        # передавая в 3D-DiT реальный вектор скорости движения из последних 1 / 9 / 17 кадров:
         cond_mask_5d = torch.zeros(
             (1, 1, total_lat_frames, h_lat, w_lat), device=device, dtype=torch.float32
         )
         clean_anchor_prefix_5d = None
         if is_continuation_block and anchor_latent_0 is not None and n_cond > 0:
-            clean_anchor_prefix_5d = anchor_latent_0[:, :, -n_cond:].clone().float()
-            cond_mask_5d[:, :, :1] = 1.0
-            latents_5d[:, :, :1] = clean_anchor_prefix_5d[:, :, :1]
-            if n_cond > 1:
-                for c_i in range(1, n_cond):
-                    latents_5d[:, :, c_i : c_i + 1] = torch.lerp(
-                        noise_5d[:, :, c_i : c_i + 1],
-                        clean_anchor_prefix_5d[:, :, c_i : c_i + 1],
-                        float(temporal_overlap_cond_strength),
-                    )
+            clean_anchor_prefix_5d = anchor_latent_0[:, :, :n_cond].clone().float()
+            cond_mask_5d[:, :, :n_cond] = 1.0
+            latents_5d[:, :, :n_cond] = clean_anchor_prefix_5d
 
         conditioning_mask = pipe._pack_latents(cond_mask_5d, 1, 1).squeeze(-1).to(device)
         conditioning_mask_b2 = (
@@ -321,21 +323,25 @@ class LatentFlowWindowStepper:
                 if fresh_pos is not None and fresh_pos.shape == curr_pos_emb.shape:
                     curr_pos_emb = (curr_pos_emb.float() * 0.65 + fresh_pos.float() * 0.35).to(dtype)
 
-            # На входе в DiT кадр 0 фиксирован чистым (либо с минимальным t^2 джиттером для непрерывности движения)
+            # LTXConditionPipeline: мягкий t^2 джиттер на префиксе 0..n_cond-1 (исключает залипание движения при ctx=2,3)
             step_latents_5d = latents_5d
             if is_continuation_block and n_cond > 0 and clean_anchor_prefix_5d is not None:
-                if self.image_cond_noise_scale > 0.0 and sigma_cur > 0.50:
+                eff_cond_noise = (
+                    max(self.image_cond_noise_scale, 0.08)
+                    if n_cond > 1
+                    else self.image_cond_noise_scale
+                )
+                if eff_cond_noise > 0.0 and sigma_cur > 0.50:
                     t_norm = float(t.item()) / 1000.0
                     jit = torch.randn(
-                        clean_anchor_prefix_5d[:, :, :1].shape,
+                        clean_anchor_prefix_5d.shape,
                         generator=gen,
                         device=device,
                         dtype=torch.float32,
                     )
                     step_latents_5d = latents_5d.clone()
-                    step_latents_5d[:, :, :1] = (
-                        clean_anchor_prefix_5d[:, :, :1]
-                        + self.image_cond_noise_scale * jit * (t_norm ** 2)
+                    step_latents_5d[:, :, :n_cond] = (
+                        clean_anchor_prefix_5d + eff_cond_noise * jit * (t_norm ** 2)
                     )
 
             latents_packed = pipe._pack_latents(step_latents_5d, 1, 1)
@@ -378,23 +384,15 @@ class LatentFlowWindowStepper:
                 noise_pred_final, total_lat_frames, h_lat, w_lat, 1, 1
             ).float()
 
-            # Канон pipeline_ltx_image2video.py:665 — шагаем ТОЛЬКО по свободным кадрам [1:]!
+            # Шагаем СТРОГО по свободным будущим кадрам [n_cond:], сохраняя чистый хронологический префикс [:n_cond]:
             if is_continuation_block and n_cond > 0 and clean_anchor_prefix_5d is not None:
                 pred_gen_5d = self.backend.scheduler.step(
-                    noise_pred_5d[:, :, 1:],
+                    noise_pred_5d[:, :, n_cond:],
                     t,
-                    latents_5d[:, :, 1:],
+                    latents_5d[:, :, n_cond:],
                     return_dict=False,
                 )[0].float()
-                latents_5d = torch.cat([clean_anchor_prefix_5d[:, :, :1], pred_gen_5d], dim=2)
-
-                # Мягкое удержание инерции для context_latents > 1 без заморозки движения:
-                if n_cond > 1 and sigma_cur > 0.90:
-                    latents_5d[:, :, 1:n_cond] = torch.lerp(
-                        latents_5d[:, :, 1:n_cond],
-                        clean_anchor_prefix_5d[:, :, 1:n_cond],
-                        0.25,
-                    )
+                latents_5d = torch.cat([clean_anchor_prefix_5d, pred_gen_5d], dim=2)
             else:
                 latents_5d = self.backend.scheduler.step(
                     noise_pred_5d,
