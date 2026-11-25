@@ -15,6 +15,21 @@ const GAMEPAD_CHANNEL_OPTIONS = [
     "L3", "R3", "BACK", "START"
 ];
 
+const AGENT_BINDING_OPTIONS = [
+    { val: "eeg:FCz", label: "🧠 EEG: FCz (Действия)" },
+    { val: "eeg:AFz", label: "🧠 EEG: AFz (Макро)" },
+    { val: "eeg:F3",  label: "🧠 EEG: F3 (Форма)" },
+    { val: "eeg:F4",  label: "🧠 EEG: F4 (Стиль)" },
+    { val: "eeg:Fpz", label: "🧠 EEG: Fpz (Контекст)" },
+    { val: "npc:FCz", label: "🤖 NPC/Monty: FCz" },
+    { val: "npc:AFz", label: "🤖 NPC/Monty: AFz" },
+    { val: "npc:F3",  label: "🤖 NPC/Monty: F3" },
+    { val: "npc:F4",  label: "🤖 NPC/Monty: F4" },
+    { val: "npc:Fpz", label: "🤖 NPC/Monty: Fpz" },
+    { val: "gamepad", label: "🎮 Только Геймпад" },
+    { val: "off",     label: "🚫 ВЫКЛ (Не шлёт концепты)" }
+];
+
 function calcUvScale(gain) {
     return (1.2 / parseFloat(gain) / 8388607.0) * 1e6;
 }
@@ -39,6 +54,9 @@ let clientDroppedFrames = 0;
 let cachedVideoSections = {
     FPZ: [], AFZ: [], F3: [], F4: [], FCZ: [], NEGATIVE: []
 };
+let cachedAgents = [];
+let selectedAgentSlotId = "e0";
+let isSharedFlatLore = false;
 let cachedActiveConceptIdx = { Fpz: 0, AFz: 0, F3: 0, F4: 0, FCz: 0 };
 let cachedActiveConceptIndices = { Fpz: [0], AFz: [0], F3: [0], F4: [0], FCz: [0] };
 let cachedRegionChoiceProbs = { Fpz: [], AFz: [], F3: [], F4: [], FCz: [] };
@@ -52,7 +70,7 @@ let cachedConceptBindings = {
 
 let eegWmGainVal = 1.0;
 let gamepadWmMixVal = 1.0;
-let learningBindTarget = null; // { regKey: "FCZ", idx: 0 }
+let learningBindTarget = null;
 let keyboardVirtualChannels = {};
 let lastSentGamepadJson = "";
 
@@ -167,7 +185,6 @@ const dom = {
     conceptChipTemplate: document.getElementById('conceptChipTemplate')
 };
 
-// Динамически создаем виджет градуального микшера (EEG WM × Gamepad WM Agent) в панели 3D-DiT:
 let domEegGainSlider = null;
 let domEegGainTxt = null;
 let domGpMixSlider = null;
@@ -175,7 +192,8 @@ let domGpMixTxt = null;
 let domGpStatusTxt = null;
 
 function mountGradualWmMixerUI() {
-    if (!dom.videoRegionSelect || document.getElementById('gradualWmMixerBox')) return;
+    const anchor = document.getElementById('agentManagerHeader') || dom.videoRegionSelect;
+    if (!anchor || document.getElementById('gradualWmMixerBox')) return;
     const box = document.createElement('div');
     box.id = 'gradualWmMixerBox';
     box.style.cssText = 'background:#111c30; border:1px solid #38bdf8; border-radius:6px; padding:8px; margin-top:8px;';
@@ -201,11 +219,11 @@ function mountGradualWmMixerUI() {
             </div>
         </div>
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-            <span style="font-size:9px; color:#94a3b8;">💡 Нажмите <b>🎯</b> на концепте и отклоните стик/кнопку геймпада (или зажмите 2 оси для диагонали)</span>
-            <button type="button" class="btn btn-red" id="btnClearRegionConcepts" style="width:auto; padding:3px 8px; font-size:9px;">🧹 Очистить регион (Свободный дрейф)</button>
+            <span style="font-size:9px; color:#94a3b8;">💡 Нажмите <b>🎯</b> на концепте и отклоните стик/кнопку геймпада</span>
+            <button type="button" class="btn btn-red" id="btnClearRegionConcepts" style="width:auto; padding:3px 8px; font-size:9px;">🧹 Очистить пул (Пустой промпт)</button>
         </div>
     `;
-    dom.videoRegionSelect.parentNode.insertBefore(box, dom.videoRegionSelect);
+    anchor.parentNode.insertBefore(box, anchor);
 
     domEegGainSlider = document.getElementById('eegWmGainSlider');
     domEegGainTxt = document.getElementById('eegWmGainTxt');
@@ -252,17 +270,17 @@ function mountGradualWmMixerUI() {
         sendGamepadAndMixerState(true);
     });
     document.getElementById('btnClearRegionConcepts').addEventListener('click', async () => {
-        const regKey = dom.videoRegionSelect.value.toUpperCase();
-        const res = await fetch('/api/video/region_concepts', {
+        const chkAll = document.getElementById('chkApplyAllAgents');
+        const applyAll = chkAll ? chkAll.checked : isSharedFlatLore;
+        await fetch('/api/video/agent_concepts', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ region: regKey, action: 'clear' })
+            body: JSON.stringify({
+                slot_id: selectedAgentSlotId,
+                action: 'clear',
+                apply_all: applyAll
+            })
         });
-        const d = await res.json();
-        if (d.sections) {
-            cachedVideoSections = d.sections;
-            renderSelectedVideoRegionConcepts();
-        }
     });
 }
 
@@ -306,7 +324,6 @@ function pollGamepadChannels24() {
         if (bVal(15) > 0.1) ch.DPAD_RIGHT = Math.max(ch.DPAD_RIGHT || 0, bVal(15));
     }
 
-    // Если активен режим обучения бинда ("🎯"): ловим нажатые оси/кнопки > 0.55!
     if (learningBindTarget) {
         const pressedKeys = Object.entries(ch)
             .filter(([_, v]) => v > 0.55)
@@ -361,7 +378,6 @@ function sendGamepadAndMixerState(force = false) {
     }).catch(() => {});
 }
 
-// Поддержка клавиш WASD / Стрелок когда фокус не в поле ввода текста:
 window.addEventListener('keydown', (e) => {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
     const keyMap = {
@@ -618,24 +634,127 @@ async function writeAndVerifyGain(devObj, targetGain, maxRetries = 8) {
     return false;
 }
 
-function renderSelectedVideoRegionConcepts() {
-    if (!dom.videoRegionSelect || !dom.videoRegionConceptList) return;
-    if (document.activeElement && document.activeElement.classList.contains('gp-bind-select')) {
-        return; // Не перерисовываем пока открыт выпадающий список бинда
+function renderAgentManager() {
+    const box = document.getElementById('agentManagerList');
+    if (!box) return;
+    if (document.activeElement && document.activeElement.classList.contains('agent-bind-select')) {
+        return;
     }
-    const regKey = dom.videoRegionSelect.value.toUpperCase();
-    const list = cachedVideoSections[regKey] || [];
-    const roleMap = { FPZ: "Fpz", AFZ: "AFz", F3: "F3", F4: "F4", FCZ: "FCz" };
-    const roleName = roleMap[regKey] || "FCz";
-    const activeIndices = cachedActiveConceptIndices[roleName] || [cachedActiveConceptIdx[roleName] || 0];
-    const probsList = cachedRegionChoiceProbs[roleName] || [];
+
+    if (!cachedAgents || cachedAgents.length === 0) {
+        box.innerHTML = '<span class="empty-concepts">Ожидание списка агентов от 3D-DiT...</span>';
+        return;
+    }
+
+    if (!cachedAgents.some(a => a.slot_id === selectedAgentSlotId) && selectedAgentSlotId !== "NEGATIVE") {
+        selectedAgentSlotId = cachedAgents[0].slot_id;
+    }
+
+    box.replaceChildren();
+    cachedAgents.forEach(ag => {
+        const row = document.createElement('div');
+        const isSel = (ag.slot_id === selectedAgentSlotId);
+        row.style.cssText = `display:flex; align-items:center; gap:4px; padding:4px 6px; border-radius:4px; cursor:pointer; background:${isSel ? '#172842' : '#0d1524'}; border:1px solid ${isSel ? '#fbbf24' : (ag.active ? '#059669' : '#334155')};`;
+
+        const badge = document.createElement('span');
+        badge.style.cssText = `font-size:10px; font-weight:bold; min-width:58px; color:${ag.active ? '#00ffc8' : '#64748b'};`;
+        badge.textContent = `${ag.active ? '🟢' : '⏸️'} ${ag.slot_id} (${(ag.concepts || []).length})`;
+        badge.title = `${ag.source_tag || ag.binding}`;
+        row.appendChild(badge);
+
+        const sel = document.createElement('select');
+        sel.className = 'agent-bind-select';
+        sel.style.cssText = 'flex:1; padding:2px 4px; font-size:10px; background:#030712; color:#e2e8f0; border:1px solid #334155;';
+        let hasCur = false;
+        AGENT_BINDING_OPTIONS.forEach(o => {
+            const opt = document.createElement('option');
+            opt.value = o.val;
+            opt.textContent = o.label;
+            if (o.val.toLowerCase() === (ag.binding || '').toLowerCase()) {
+                opt.selected = true;
+                hasCur = true;
+            }
+            sel.appendChild(opt);
+        });
+        if (!hasCur && ag.binding) {
+            const opt = document.createElement('option');
+            opt.value = ag.binding;
+            opt.textContent = ag.binding;
+            opt.selected = true;
+            sel.appendChild(opt);
+        }
+        sel.addEventListener('click', e => e.stopPropagation());
+        sel.addEventListener('change', async () => {
+            await fetch('/api/video/agent_manage', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ action: 'set_binding', slot_id: ag.slot_id, binding: sel.value })
+            });
+        });
+        row.appendChild(sel);
+
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.textContent = '✕';
+        delBtn.title = `Удалить агента ${ag.slot_id}`;
+        delBtn.style.cssText = 'background:none; border:none; color:#f43f5e; cursor:pointer; font-weight:bold; padding:0 4px;';
+        delBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await fetch('/api/video/agent_manage', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ action: 'remove_agent', slot_id: ag.slot_id })
+            });
+        });
+        if (cachedAgents.length > 1) row.appendChild(delBtn);
+
+        row.addEventListener('click', () => {
+            selectedAgentSlotId = ag.slot_id;
+            renderAgentManager();
+            renderSelectedVideoRegionConcepts();
+        });
+        box.appendChild(row);
+    });
+}
+
+function renderSelectedVideoRegionConcepts() {
+    if (!dom.videoRegionConceptList) return;
+    if (document.activeElement && document.activeElement.classList.contains('gp-bind-select')) {
+        return;
+    }
+
+    const lbl = document.getElementById('selectedAgentLabel');
+    const ag = cachedAgents.find(a => a.slot_id === selectedAgentSlotId) || cachedAgents[0];
+
+    let list = [];
+    let activeIndices = [];
+    let probsList = [];
+    let regKey = "FCZ";
+    let tagPrefix = "FCZ";
+
+    if (ag) {
+        selectedAgentSlotId = ag.slot_id;
+        list = ag.concepts || [];
+        activeIndices = ag.active_indices || [];
+        probsList = ag.probs || [];
+        regKey = (ag.region || "FCZ").toUpperCase();
+        tagPrefix = ag.slot_id;
+        if (lbl) {
+            lbl.textContent = `${ag.slot_id} [${ag.source_tag || ag.binding}]`;
+            lbl.style.color = ag.active ? '#00ffc8' : '#94a3b8';
+        }
+    } else {
+        list = cachedVideoSections["FCZ"] || [];
+        if (lbl) lbl.textContent = "FCZ";
+    }
+
     const regBinds = cachedConceptBindings[regKey] || [];
 
     dom.videoRegionConceptList.replaceChildren();
     if (list.length === 0) {
         const empty = document.createElement('span');
         empty.className = 'empty-concepts';
-        empty.textContent = `В регионе [${regKey}] нет концептов -> Активен СВОБОДНЫЙ ЛАТЕНТНЫЙ ДРЕЙФ (S³)`;
+        empty.textContent = `У агента [${tagPrefix}] нет концептов -> при очистке всех активен свободный EOS-конус`;
         dom.videoRegionConceptList.appendChild(empty);
         return;
     }
@@ -643,20 +762,18 @@ function renderSelectedVideoRegionConcepts() {
     list.forEach((c, idx) => {
         const clone = dom.conceptChipTemplate.content.cloneNode(true);
         const chip = clone.querySelector('.concept-chip');
-        const isActive = activeIndices.includes(idx);
+        const isActive = (ag ? ag.active : true) && activeIndices.includes(idx);
         if (isActive) {
             chip.classList.add('video-active');
         }
-        const pct = probsList[idx] !== undefined ? ` | ${Math.round(probsList[idx])}%` : '';
+        const pct = (ag && ag.active && probsList[idx] !== undefined) ? ` | ${Math.round(probsList[idx])}%` : '';
         const txt = chip.querySelector('.concept-text');
-        txt.textContent = `${isActive ? '★ ' : '○ '}[${regKey}#${idx + 1}${pct}] ${c.length > 34 ? c.slice(0, 34) + '…' : c}`;
+        txt.textContent = `${isActive ? '★ ' : '○ '}[${tagPrefix}#${idx + 1}${pct}] ${c.length > 34 ? c.slice(0, 34) + '…' : c}`;
         txt.title = c;
         txt.style.cursor = 'pointer';
 
-        // При удержании мыши на тексте чипа — возбуждается его мода рабочей памяти!
         const curBind = regBinds[idx] || "NONE";
         txt.addEventListener('mousedown', () => {
-            const bKey = (curBind !== "NONE") ? curBind.split("+")[0] : `MANUAL_${regKey}_${idx}`;
             if (curBind === "NONE") {
                 if (!cachedConceptBindings[regKey]) cachedConceptBindings[regKey] = [];
                 cachedConceptBindings[regKey][idx] = "BTN_A";
@@ -670,77 +787,75 @@ function renderSelectedVideoRegionConcepts() {
             sendGamepadAndMixerState(true);
         });
 
-        // Выпадающий список полуоси/кнопки геймпада для этого концепта:
-        if (regKey !== "NEGATIVE") {
-            const sel = document.createElement('select');
-            sel.className = 'gp-bind-select';
-            sel.style.cssText = 'width:auto; padding:1px 3px; font-size:9px; margin-right:3px; background:#091326; color:#38bdf8; border:1px solid #334155;';
-            const opts = GAMEPAD_CHANNEL_OPTIONS.includes(curBind)
-                ? GAMEPAD_CHANNEL_OPTIONS
-                : [curBind, ...GAMEPAD_CHANNEL_OPTIONS];
-            opts.forEach(optVal => {
-                const o = document.createElement('option');
-                o.value = optVal;
-                o.textContent = optVal === "NONE" ? "🎮 Нет бинда" : `🎮 ${optVal}`;
-                if (optVal === curBind) o.selected = true;
-                sel.appendChild(o);
-            });
-            sel.addEventListener('change', () => {
-                if (!cachedConceptBindings[regKey]) cachedConceptBindings[regKey] = [];
-                cachedConceptBindings[regKey][idx] = sel.value;
-                sendGamepadAndMixerState(true);
-            });
+        const sel = document.createElement('select');
+        sel.className = 'gp-bind-select';
+        sel.style.cssText = 'width:auto; padding:1px 3px; font-size:9px; margin-right:3px; background:#091326; color:#38bdf8; border:1px solid #334155;';
+        const opts = GAMEPAD_CHANNEL_OPTIONS.includes(curBind)
+            ? GAMEPAD_CHANNEL_OPTIONS
+            : [curBind, ...GAMEPAD_CHANNEL_OPTIONS];
+        opts.forEach(optVal => {
+            const o = document.createElement('option');
+            o.value = optVal;
+            o.textContent = optVal === "NONE" ? "🎮 Нет" : `🎮 ${optVal}`;
+            if (optVal === curBind) o.selected = true;
+            sel.appendChild(o);
+        });
+        sel.addEventListener('change', () => {
+            if (!cachedConceptBindings[regKey]) cachedConceptBindings[regKey] = [];
+            cachedConceptBindings[regKey][idx] = sel.value;
+            sendGamepadAndMixerState(true);
+        });
 
-            const learnBtn = document.createElement('button');
-            learnBtn.type = 'button';
-            learnBtn.textContent = (learningBindTarget && learningBindTarget.regKey === regKey && learningBindTarget.idx === idx) ? '⏳' : '🎯';
-            learnBtn.title = 'Кликните и отклоните любую полуось/кнопку на геймпаде (или 2 оси для диагонали)';
-            learnBtn.style.cssText = 'color:#fbbf24; font-size:10px; margin-right:3px; padding:0 2px;';
-            learnBtn.addEventListener('click', () => {
-                learningBindTarget = { regKey, idx };
-                renderSelectedVideoRegionConcepts();
-            });
-
-            const rmBtn = chip.querySelector('.concept-remove-btn');
-            chip.insertBefore(sel, rmBtn);
-            chip.insertBefore(learnBtn, rmBtn);
-        }
+        const learnBtn = document.createElement('button');
+        learnBtn.type = 'button';
+        learnBtn.textContent = (learningBindTarget && learningBindTarget.regKey === regKey && learningBindTarget.idx === idx) ? '⏳' : '🎯';
+        learnBtn.title = 'Кликните и отклоните любую полуось/кнопку на геймпаде';
+        learnBtn.style.cssText = 'color:#fbbf24; font-size:10px; margin-right:3px; padding:0 2px;';
+        learnBtn.addEventListener('click', () => {
+            learningBindTarget = { regKey, idx };
+            renderSelectedVideoRegionConcepts();
+        });
 
         const rmBtn = chip.querySelector('.concept-remove-btn');
-        rmBtn.addEventListener('click', () => removeVideoRegionConcept(regKey, c));
+        chip.insertBefore(sel, rmBtn);
+        chip.insertBefore(learnBtn, rmBtn);
+        rmBtn.addEventListener('click', () => removeVideoRegionConcept(selectedAgentSlotId, c));
 
         dom.videoRegionConceptList.appendChild(chip);
     });
 }
 
 async function addVideoRegionConcept() {
-    const regKey = dom.videoRegionSelect.value.toUpperCase();
     const val = dom.newVideoRegionInput.value.trim();
     if (!val) return;
-    const res = await fetch('/api/video/region_concepts', {
+    const chkAll = document.getElementById('chkApplyAllAgents');
+    const applyAll = chkAll ? chkAll.checked : isSharedFlatLore;
+    await fetch('/api/video/agent_concepts', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ region: regKey, action: 'add', concept: val })
+        body: JSON.stringify({
+            slot_id: selectedAgentSlotId,
+            action: 'add',
+            concept: val,
+            apply_all: applyAll
+        })
     });
-    const d = await res.json();
     dom.newVideoRegionInput.value = '';
-    if (d.sections) {
-        cachedVideoSections = d.sections;
-        renderSelectedVideoRegionConcepts();
-    }
 }
 
-async function removeVideoRegionConcept(regKey, conceptStr) {
-    const res = await fetch('/api/video/region_concepts', {
+async function removeVideoRegionConcept(slotId, conceptStr) {
+    const chkAll = document.getElementById('chkApplyAllAgents');
+    const applyAll = chkAll ? chkAll.checked : isSharedFlatLore;
+    await fetch('/api/video/agent_concepts', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ region: regKey, action: 'remove', concept: conceptStr })
+        body: JSON.stringify({
+            slot_id: slotId,
+            action: 'remove',
+            concept: conceptStr,
+            apply_all: applyAll
+        })
     });
-    const d = await res.json();
-    if (d.sections) {
-        cachedVideoSections = d.sections;
-        renderSelectedVideoRegionConcepts();
-    }
 }
 
 async function switchVideoLoreFile() {
@@ -766,9 +881,9 @@ async function resetVideoGenesis() {
 }
 
 const VIDEO_PRESETS = {
-    meditation: { wmRadius: 0.08, stoch: 0.00, ctxLat: 2, stepLat: 1, steps: 6, cfg: 2.8 },
-    balanced:   { wmRadius: 0.35, stoch: 0.00, ctxLat: 1, stepLat: 2, steps: 6, cfg: 3.2 },
-    dynamic:    { wmRadius: 0.65, stoch: 0.00, ctxLat: 1, stepLat: 2, steps: 6, cfg: 3.6 }
+    meditation: { wmRadius: 0.08, stoch: 0.00, ctxLat: 2, stepLat: 1, steps: 8, cfg: 1.0 },
+    balanced:   { wmRadius: 0.35, stoch: 0.00, ctxLat: 1, stepLat: 2, steps: 8, cfg: 1.0 },
+    dynamic:    { wmRadius: 0.65, stoch: 0.00, ctxLat: 1, stepLat: 2, steps: 8, cfg: 1.5 }
 };
 
 function applyVideoPreset(presetKey) {
@@ -794,8 +909,8 @@ async function updateVideoTransformerConfig(sourceEl = null, presetOverride = 'c
     const vStoch = Number.isNaN(rawVStoch) ? 0.0 : Math.max(0.0, Math.min(1.0, rawVStoch));
     if (dom.vStochVal) dom.vStochVal.textContent = vStoch.toFixed(2);
 
-    const rawVUnass = parseFloat(dom.vUnassignedStochastic ? dom.vUnassignedStochastic.value : 1.0);
-    const vUnassStoch = Number.isNaN(rawVUnass) ? 1.0 : Math.max(0.0, Math.min(1.0, rawVUnass));
+    const rawVUnass = parseFloat(dom.vUnassignedStochastic ? dom.vUnassignedStochastic.value : 0.0);
+    const vUnassStoch = Number.isNaN(rawVUnass) ? 0.0 : Math.max(0.0, Math.min(1.0, rawVUnass));
     if (dom.vUnassStochVal) dom.vUnassStochVal.textContent = vUnassStoch.toFixed(2);
 
     let vRad = 0.35;
@@ -813,8 +928,8 @@ async function updateVideoTransformerConfig(sourceEl = null, presetOverride = 'c
     const hudMode = dom.vHudMode ? dom.vHudMode.value : "minimal";
     const stepLat = dom.vStepLatents ? (parseInt(dom.vStepLatents.value) || 2) : 2;
     const ctxLat = dom.vContextLatents ? (parseInt(dom.vContextLatents.value) || 1) : 1;
-    const steps = dom.vSteps ? (parseInt(dom.vSteps.value) || 6) : 6;
-    const cfgScale = dom.vCfgScale ? (parseFloat(dom.vCfgScale.value) || 3.2) : 3.2;
+    const steps = dom.vSteps ? (parseInt(dom.vSteps.value) || 8) : 8;
+    const cfgScale = dom.vCfgScale ? (parseFloat(dom.vCfgScale.value) || 1.0) : 1.0;
 
     const payload = {
         preset: presetOverride,
@@ -954,7 +1069,7 @@ function onManualParamChange(presetOverride = 'custom') {
 
     const res = dom.diffResolution ? dom.diffResolution.value : "512x384";
     const useTaesd = dom.diffTaesd ? (dom.diffTaesd.value === "1") : true;
-    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
+    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "off";
 
     const rawRad = parseFloat(dom.diffWmRadius ? dom.diffWmRadius.value : 0.15);
     const wmRadius = Number.isNaN(rawRad) ? 0.15 : Math.max(0.02, Math.min(0.80, rawRad));
@@ -1015,6 +1130,14 @@ sse.addEventListener('state', (e) => {
         if (v.sections) {
             cachedVideoSections = v.sections;
         }
+        if (Array.isArray(v.agents)) {
+            cachedAgents = v.agents;
+        }
+        if (v.is_shared_flat_lore !== undefined && v.is_shared_flat_lore !== isSharedFlatLore) {
+            isSharedFlatLore = !!v.is_shared_flat_lore;
+            const chkAll = document.getElementById('chkApplyAllAgents');
+            if (chkAll) chkAll.checked = isSharedFlatLore;
+        }
         if (v.active_concept_idx) {
             cachedActiveConceptIdx = v.active_concept_idx;
         }
@@ -1027,6 +1150,7 @@ sse.addEventListener('state', (e) => {
         if (v.concept_bindings && !learningBindTarget) {
             cachedConceptBindings = v.concept_bindings;
         }
+        renderAgentManager();
         renderSelectedVideoRegionConcepts();
 
         if (domEegGainSlider && document.activeElement !== domEegGainSlider && v.eeg_wm_gain !== undefined) {
@@ -1047,7 +1171,7 @@ sse.addEventListener('state', (e) => {
                 v.available_lores.forEach(pathStr => {
                     const opt = document.createElement('option');
                     opt.value = pathStr;
-                    opt.textContent = pathStr ? pathStr : '[Пусто — Свободный 524,288-D дрейф без лор-файла]';
+                    opt.textContent = pathStr ? pathStr : '[Пусто — Свободный безусловный EOS-конус без лора]';
                     dom.videoLoreSelect.appendChild(opt);
                 });
             }
@@ -1063,6 +1187,9 @@ sse.addEventListener('state', (e) => {
         if (dom.fpzPsiTxt) dom.fpzPsiTxt.textContent = `${psiPct}%`;
         if (dom.fpzPsiBar) dom.fpzPsiBar.style.width = `${psiPct}%`;
 
+        if (dom.montyModeSelect && document.activeElement !== dom.montyModeSelect && v.monty_mode) {
+            dom.montyModeSelect.value = v.monty_mode;
+        }
         if (dom.vStochastic && document.activeElement !== dom.vStochastic && v.stochastic !== undefined) {
             dom.vStochastic.value = v.stochastic;
             if (dom.vStochVal) dom.vStochVal.textContent = parseFloat(v.stochastic).toFixed(2);
@@ -1092,22 +1219,6 @@ sse.addEventListener('state', (e) => {
         }
         if (dom.vCfgScale && document.activeElement !== dom.vCfgScale && v.cfg_scale) {
             dom.vCfgScale.value = v.cfg_scale;
-        }
-
-        if (v.region_gains) {
-            if (dom.vGainFpz && document.activeElement !== dom.vGainFpz) dom.vGainFpz.value = v.region_gains.Fpz ?? 0.06;
-            if (dom.vGainAfz && document.activeElement !== dom.vGainAfz) dom.vGainAfz.value = v.region_gains.AFz ?? 0.08;
-            if (dom.vGainF3  && document.activeElement !== dom.vGainF3)  dom.vGainF3.value  = v.region_gains.F3  ?? 0.08;
-            if (dom.vGainF4  && document.activeElement !== dom.vGainF4)  dom.vGainF4.value  = v.region_gains.F4  ?? 0.10;
-            if (dom.vGainFcz && document.activeElement !== dom.vGainFcz) dom.vGainFcz.value = v.region_gains.FCz ?? 0.92;
-        }
-
-        if (v.active_region_mask) {
-            if (dom.vBoxFpz) dom.vBoxFpz.classList.toggle('user-on', !!v.active_region_mask.Fpz);
-            if (dom.vBoxAfz) dom.vBoxAfz.classList.toggle('user-on', !!v.active_region_mask.AFz);
-            if (dom.vBoxF3)  dom.vBoxF3.classList.toggle('user-on',  !!v.active_region_mask.F3);
-            if (dom.vBoxF4)  dom.vBoxF4.classList.toggle('user-on',  !!v.active_region_mask.F4);
-            if (dom.vBoxFcz) dom.vBoxFcz.classList.toggle('user-on', !!v.active_region_mask.FCz);
         }
 
         if (dom.videoLagStatus) {
@@ -1385,12 +1496,12 @@ function createDeviceCardDOM(devObj) {
 
     roleSelect.addEventListener('change', () => {
         devObj.role = roleSelect.value;
-        if (dom.videoRegionSelect) {
-            const rUp = devObj.role.toUpperCase();
-            if (["FPZ", "AFZ", "F3", "F4", "FCZ"].includes(rUp)) {
-                dom.videoRegionSelect.value = rUp;
-                renderSelectedVideoRegionConcepts();
-            }
+        const rUp = devObj.role.toUpperCase();
+        const matchAg = cachedAgents.find(a => (a.region || '').toUpperCase() === rUp);
+        if (matchAg) {
+            selectedAgentSlotId = matchAg.slot_id;
+            renderAgentManager();
+            renderSelectedVideoRegionConcepts();
         }
         notifyDeviceMapping(devObj);
     });
@@ -1588,7 +1699,6 @@ setInterval(() => {
     });
 }, 1000);
 
-// Опрос 24 каналов геймпада с частотой 15 Гц (отправляет запрос только при реальном изменении осей!):
 setInterval(() => {
     sendGamepadAndMixerState(false);
 }, 65);
@@ -1688,7 +1798,7 @@ async function updateMusicConfig() {
     const mUnassStoch = Number.isNaN(rawMUnassStoch) ? 1.0 : Math.max(0.0, Math.min(1.0, rawMUnassStoch));
     if (dom.mUnassStochVal) dom.mUnassStochVal.textContent = mUnassStoch.toFixed(2);
 
-    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "missing_only";
+    const mMode = dom.montyModeSelect ? dom.montyModeSelect.value : "off";
 
     const rawMRad = parseFloat(dom.mWmRadius ? dom.mWmRadius.value : 0.15);
     const mWmRadius = Number.isNaN(rawMRad) ? 0.15 : Math.max(0.02, Math.min(0.80, rawMRad));
@@ -1744,6 +1854,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     document.getElementById('btnUploadInitImage')?.addEventListener('click', uploadVideoInitImage);
     document.getElementById('btnClearInitImage')?.addEventListener('click', clearVideoInitImage);
+    document.getElementById('btnAddAgent')?.addEventListener('click', async () => {
+        await fetch('/api/video/agent_manage', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ action: 'add_agent', binding: 'npc:AFz' })
+        });
+    });
+
     if (dom.videoLoreSelect) {
         dom.videoLoreSelect.addEventListener('change', switchVideoLoreFile);
     }
@@ -1846,12 +1964,20 @@ window.addEventListener('DOMContentLoaded', async () => {
         const dVid = await rVid.json();
         renderVisionConcepts(dV.concepts || []);
         renderMusicConcepts(dM.concepts || []);
-        if (dVid && dVid.sections) {
-            cachedVideoSections = dVid.sections;
+        if (dVid) {
+            if (dVid.sections) cachedVideoSections = dVid.sections;
+            if (Array.isArray(dVid.agents)) cachedAgents = dVid.agents;
+            if (dVid.is_shared_flat_lore !== undefined) {
+                isSharedFlatLore = !!dVid.is_shared_flat_lore;
+                const chkAll = document.getElementById('chkApplyAllAgents');
+                if (chkAll) chkAll.checked = isSharedFlatLore;
+            }
             if (dVid.concept_bindings) cachedConceptBindings = dVid.concept_bindings;
+            renderAgentManager();
             renderSelectedVideoRegionConcepts();
         }
     } catch (err) {
         console.error("Ошибка начальной загрузки:", err);
     }
 });
+

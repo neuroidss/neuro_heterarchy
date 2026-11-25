@@ -239,11 +239,11 @@
 
             <div class="panel">
                 <h3>🪜 Режим Колонки Монти & Межрегиональная Гетерархия</h3>
-                <label>Участие колонок Монти (SDR):</label>
+                <label>Участие колонок Монти / Автономных Ботов (NPC):</label>
                 <select id="montyModeSelect">
-                    <option value="off" selected>🚫 ВЫКЛ (--no-monty: 100% Чистая полноранговая рабочая память)</option>
-                    <option value="missing_only">⚡ Оператор пустых регионов (На девайсах — чистая рабочая память)</option>
-                    <option value="full">🧠 Полный Монти на всех 5 регионах</option>
+                    <option value="off" selected>🚫 ВЫКЛ (--no-monty: Только активные регионы юзера)</option>
+                    <option value="missing_only">⚡ Оператор пустых регионов & NPC-ботов</option>
+                    <option value="full">🧠 Полный Монти & Боты на всех агентах</option>
                 </select>
 
                 <label class="mt-6">Ступень разморозки регионов (Лестница обучения):</label>
@@ -259,7 +259,7 @@
             </div>
 
             <div class="panel panel-video">
-                <h3 style="color:#00ffc8;">🎬 3D-DiT Видео-Мир (Гетерархия Катализаторов & 524,288-D Рабочая Память)</h3>
+                <h3 style="color:#00ffc8;">🎬 3D-DiT Видео-Мир (Менеджер Агентов & 96,000-D Рабочая Память)</h3>
                 <div id="videoLagStatus" class="lag-status">
                     3D-DiT: Ожидание подключения порта 6007...
                 </div>
@@ -312,31 +312,37 @@
                 </div>
                 
                 <div class="mt-6">
-                    <label>🧭 Радиус области концепта 3D-DiT (0.05 = Жесткая фиксация | 0.35 = Живой морфинг | 0.75 = Ураган S³): <b id="vWmRadiusVal" style="color:#fbbf24;">0.35</b></label>
+                    <label>🧭 Радиус области концепта 3D-DiT (0.05 = Фиксация | 0.35 = Морфинг | 0.75 = Ураган S³): <b id="vWmRadiusVal" style="color:#fbbf24;">0.35</b></label>
                     <input type="range" id="vWmRadius" min="0.02" max="0.85" step="0.02" value="0.35">
                 </div>
                 <div class="mt-4">
-                    <label>🎯 Стохастика 3D-DiT (0.00 = 100% Управление из Рабочей Памяти | 1.00 = Случайный дрейф): <b id="vStochVal" style="color:#00ffc8;">0.00</b></label>
+                    <label>🎯 Стохастика Активных Агентов 3D-DiT (0.00 = 100% Рабочая Память | 1.00 = Коробка LTX): <b id="vStochVal" style="color:#00ffc8;">0.00</b></label>
                     <input type="range" id="vStochastic" min="0" max="1" step="0.05" value="0.00">
                 </div>
-                <div class="mt-4" style="display:none;">
-                    <label>🌌 Стохастика Пустых Регионов: <b id="vUnassStochVal">0.00</b></label>
+                <div class="mt-4">
+                    <label>🌌 Стохастика Пустых Регионов / Неактивных Ботов: <b id="vUnassStochVal" style="color:#38bdf8;">0.00</b></label>
                     <input type="range" id="vUnassignedStochastic" min="0" max="1" step="0.05" value="0.00">
                 </div>
 
-                <label class="mt-6">Живой Редактор Пулов Концептов по Регионам/Агентам (FCz=e0, AFz=e1, F3=e2, F4=e3):</label>
-                <select id="videoRegionSelect">
-                    <option value="FCZ" selected>[FCZ / Агент e0] — Быстрые действия (Blue-Lance / Turbine / Crown)</option>
-                    <option value="AFZ">[AFZ / Агент e1] — Макро-структура (Emerald-Vortex / Jade-Lotus / Sun)</option>
-                    <option value="F3">[F3 / Агент e2] — Геометрия и барьеры (Violet-Monolith / Mirror / Fortress)</option>
-                    <option value="F4">[F4 / Агент e3] — Морфология существа (Blue-Star / Glider / Crimson-Nova)</option>
-                    <option value="FPZ">[FPZ / Контекст арены] — Глобальная сцена мира</option>
-                    <option value="NEGATIVE">[NEGATIVE] — Исключаемые артефакты</option>
+                <div id="agentManagerHeader" class="row-between mt-6">
+                    <label class="m-0" style="color:#00ffc8; font-weight:bold;">🤖 Менеджер Агентов Мира (Активные / Неактивные):</label>
+                    <button type="button" class="btn btn-green" id="btnAddAgent" style="width:auto; padding:3px 8px; font-size:10px;">+ АГЕНТ</button>
+                </div>
+                <div id="agentManagerList" class="mt-4" style="display:flex; flex-direction:column; gap:4px;"></div>
+
+                <div class="row-between mt-6">
+                    <label class="m-0">Пул концептов (<b id="selectedAgentLabel" style="color:#fbbf24;">e0</b>):</label>
+                    <label class="m-0" style="display:inline-flex; align-items:center; gap:4px; cursor:pointer; color:#38bdf8;">
+                        <input type="checkbox" id="chkApplyAllAgents" style="width:13px; height:13px;"> Общий пул (все агенты)
+                    </label>
+                </div>
+                <select id="videoRegionSelect" style="display:none;">
+                    <option value="FCZ" selected>FCZ</option>
                 </select>
                 <div id="videoRegionConceptList" class="concept-container mt-4"></div>
                 <div class="input-row">
-                    <input type="text" id="newVideoRegionInput" placeholder="Добавить новый концепт/состояние в выбранного агента...">
-                    <button type="button" class="btn btn-green btn-fixed" id="btnAddVideoConcept">+ В АГЕНТА</button>
+                    <input type="text" id="newVideoRegionInput" placeholder="Добавить новый концепт выбранному агенту...">
+                    <button type="button" class="btn btn-green btn-fixed" id="btnAddVideoConcept">+ КОНЦЕПТ</button>
                 </div>
 
                 <div class="grid-4 mt-6">
@@ -358,11 +364,11 @@
                     </div>
                     <div>
                         <label>Шаги DiT:</label>
-                        <input type="number" id="vSteps" value="6" min="3" max="18" step="1">
+                        <input type="number" id="vSteps" value="8" min="3" max="18" step="1">
                     </div>
                     <div>
                         <label>CFG Контраст:</label>
-                        <input type="number" id="vCfgScale" value="3.2" min="1.2" max="5.5" step="0.2">
+                        <input type="number" id="vCfgScale" value="1.0" min="1.0" max="5.5" step="0.2">
                     </div>
                 </div>
 
